@@ -1,0 +1,5 @@
+# Discord bot framework
+discord.py>=2.3.2
+
+# Environment variable loading
+python-dotenv>=1.0.0
