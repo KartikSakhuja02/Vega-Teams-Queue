@@ -48,6 +48,15 @@ def _build_commands_embed() -> discord.Embed:
         inline=False,
     )
 
+    embed.add_field(
+        name="Private Help Tickets",
+        value=(
+            "`/help`\n"
+            "Open a private ticket for direct support from the admin team."
+        ),
+        inline=False,
+    )
+
     embed.set_footer(text="Vega Scrims — Do not delete this message.")
     return embed
 

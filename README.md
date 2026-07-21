@@ -11,6 +11,7 @@ Vega-Queue/
 ├── cogs/
 │   ├── __init__.py          # Marks cogs directory as a Python package
 │   ├── commands_info.py     # Pinned commands overview embed & updates
+│   ├── help_ticket.py       # /help private ticket creation, admin DMs, close button
 │   ├── profile.py           # /profile slash command (stats & dynamic rank)
 │   └── registration.py      # /register slash command, onboarding DMs & guides
 ├── database/
@@ -56,6 +57,10 @@ Encapsulates individual modular bot features.
 - **`profile.py`**:
   - `/profile [player]`: Ephemeral command showing registered details, ELO rating, matches played, overall K/D/A breakdown, calculated K/D ratio, and dynamic regional ranking.
   - Defaulting: Defaults to the calling user if no player parameter is specified.
+- **`help_ticket.py`**:
+  - `/help`: Creates a private ticket channel for the user and configured admins.
+  - Sends a minimal support embed with a close button inside the ticket channel.
+  - DMs each configured admin with the ticket channel mention so they can join immediately.
 - **`commands_info.py`**:
   - Posts and pins a persistent commands directory list embed in `COMMANDS_CHANNEL_ID`. Updates the embed dynamically on start-up.
 
@@ -121,3 +126,4 @@ To present a clean, aesthetic, and premium look, the following styling guideline
 2. **Cohesive Colors**: Embed messages must use deep indigo (`#5B4FCF`) to align with the brand color palette.
 3. **Ephemeral Responses**: Command responses must default to `ephemeral=True` to minimize server clutter.
 4. **Persistent Messages**: Onboarding channel messages (registration instructions, command list) must be kept clean, pinned, and edited in-place using cached database message IDs across restarts.
+5. **Private Support Tickets**: The `/help` command creates a private ticket channel for the user and configured admins, with a close button that removes the channel when the issue is resolved.
