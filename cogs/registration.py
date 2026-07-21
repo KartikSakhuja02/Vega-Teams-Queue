@@ -56,7 +56,8 @@ def _build_info_embed() -> discord.Embed:
     )
     embed.description = (
         "To participate in Vega Scrims you must first register a player profile "
-        "using the slash command below. Registration is free and takes under a minute."
+        "using the slash command below. Registration is free and takes under a minute.\n\n"
+        "A video example of how to register and use the command is provided below."
     )
     embed.add_field(
         name="Command",
