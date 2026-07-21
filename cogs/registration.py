@@ -66,7 +66,7 @@ def _build_info_embed() -> discord.Embed:
     embed.add_field(
         name="Parameters",
         value=(
-            "**ign** — Your exact in-game name (including tag, e.g. `PlayerName#TAG`).\n"
+            "**ign** — Your exact in-game name (eg. DarkWiz.Zr`).\n"
             "**region** — Select one of: `India` / `APAC` / `EMEA` / `Americas`."
         ),
         inline=False,
