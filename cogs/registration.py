@@ -38,7 +38,6 @@ def format_regional_time(dt: datetime, region: str) -> str:
 # ---------------------------------------------------------------------------
 
 REGISTRATION_CHANNEL_ID: int = int(os.environ.get("REGISTRATION_CHANNEL_ID", "0"))
-REGISTRATION_VIDEO_URL: str  = os.environ.get("REGISTRATION_VIDEO_URL", "").strip()
 
 # Deep indigo — consistent brand colour, no harsh primaries.
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
@@ -57,7 +56,7 @@ def _build_info_embed() -> discord.Embed:
     embed.description = (
         "To participate in Vega Scrims you must first register a player profile "
         "using the slash command below. Registration is free and takes under a minute.\n\n"
-        "A video example of how to register and use the command is provided below."
+        "A video example of how to register and use the command is provided in this channel."
     )
     embed.add_field(
         name="Command",
@@ -113,7 +112,6 @@ class RegistrationCog(commands.Cog, name="Registration"):
         """
         Post the registration info card to the configured channel, or edit
         the existing one if we already sent it in a previous session.
-        Uses REGISTRATION_VIDEO_URL to display a playable inline video.
         """
         if not REGISTRATION_CHANNEL_ID:
             log.warning(
@@ -129,7 +127,6 @@ class RegistrationCog(commands.Cog, name="Registration"):
             return
 
         embed = _build_info_embed()
-        video_content: Optional[str] = REGISTRATION_VIDEO_URL or None
 
         # Check whether we already have a stored message ID in the database.
         stored_id = await db.get_config("registration_message_id")
@@ -137,8 +134,8 @@ class RegistrationCog(commands.Cog, name="Registration"):
             try:
                 existing_msg = await channel.fetch_message(int(stored_id))
                 
-                # Edit text content (video link) and embed. Pass attachments=[] to clear any old raw attachments
-                await existing_msg.edit(content=video_content, embed=embed, attachments=[])
+                # Edit and refresh embed. Pass content=None and attachments=[] to clear any old links/files
+                await existing_msg.edit(content=None, embed=embed, attachments=[])
                 log.info("Registration info message refreshed (ID: %s).", stored_id)
                 return
             except discord.NotFound:
@@ -147,7 +144,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
                 )
 
         # Send a fresh message and pin it.
-        msg = await channel.send(content=video_content, embed=embed)
+        msg = await channel.send(embed=embed)
 
         try:
             await msg.pin()
