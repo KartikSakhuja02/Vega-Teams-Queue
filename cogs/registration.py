@@ -5,6 +5,8 @@ Player registration cog — /register command and the persistent info message.
 
 import os
 import logging
+import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
@@ -14,6 +16,22 @@ from discord.ext import commands
 from database import db
 
 log = logging.getLogger(__name__)
+
+# Timezone offsets and display names for player regions
+REGION_TIMEZONES = {
+    "India": (timedelta(hours=5, minutes=30), "IST"),
+    "APAC": (timedelta(hours=8), "SGT"),
+    "EMEA": (timedelta(hours=1), "CET"),
+    "Americas": (timedelta(hours=-5), "EST")
+}
+
+def format_regional_time(dt: datetime, region: str) -> str:
+    """Format a datetime to the player's local timezone based on their region."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    offset, tz_name = REGION_TIMEZONES.get(region, (timedelta(hours=0), "UTC"))
+    local_dt = dt.astimezone(timezone(offset))
+    return local_dt.strftime(f"%Y-%m-%d %H:%M {tz_name}")
 
 # ---------------------------------------------------------------------------
 # Environment config
@@ -178,7 +196,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
         # Check if already registered.
         existing = await db.get_player(discord_id)
         if existing:
-            registered_at = existing["registered_at"].strftime("%Y-%m-%d %H:%M UTC")
+            registered_at = format_regional_time(existing["registered_at"], existing["region"])
             await interaction.followup.send(
                 "You are already registered.\n\n"
                 f"IGN        : {existing['ign']}\n"
@@ -206,7 +224,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
             )
             return
 
-        registered_at = player["registered_at"].strftime("%Y-%m-%d %H:%M UTC")
+        registered_at = format_regional_time(player["registered_at"], player["region"])
 
         # Ephemeral success reply in the channel.
         await interaction.followup.send(
@@ -217,8 +235,8 @@ class RegistrationCog(commands.Cog, name="Registration"):
             ephemeral=True,
         )
 
-        # Send a welcome DM.
-        await self._send_welcome_dm(interaction.user, player)
+        # Send welcome DM concurrently so the command interaction is finalized instantly.
+        asyncio.create_task(self._send_welcome_dm(interaction.user, player))
         log.info(
             "Player registered — discord_id=%d  ign=%s  region=%s",
             discord_id,
@@ -235,30 +253,46 @@ class RegistrationCog(commands.Cog, name="Registration"):
         user: discord.User,
         player: dict,
     ) -> None:
-        """Send a welcome DM to the newly registered player."""
-        registered_at = player["registered_at"].strftime("%Y-%m-%d %H:%M UTC")
-        separator = "-" * 44
+        """Send a welcome DM to the newly registered player using a professional embed design."""
+        registered_at = format_regional_time(player["registered_at"], player["region"])
 
-        dm_lines = [
-            "Welcome to Vega Scrims Queue.",
-            "",
-            "Your player profile has been registered successfully.",
-            "",
-            "Player Details",
-            separator,
-            f"Discord    : {user}",
-            f"IGN        : {player['ign']}",
-            f"Region     : {player['region']}",
-            f"Registered : {registered_at}",
-            "",
-            "You are now eligible to join a team and participate in scrims.",
-            "Keep an eye on the server for team recruitment announcements.",
-            "",
-            "- Vega Scrims Staff",
-        ]
+        # Construct a beautiful, professional, emoji-free embed for the DM
+        embed = discord.Embed(
+            title="Vega Scrims - Registration Confirmed",
+            description="Your player profile has been registered successfully.",
+            colour=EMBED_COLOUR,
+        )
+
+        embed.add_field(
+            name="Discord Account",
+            value=str(user),
+            inline=True,
+        )
+        embed.add_field(
+            name="In-Game Name",
+            value=player["ign"],
+            inline=True,
+        )
+        embed.add_field(
+            name="Region",
+            value=player["region"],
+            inline=True,
+        )
+        embed.add_field(
+            name="Registered Time",
+            value=registered_at,
+            inline=False,
+        )
+
+        embed.description += (
+            "\n\nYou are now eligible to join a team and participate in scrims. "
+            "Please keep an eye on the server channels for team registration guidelines and queue access announcements."
+        )
+
+        embed.set_footer(text="Vega Scrims Staff")
 
         try:
-            await user.send("\n".join(dm_lines))
+            await user.send(embed=embed)
         except discord.Forbidden:
             # User has DMs disabled — not a fatal error.
             log.warning(
