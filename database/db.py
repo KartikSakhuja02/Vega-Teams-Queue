@@ -1,0 +1,128 @@
+"""
+database/db.py
+Async PostgreSQL connection pool and CRUD helpers for the Vega Queue Bot.
+"""
+
+import os
+import logging
+from typing import Optional
+
+import asyncpg
+
+log = logging.getLogger(__name__)
+
+# Module-level pool — initialised once at startup, reused across the bot's lifetime.
+_pool: Optional[asyncpg.Pool] = None
+
+
+# =============================================================================
+# Pool lifecycle
+# =============================================================================
+
+async def init_db() -> None:
+    """Create the async connection pool.  Must be called once before any query."""
+    global _pool
+    dsn = os.environ["DATABASE_URL"]
+    _pool = await asyncpg.create_pool(dsn, min_size=2, max_size=10)
+    log.info("Database connection pool created.")
+
+
+async def close_db() -> None:
+    """Gracefully close all connections in the pool."""
+    global _pool
+    if _pool:
+        await _pool.close()
+        _pool = None
+        log.info("Database connection pool closed.")
+
+
+def get_pool() -> asyncpg.Pool:
+    """Return the active pool, raising if init_db() has not been called."""
+    if _pool is None:
+        raise RuntimeError("Database pool not initialised — call init_db() first.")
+    return _pool
+
+
+# =============================================================================
+# bot_config helpers
+# =============================================================================
+
+async def get_config(key: str) -> Optional[str]:
+    """Fetch a single config value by key.  Returns None if not found."""
+    row = await get_pool().fetchrow(
+        "SELECT value FROM bot_config WHERE key = $1",
+        key,
+    )
+    return row["value"] if row else None
+
+
+async def set_config(key: str, value: str) -> None:
+    """Insert or overwrite a config value."""
+    await get_pool().execute(
+        """
+        INSERT INTO bot_config (key, value)
+        VALUES ($1, $2)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """,
+        key,
+        value,
+    )
+
+
+# =============================================================================
+# Player helpers
+# =============================================================================
+
+async def register_player(
+    discord_id: int,
+    discord_username: str,
+    ign: str,
+    region: str,
+) -> Optional[dict]:
+    """
+    Insert a new player row.
+
+    Returns a dict of the inserted row on success.
+    Returns None if the player is already registered (UNIQUE violation).
+    """
+    try:
+        row = await get_pool().fetchrow(
+            """
+            INSERT INTO players (discord_id, discord_username, ign, region)
+            VALUES ($1, $2, $3, $4::region_enum)
+            RETURNING *
+            """,
+            discord_id,
+            discord_username,
+            ign,
+            region,
+        )
+        return dict(row) if row else None
+    except asyncpg.UniqueViolationError:
+        return None
+
+
+async def get_player(discord_id: int) -> Optional[dict]:
+    """Fetch a player record by Discord snowflake ID."""
+    row = await get_pool().fetchrow(
+        "SELECT * FROM players WHERE discord_id = $1",
+        discord_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_all_players(region: Optional[str] = None) -> list:
+    """
+    Fetch all active players, optionally filtered by region.
+    Returns a list of dicts ordered by registration date ascending.
+    """
+    if region:
+        rows = await get_pool().fetch(
+            "SELECT * FROM players WHERE is_active = TRUE AND region = $1::region_enum ORDER BY registered_at ASC",
+            region,
+        )
+    else:
+        rows = await get_pool().fetch(
+            "SELECT * FROM players WHERE is_active = TRUE ORDER BY registered_at ASC",
+        )
+    return [dict(r) for r in rows]
