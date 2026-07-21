@@ -112,6 +112,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
         """
         Post the registration info card to the configured channel, or edit
         the existing one if we already sent it in a previous session.
+        Uses the local player_registration.mp4 file if present.
         """
         if not REGISTRATION_CHANNEL_ID:
             log.warning(
@@ -127,7 +128,10 @@ class RegistrationCog(commands.Cog, name="Registration"):
             return
 
         embed = _build_info_embed()
-        # If a video URL is set, include it as message content so Discord auto-previews it.
+        
+        # Check if local video file exists, otherwise fall back to URL
+        video_filename = "player_registration.mp4"
+        local_video_exists = os.path.exists(video_filename)
         video_content: Optional[str] = REGISTRATION_VIDEO_URL or None
 
         # Check whether we already have a stored message ID in the database.
@@ -135,7 +139,15 @@ class RegistrationCog(commands.Cog, name="Registration"):
         if stored_id:
             try:
                 existing_msg = await channel.fetch_message(int(stored_id))
-                await existing_msg.edit(content=video_content, embed=embed)
+                
+                # If there's already an attachment or if we don't have a local video, just edit text/embed/content
+                if existing_msg.attachments or not local_video_exists:
+                    await existing_msg.edit(content=video_content, embed=embed)
+                else:
+                    # Upload the local video file and update the message
+                    discord_file = discord.File(video_filename)
+                    await existing_msg.edit(content=None, embed=embed, attachments=[discord_file])
+                
                 log.info("Registration info message refreshed (ID: %s).", stored_id)
                 return
             except discord.NotFound:
@@ -144,7 +156,12 @@ class RegistrationCog(commands.Cog, name="Registration"):
                 )
 
         # Send a fresh message and pin it.
-        msg = await channel.send(content=video_content, embed=embed)
+        if local_video_exists:
+            discord_file = discord.File(video_filename)
+            msg = await channel.send(embed=embed, file=discord_file)
+        else:
+            msg = await channel.send(content=video_content, embed=embed)
+
         try:
             await msg.pin()
         except discord.Forbidden:
