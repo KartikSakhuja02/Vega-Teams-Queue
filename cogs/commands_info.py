@@ -1,0 +1,114 @@
+"""
+cogs/commands_info.py
+Commands information cog — posts and updates the persistent commands list embed.
+"""
+
+import os
+import logging
+
+import discord
+from discord.ext import commands
+
+from database import db
+
+log = logging.getLogger(__name__)
+
+COMMANDS_CHANNEL_ID: int = int(os.environ.get("COMMANDS_CHANNEL_ID", "0"))
+EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
+
+
+def _build_commands_embed() -> discord.Embed:
+    """Build the commands overview embed card."""
+    embed = discord.Embed(
+        title="Vega Scrims — Bot Commands",
+        colour=EMBED_COLOUR,
+    )
+    embed.description = (
+        "Here is the list of available commands for players. All command interactions "
+        "respond ephemerally (visible only to you) to keep the channels clean and organized."
+    )
+    
+    embed.add_field(
+        name="Player Registration",
+        value=(
+            "`/register ign:<ign> region:<region>`\n"
+            "Register your player profile. Can only be used in the registration channel."
+        ),
+        inline=False,
+    )
+    
+    embed.add_field(
+        name="Player Profile",
+        value=(
+            "`/profile`\n"
+            "View your own stats, ELO, overall K/D/A, matches played, and regional ranking.\n\n"
+            "`/profile player:<@user>`\n"
+            "View the profile and statistics of another registered player."
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(text="Vega Scrims — Do not delete this message.")
+    return embed
+
+
+class CommandsInfoCog(commands.Cog, name="CommandsInfo"):
+    """Handles posting and syncing the bot commands overview card."""
+
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        self._info_message_posted: bool = False
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        if self._info_message_posted:
+            return
+        self._info_message_posted = True
+        await self._ensure_info_message()
+
+    async def _ensure_info_message(self) -> None:
+        """
+        Post the commands list embed to the configured commands channel,
+        or update the existing one if we already sent it.
+        """
+        if not COMMANDS_CHANNEL_ID:
+            log.warning(
+                "COMMANDS_CHANNEL_ID is not configured — skipping commands list."
+            )
+            return
+
+        channel = self.bot.get_channel(COMMANDS_CHANNEL_ID)
+        if not isinstance(channel, discord.TextChannel):
+            log.error(
+                "Channel %d not found or is not a TextChannel.", COMMANDS_CHANNEL_ID
+            )
+            return
+
+        embed = _build_commands_embed()
+
+        # Check for existing message ID
+        stored_id = await db.get_config("commands_info_message_id")
+        if stored_id:
+            try:
+                existing_msg = await channel.fetch_message(int(stored_id))
+                await existing_msg.edit(embed=embed)
+                log.info("Commands list message refreshed (ID: %s).", stored_id)
+                return
+            except discord.NotFound:
+                log.warning(
+                    "Stored commands message ID %s was deleted — sending new one.", stored_id
+                )
+
+        # Post new message and pin it
+        msg = await channel.send(embed=embed)
+        try:
+            await msg.pin()
+        except discord.Forbidden:
+            log.warning("Missing Manage Messages permission — could not pin commands list.")
+
+        await db.set_config("commands_info_message_id", str(msg.id))
+        log.info("Commands list message sent and pinned (ID: %d).", msg.id)
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(CommandsInfoCog(bot))

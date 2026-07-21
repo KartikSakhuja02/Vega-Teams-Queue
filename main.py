@@ -59,6 +59,10 @@ class VegaBot(commands.Bot):
         # 2. Load feature cogs.
         await self.load_extension("cogs.registration")
         log.info("Loaded cog: cogs.registration")
+        await self.load_extension("cogs.profile")
+        log.info("Loaded cog: cogs.profile")
+        await self.load_extension("cogs.commands_info")
+        log.info("Loaded cog: cogs.commands_info")
 
         # 3. Sync slash commands.
         if GUILD:

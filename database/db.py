@@ -126,3 +126,35 @@ async def get_all_players(region: Optional[str] = None) -> list:
             "SELECT * FROM players WHERE is_active = TRUE ORDER BY registered_at ASC",
         )
     return [dict(r) for r in rows]
+
+
+async def get_player_profile(discord_id: int) -> Optional[dict]:
+    """
+    Fetch a player profile including calculated regional ranking.
+    Regional ranking partitions by the player's region and ranks by ELO descending.
+    """
+    row = await get_pool().fetchrow(
+        """
+        WITH ranked_players AS (
+            SELECT 
+                id,
+                discord_id,
+                discord_username,
+                ign,
+                region,
+                registered_at,
+                is_active,
+                elo,
+                kills,
+                deaths,
+                assists,
+                matches_played,
+                ROW_NUMBER() OVER (PARTITION BY region ORDER BY elo DESC) as regional_rank
+            FROM players
+            WHERE is_active = TRUE
+        )
+        SELECT * FROM ranked_players WHERE discord_id = $1
+        """,
+        discord_id,
+    )
+    return dict(row) if row else None

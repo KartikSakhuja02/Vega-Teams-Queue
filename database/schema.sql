@@ -54,9 +54,26 @@ CREATE TABLE IF NOT EXISTS players (
     ign              TEXT         NOT NULL,
     region           region_enum  NOT NULL,
     registered_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    is_active        BOOLEAN      NOT NULL DEFAULT TRUE
+    is_active        BOOLEAN      NOT NULL DEFAULT TRUE,
+    elo              INT          NOT NULL DEFAULT 1000,
+    kills            INT          NOT NULL DEFAULT 0,
+    deaths           INT          NOT NULL DEFAULT 0,
+    assists          INT          NOT NULL DEFAULT 0,
+    matches_played   INT          NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_players_discord_id ON players (discord_id);
 CREATE INDEX IF NOT EXISTS idx_players_region      ON players (region);
 CREATE INDEX IF NOT EXISTS idx_players_registered  ON players (registered_at DESC);
+CREATE INDEX IF NOT EXISTS idx_players_elo         ON players (elo DESC);
+
+
+-- ---------------------------------------------------------------------------
+-- Migration support for existing installations
+-- ---------------------------------------------------------------------------
+ALTER TABLE players ADD COLUMN IF NOT EXISTS elo INT NOT NULL DEFAULT 1000;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS kills INT NOT NULL DEFAULT 0;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS deaths INT NOT NULL DEFAULT 0;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS assists INT NOT NULL DEFAULT 0;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS matches_played INT NOT NULL DEFAULT 0;
+
