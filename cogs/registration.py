@@ -146,8 +146,19 @@ class RegistrationCog(commands.Cog, name="Registration"):
                     await existing_msg.edit(content=video_content, embed=embed)
                 else:
                     # Upload the local video file and update the message
-                    discord_file = discord.File(video_filename)
-                    await existing_msg.edit(content=None, embed=embed, attachments=[discord_file])
+                    try:
+                        discord_file = discord.File(video_filename)
+                        await existing_msg.edit(content=None, embed=embed, attachments=[discord_file])
+                    except discord.HTTPException as e:
+                        if e.status == 413:
+                            log.warning(
+                                "Local video file %s is too large for bot upload (limit is 10MB/25MB). "
+                                "Falling back to editing without attachment. Configure REGISTRATION_VIDEO_URL instead.",
+                                video_filename
+                            )
+                            await existing_msg.edit(content=video_content, embed=embed)
+                        else:
+                            raise
                 
                 log.info("Registration info message refreshed (ID: %s).", stored_id)
                 return
@@ -157,9 +168,21 @@ class RegistrationCog(commands.Cog, name="Registration"):
                 )
 
         # Send a fresh message and pin it.
+        msg = None
         if local_video_exists:
-            discord_file = discord.File(video_filename)
-            msg = await channel.send(embed=embed, file=discord_file)
+            try:
+                discord_file = discord.File(video_filename)
+                msg = await channel.send(embed=embed, file=discord_file)
+            except discord.HTTPException as e:
+                if e.status == 413:
+                    log.warning(
+                        "Local video file %s is too large for bot upload. "
+                        "Falling back to sending without attachment.",
+                        video_filename
+                    )
+                    msg = await channel.send(content=video_content, embed=embed)
+                else:
+                    raise
         else:
             msg = await channel.send(content=video_content, embed=embed)
 
