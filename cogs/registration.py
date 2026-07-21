@@ -85,6 +85,65 @@ def _build_info_embed() -> discord.Embed:
     return embed
 
 
+def _build_region_choices() -> list[app_commands.Choice[str]]:
+    return [
+        app_commands.Choice(name="India", value="India"),
+        app_commands.Choice(name="APAC", value="APAC"),
+        app_commands.Choice(name="EMEA", value="EMEA"),
+        app_commands.Choice(name="Americas", value="Americas"),
+    ]
+
+
+class RegistrationModal(discord.ui.Modal, title="Register Player Profile"):
+    ign = discord.ui.TextInput(
+        label="In-Game Name",
+        placeholder="Enter your exact IGN",
+        max_length=100,
+    )
+    region = discord.ui.TextInput(
+        label="Region",
+        placeholder="India, APAC, EMEA, or Americas",
+        max_length=20,
+    )
+
+    def __init__(self, cog: "RegistrationCog") -> None:
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog._register_player(
+            interaction=interaction,
+            ign=str(self.ign.value).strip(),
+            region_value=str(self.region.value).strip(),
+            source="modal",
+        )
+
+
+class RegistrationView(discord.ui.View):
+    def __init__(self, cog: "RegistrationCog") -> None:
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="Open Registration Form",
+        style=discord.ButtonStyle.primary,
+        custom_id="registration_open_form",
+    )
+    async def open_form_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if REGISTRATION_CHANNEL_ID and interaction.channel_id != REGISTRATION_CHANNEL_ID:
+            await interaction.response.send_message(
+                "This form is only available in the registration channel.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(RegistrationModal(self.cog))
+
+
 # ---------------------------------------------------------------------------
 # Cog
 # ---------------------------------------------------------------------------
@@ -144,7 +203,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
                 )
 
         # Send a fresh message and pin it.
-        msg = await channel.send(embed=embed)
+        msg = await channel.send(embed=embed, view=RegistrationView(self))
 
         try:
             await msg.pin()
@@ -179,6 +238,19 @@ class RegistrationCog(commands.Cog, name="Registration"):
         region: app_commands.Choice[str],
     ) -> None:
         """Register a Discord user as a Vega Scrims player."""
+        await self._register_player(
+            interaction=interaction,
+            ign=ign,
+            region_value=region.value,
+        )
+
+    async def _register_player(
+        self,
+        interaction: discord.Interaction,
+        ign: str,
+        region_value: str,
+    ) -> None:
+        """Shared registration flow for the slash command and modal."""
 
         # Enforce channel restriction.
         if REGISTRATION_CHANNEL_ID and interaction.channel_id != REGISTRATION_CHANNEL_ID:
@@ -189,7 +261,8 @@ class RegistrationCog(commands.Cog, name="Registration"):
             return
 
         # Defer so we have time for DB operations.
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
 
         discord_id = interaction.user.id
         discord_username = str(interaction.user)
@@ -213,7 +286,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
             discord_id=discord_id,
             discord_username=discord_username,
             ign=ign,
-            region=region.value,
+            region=region_value,
         )
 
         if player is None:
@@ -231,7 +304,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
         await interaction.followup.send(
             "Registration successful.\n\n"
             f"IGN        : {ign}\n"
-            f"Region     : {region.value}\n"
+            f"Region     : {player['region']}\n"
             f"Registered : {registered_at}",
             ephemeral=True,
         )
@@ -242,7 +315,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
             "Player registered — discord_id=%d  ign=%s  region=%s",
             discord_id,
             ign,
-            region.value,
+            player["region"],
         )
 
     # ------------------------------------------------------------------
