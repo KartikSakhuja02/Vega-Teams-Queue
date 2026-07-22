@@ -379,4 +379,6 @@ class RegistrationCog(commands.Cog, name="Registration"):
 # ---------------------------------------------------------------------------
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(RegistrationCog(bot))
+    cog = RegistrationCog(bot)
+    await bot.add_cog(cog)
+    bot.add_view(RegistrationView(cog))
