@@ -69,6 +69,48 @@ CREATE INDEX IF NOT EXISTS idx_players_elo         ON players (elo DESC);
 
 
 -- ---------------------------------------------------------------------------
+-- teams
+-- ---------------------------------------------------------------------------
+-- One row per created team.
+
+CREATE TABLE IF NOT EXISTS teams (
+    id                    BIGSERIAL    PRIMARY KEY,
+    captain_discord_id    BIGINT       NOT NULL UNIQUE,
+    captain_username      TEXT         NOT NULL,
+    captain_ign           TEXT         NOT NULL,
+    team_name             TEXT         NOT NULL,
+    team_name_key         TEXT         NOT NULL UNIQUE,
+    team_tag              TEXT         NOT NULL,
+    team_tag_key          TEXT         NOT NULL UNIQUE,
+    region                region_enum  NOT NULL,
+    team_logo_url         TEXT,
+    thread_id             BIGINT       NOT NULL UNIQUE,
+    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    is_active             BOOLEAN      NOT NULL DEFAULT TRUE
+);
+
+CREATE INDEX IF NOT EXISTS idx_teams_region ON teams (region);
+CREATE INDEX IF NOT EXISTS idx_teams_created ON teams (created_at DESC);
+
+
+-- ---------------------------------------------------------------------------
+-- team_setup_sessions
+-- ---------------------------------------------------------------------------
+-- Temporary setup state for the private team creation thread.
+
+CREATE TABLE IF NOT EXISTS team_setup_sessions (
+    thread_id            BIGINT       PRIMARY KEY,
+    captain_discord_id    BIGINT       NOT NULL UNIQUE,
+    captain_username      TEXT         NOT NULL,
+    captain_ign           TEXT         NOT NULL,
+    region                region_enum  NOT NULL,
+    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_setup_sessions_captain ON team_setup_sessions (captain_discord_id);
+
+
+-- ---------------------------------------------------------------------------
 -- Migration support for existing installations
 -- ---------------------------------------------------------------------------
 ALTER TABLE players ADD COLUMN IF NOT EXISTS elo INT NOT NULL DEFAULT 1000;

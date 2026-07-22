@@ -12,6 +12,7 @@ Vega-Queue/
 │   ├── __init__.py          # Marks cogs directory as a Python package
 │   ├── commands_info.py     # Pinned commands overview embed & updates
 │   ├── help_ticket.py       # /help private ticket creation, admin DMs, close button
+│   ├── team_creation.py     # /create_team private thread setup and persistent team panel
 │   ├── profile.py           # /profile slash command (stats & dynamic rank)
 │   └── registration.py      # /register slash command, onboarding DMs & guides
 ├── database/
@@ -42,11 +43,13 @@ Handles persistent storage. The database is a PostgreSQL instance (typically hos
 - **`schema.sql`**: Initialises tables and adds indexes. Includes:
   - `region_enum`: Custom ENUM containing `'India'`, `'APAC'`, `'EMEA'`, `'Americas'`.
   - `players` table: Stores registration details, ELO (default `1000`), matches played, overall K/D/A stats.
+  - `teams` table: Stores the finalized team record, captain, locked region, team tag, team name, logo URL, and private setup thread ID.
+  - `team_setup_sessions` table: Stores the in-progress private team setup thread state before the team is finalized.
   - `bot_config` table: Simple key-value store used to remember the pinned Discord message IDs so they can be modified/updated on bot restarts.
   - Upgrade script lines (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`) for backward compatibility.
 - **`db.py`**:
   - Uses `asyncpg.create_pool` to maintain an active pool of connections (pool size 2 to 10).
-  - Contains CRUD helpers: `register_player()`, `get_player()`, `get_player_profile()`, `get_all_players()`, and `get_config()`/`set_config()`.
+  - Contains CRUD helpers: `register_player()`, `get_player()`, `get_player_profile()`, `get_all_players()`, team setup helpers, team creation helpers, and `get_config()`/`set_config()`.
 
 ### `cogs/`
 Encapsulates individual modular bot features.
@@ -55,6 +58,11 @@ Encapsulates individual modular bot features.
   - `/register ign:<ign> region:<region>`: Channel-restricted command to register. Ephemerally replies on success.
   - Button flow: The registration panel includes a button that opens a region dropdown, then a modal for IGN, then runs the same registration logic.
   - Dispatches a welcome confirmation DM to the player in the background using `asyncio.create_task` to prevent blocking slash command execution times.
+- **`team_creation.py`**:
+  - `/create_team`: Creates a private setup thread for the captain and mod team.
+  - The team region is locked to the captain's registered player region.
+  - The setup thread asks for team name, team tag, and logo URL, then stores the team in the database.
+  - Posts and pins a persistent team creation panel in `TEAM_PANEL_CHANNEL_ID`.
 - **`profile.py`**:
   - `/profile [player]`: Ephemeral command showing registered details, ELO rating, matches played, overall K/D/A breakdown, calculated K/D ratio, and dynamic regional ranking.
   - Defaulting: Defaults to the calling user if no player parameter is specified.
@@ -129,6 +137,7 @@ To present a clean, aesthetic, and premium look, the following styling guideline
 4. **Persistent Messages**: Onboarding channel messages (registration instructions, command list) must be kept clean, pinned, and edited in-place using cached database message IDs across restarts.
 5. **Private Support Tickets**: The `/help` command creates a private ticket channel for the user and configured admins, with a close button that removes the channel when the issue is resolved.
 6. **Registration Button**: The registration panel includes a button that opens a region dropdown, then a modal for IGN. `/register` remains available for users who prefer the slash command.
+7. **Team Creation Panel**: The team panel includes a button that opens a private thread first, then a team details form. The captain's region is locked to their registered region.
 
 ---
 
@@ -262,6 +271,10 @@ To present a clean, aesthetic, and premium look, the following styling guideline
 3. **`/help`**
    * Spawns a private text ticket channel for assistance, pings administrators in DMs, and provides a direct close channel button.
 
-4. **`/ping`**
+4. **`/create_team`**
+  * Opens a private team setup thread for the captain and mod team, then asks for team name, team tag, and logo URL.
+  * The team region is locked to the captain's player region.
+
+5. **`/ping`**
    * Verifies connection delay between client WebSocket and Discord gateway.
 

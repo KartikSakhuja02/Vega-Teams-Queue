@@ -57,6 +57,15 @@ def _build_commands_embed() -> discord.Embed:
         inline=False,
     )
 
+    embed.add_field(
+        name="Team Creation",
+        value=(
+            "`/create_team`\n"
+            "Open a private team setup thread and submit your team details."
+        ),
+        inline=False,
+    )
+
     embed.set_footer(text="Vega Scrims — Do not delete this message.")
     return embed
 

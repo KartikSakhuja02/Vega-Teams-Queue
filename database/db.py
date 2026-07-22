@@ -158,3 +158,148 @@ async def get_player_profile(discord_id: int) -> Optional[dict]:
         discord_id,
     )
     return dict(row) if row else None
+
+
+# =============================================================================
+# Team helpers
+# =============================================================================
+
+async def get_team_by_captain(captain_discord_id: int) -> Optional[dict]:
+    """Fetch a team by the captain's Discord ID."""
+    row = await get_pool().fetchrow(
+        "SELECT * FROM teams WHERE captain_discord_id = $1 AND is_active = TRUE",
+        captain_discord_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_team_by_name_key(team_name_key: str) -> Optional[dict]:
+    """Fetch a team by its normalized name key."""
+    row = await get_pool().fetchrow(
+        "SELECT * FROM teams WHERE team_name_key = $1 AND is_active = TRUE",
+        team_name_key,
+    )
+    return dict(row) if row else None
+
+
+async def get_team_by_tag_key(team_tag_key: str) -> Optional[dict]:
+    """Fetch a team by its normalized tag key."""
+    row = await get_pool().fetchrow(
+        "SELECT * FROM teams WHERE team_tag_key = $1 AND is_active = TRUE",
+        team_tag_key,
+    )
+    return dict(row) if row else None
+
+
+async def get_team_by_thread_id(thread_id: int) -> Optional[dict]:
+    """Fetch a team by its private setup thread ID."""
+    row = await get_pool().fetchrow(
+        "SELECT * FROM teams WHERE thread_id = $1 AND is_active = TRUE",
+        thread_id,
+    )
+    return dict(row) if row else None
+
+
+async def create_team(
+    captain_discord_id: int,
+    captain_username: str,
+    captain_ign: str,
+    team_name: str,
+    team_name_key: str,
+    team_tag: str,
+    team_tag_key: str,
+    region: str,
+    team_logo_url: Optional[str],
+    thread_id: int,
+) -> Optional[dict]:
+    """Insert a new team row and return the created record."""
+    try:
+        row = await get_pool().fetchrow(
+            """
+            INSERT INTO teams (
+                captain_discord_id,
+                captain_username,
+                captain_ign,
+                team_name,
+                team_name_key,
+                team_tag,
+                team_tag_key,
+                region,
+                team_logo_url,
+                thread_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::region_enum, $9, $10)
+            RETURNING *
+            """,
+            captain_discord_id,
+            captain_username,
+            captain_ign,
+            team_name,
+            team_name_key,
+            team_tag,
+            team_tag_key,
+            region,
+            team_logo_url,
+            thread_id,
+        )
+        return dict(row) if row else None
+    except asyncpg.UniqueViolationError:
+        return None
+
+
+async def create_team_setup_session(
+    thread_id: int,
+    captain_discord_id: int,
+    captain_username: str,
+    captain_ign: str,
+    region: str,
+) -> Optional[dict]:
+    """Insert a new team setup session."""
+    try:
+        row = await get_pool().fetchrow(
+            """
+            INSERT INTO team_setup_sessions (
+                thread_id,
+                captain_discord_id,
+                captain_username,
+                captain_ign,
+                region
+            )
+            VALUES ($1, $2, $3, $4, $5::region_enum)
+            RETURNING *
+            """,
+            thread_id,
+            captain_discord_id,
+            captain_username,
+            captain_ign,
+            region,
+        )
+        return dict(row) if row else None
+    except asyncpg.UniqueViolationError:
+        return None
+
+
+async def get_team_setup_session_by_thread_id(thread_id: int) -> Optional[dict]:
+    """Fetch a team setup session by the thread ID."""
+    row = await get_pool().fetchrow(
+        "SELECT * FROM team_setup_sessions WHERE thread_id = $1",
+        thread_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_team_setup_session_by_captain(captain_discord_id: int) -> Optional[dict]:
+    """Fetch a team setup session by captain Discord ID."""
+    row = await get_pool().fetchrow(
+        "SELECT * FROM team_setup_sessions WHERE captain_discord_id = $1",
+        captain_discord_id,
+    )
+    return dict(row) if row else None
+
+
+async def delete_team_setup_session(thread_id: int) -> None:
+    """Delete a setup session once the team has been created."""
+    await get_pool().execute(
+        "DELETE FROM team_setup_sessions WHERE thread_id = $1",
+        thread_id,
+    )
