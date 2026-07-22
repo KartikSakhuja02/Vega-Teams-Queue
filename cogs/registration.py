@@ -64,7 +64,7 @@ def _build_info_embed() -> discord.Embed:
             "`/register ign:<your_ign> region:<region>`\n"
             "Use the slash command in this channel.\n\n"
             "Open Registration Form button\n"
-            "Use the button below to open a short modal form."
+            "Use the button below to choose your region from a dropdown, then enter your IGN."
         ),
         inline=False,
     )
@@ -106,29 +106,53 @@ def _build_region_choices() -> list[app_commands.Choice[str]]:
     ]
 
 
+def _build_region_options() -> list[discord.SelectOption]:
+    return [
+        discord.SelectOption(label="India", value="India", description="India region"),
+        discord.SelectOption(label="APAC", value="APAC", description="APAC region"),
+        discord.SelectOption(label="EMEA", value="EMEA", description="EMEA region"),
+        discord.SelectOption(label="Americas", value="Americas", description="Americas region"),
+    ]
+
+
 class RegistrationModal(discord.ui.Modal, title="Register Player Profile"):
     ign = discord.ui.TextInput(
         label="In-Game Name",
         placeholder="Enter your exact IGN",
         max_length=100,
     )
-    region = discord.ui.TextInput(
-        label="Region",
-        placeholder="India, APAC, EMEA, or Americas",
-        max_length=20,
-    )
-
-    def __init__(self, cog: "RegistrationCog") -> None:
+    def __init__(self, cog: "RegistrationCog", region_value: str) -> None:
         super().__init__()
         self.cog = cog
+        self.region_value = region_value
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.cog._register_player(
             interaction=interaction,
             ign=str(self.ign.value).strip(),
-            region_value=str(self.region.value).strip(),
-            source="modal",
+            region_value=self.region_value,
         )
+
+
+class RegistrationRegionSelect(discord.ui.Select):
+    def __init__(self, cog: "RegistrationCog") -> None:
+        super().__init__(
+            placeholder="Choose your region",
+            min_values=1,
+            max_values=1,
+            options=_build_region_options(),
+        )
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        region_value = self.values[0]
+        await interaction.response.send_modal(RegistrationModal(self.cog, region_value))
+
+
+class RegistrationRegionView(discord.ui.View):
+    def __init__(self, cog: "RegistrationCog") -> None:
+        super().__init__(timeout=180)
+        self.add_item(RegistrationRegionSelect(cog))
 
 
 class RegistrationView(discord.ui.View):
@@ -153,7 +177,11 @@ class RegistrationView(discord.ui.View):
             )
             return
 
-        await interaction.response.send_modal(RegistrationModal(self.cog))
+        await interaction.response.send_message(
+            "Select your region to continue with registration.",
+            view=RegistrationRegionView(self.cog),
+            ephemeral=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +289,6 @@ class RegistrationCog(commands.Cog, name="Registration"):
         interaction: discord.Interaction,
         ign: str,
         region_value: str,
-        source: str = "command",
     ) -> None:
         """Shared registration flow for the slash command and modal."""
 

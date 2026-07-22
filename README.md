@@ -53,7 +53,7 @@ Encapsulates individual modular bot features.
 - **`registration.py`**:
   - Posts and pins a persistent registration guide embed in `REGISTRATION_CHANNEL_ID`. If the bot restarts, it fetches and edits the existing message to avoid spamming.
   - `/register ign:<ign> region:<region>`: Channel-restricted command to register. Ephemerally replies on success.
-  - Button flow: The registration panel includes a button that opens a modal for IGN and region, then runs the same registration logic.
+  - Button flow: The registration panel includes a button that opens a region dropdown, then a modal for IGN, then runs the same registration logic.
   - Dispatches a welcome confirmation DM to the player in the background using `asyncio.create_task` to prevent blocking slash command execution times.
 - **`profile.py`**:
   - `/profile [player]`: Ephemeral command showing registered details, ELO rating, matches played, overall K/D/A breakdown, calculated K/D ratio, and dynamic regional ranking.
@@ -128,7 +128,7 @@ To present a clean, aesthetic, and premium look, the following styling guideline
 3. **Ephemeral Responses**: Command responses must default to `ephemeral=True` to minimize server clutter.
 4. **Persistent Messages**: Onboarding channel messages (registration instructions, command list) must be kept clean, pinned, and edited in-place using cached database message IDs across restarts.
 5. **Private Support Tickets**: The `/help` command creates a private ticket channel for the user and configured admins, with a close button that removes the channel when the issue is resolved.
-6. **Registration Button**: The registration panel includes a button that opens a modal, but `/register` remains available for users who prefer the slash command.
+6. **Registration Button**: The registration panel includes a button that opens a region dropdown, then a modal for IGN. `/register` remains available for users who prefer the slash command.
 
 ---
 
