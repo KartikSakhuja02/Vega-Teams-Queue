@@ -261,6 +261,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
         interaction: discord.Interaction,
         ign: str,
         region_value: str,
+        source: str = "command",
     ) -> None:
         """Shared registration flow for the slash command and modal."""
 
