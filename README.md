@@ -129,3 +129,139 @@ To present a clean, aesthetic, and premium look, the following styling guideline
 4. **Persistent Messages**: Onboarding channel messages (registration instructions, command list) must be kept clean, pinned, and edited in-place using cached database message IDs across restarts.
 5. **Private Support Tickets**: The `/help` command creates a private ticket channel for the user and configured admins, with a close button that removes the channel when the issue is resolved.
 6. **Registration Button**: The registration panel includes a button that opens a modal, but `/register` remains available for users who prefer the slash command.
+
+---
+
+## 6. DB, System, and Deployment Commands
+
+### Database Administration (PostgreSQL)
+
+1. **Log in as PostgreSQL Superuser:**
+   ```bash
+   sudo -u postgres psql
+   ```
+
+2. **Initialize Database and Roles:**
+   ```sql
+   -- Wrap VEGA-QUEUES in double quotes due to the hyphen character
+   CREATE USER "VEGA-QUEUES" WITH PASSWORD 'your_strong_password';
+   CREATE DATABASE "Vega_Queue_System_New" OWNER "VEGA-QUEUES";
+   GRANT ALL PRIVILEGES ON DATABASE "Vega_Queue_System_New" TO "VEGA-QUEUES";
+   \q
+   ```
+
+3. **Change Role Password:**
+   ```sql
+   ALTER USER "VEGA-QUEUES" WITH PASSWORD 'new_password';
+   ```
+
+4. **Initialize / Upgrade Database Schema:**
+   ```bash
+   psql -U "VEGA-QUEUES" -d "Vega_Queue_System_New" -f database/schema.sql
+   ```
+
+5. **List / Verify Database Tables:**
+   ```bash
+   psql -U "VEGA-QUEUES" -d "Vega_Queue_System_New" -c "\dt"
+   ```
+
+6. **Useful Administrative Queries:**
+   * View all registered players:
+     ```sql
+     SELECT id, discord_username, ign, region, elo, matches_played FROM players;
+     ```
+   * Reset persistent message cache (forces bot to re-post rather than edit pinned embeds):
+     ```sql
+     DELETE FROM bot_config WHERE key = 'registration_message_id';
+     DELETE FROM bot_config WHERE key = 'commands_info_message_id';
+     ```
+
+---
+
+### Bot Execution & Deployment
+
+1. **Environment Setup & Initialization:**
+   ```bash
+   # Initialize and activate Python virtual environment
+   python -m venv venv
+   source venv/bin/activate
+
+   # Install required packages
+   pip install -r requirements.txt
+   ```
+
+2. **Run Bot Manually:**
+   ```bash
+   python main.py
+   ```
+
+3. **systemd Daemon Service Setup:**
+   Create a daemon config file at `/etc/systemd/system/discordbot.service`:
+   ```ini
+   [Unit]
+   Description=Vega Queue Discord Bot
+   After=network.target postgresql.service
+
+   [Service]
+   Type=simple
+   User=kartiksakhuja02
+   WorkingDirectory=/home/kartiksakhuja02/Documents/VEGAQueueingSystem
+   ExecStart=/home/kartiksakhuja02/Documents/VEGAQueueingSystem/venv/bin/python main.py
+   Restart=on-failure
+   RestartSec=10
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+4. **Managing the systemd Daemon:**
+   * Reload configuration profiles:
+     ```bash
+     sudo systemctl daemon-reload
+     ```
+   * Enable the daemon to automatically start on boot:
+     ```bash
+     sudo systemctl enable discordbot.service
+     ```
+   * Start the bot:
+     ```bash
+     sudo systemctl start discordbot.service
+     ```
+   * Restart the bot:
+     ```bash
+     sudo systemctl restart discordbot.service
+     ```
+   * Stop the bot:
+     ```bash
+     sudo systemctl stop discordbot.service
+     ```
+   * Query status:
+     ```bash
+     sudo systemctl status discordbot.service
+     ```
+   * Trace systemd logs in real time:
+     ```bash
+     sudo journalctl -f -u discordbot.service
+     ```
+
+---
+
+### Discord Application Commands (Slash Commands)
+
+1. **`/register [ign] [region]`**
+   * Registers a player profile into the database system.
+   * **Parameters**:
+     * `ign`: Exact in-game name (e.g. `DarkWiz#Zr`).
+     * `region`: One of `India`, `APAC`, `EMEA`, `Americas`.
+
+2. **`/profile [player]`**
+   * Retrieves player stats (ELO, dynamic regional rank, matches played, total K/D/A, and K/D ratio). Replies ephemerally.
+   * **Parameters**:
+     * `player` (optional): Selects another member to view. Defaults to self.
+
+3. **`/help`**
+   * Spawns a private text ticket channel for assistance, pings administrators in DMs, and provides a direct close channel button.
+
+4. **`/ping`**
+   * Verifies connection delay between client WebSocket and Discord gateway.
+
