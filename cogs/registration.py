@@ -55,12 +55,24 @@ def _build_info_embed() -> discord.Embed:
     )
     embed.description = (
         "To participate in Vega Scrims you must first register a player profile "
-        "using the slash command below. Registration is free and takes under a minute.\n\n"
-        "A video example of how to register and use the command is provided in this channel."
+        "using one of the two methods below. Registration is free and takes under a minute.\n\n"
+        "Two videos are attached below to show both registration flows."
     )
     embed.add_field(
-        name="Command",
-        value="`/register ign:<your_ign> region:<region>`",
+        name="Registration Methods",
+        value=(
+            "`/register ign:<your_ign> region:<region>`\n"
+            "Use the slash command in this channel.\n\n"
+            "Open Registration Form button\n"
+            "Use the button below to open a short modal form."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Videos",
+        value=(
+            "Both registration videos are attached below this message."
+        ),
         inline=False,
     )
     embed.add_field(
