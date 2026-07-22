@@ -280,20 +280,6 @@ class RegistrationCog(commands.Cog, name="Registration"):
         discord_id = interaction.user.id
         discord_username = str(interaction.user)
 
-        # Check if already registered.
-        existing = await db.get_player(discord_id)
-        if existing:
-            registered_at = format_regional_time(existing["registered_at"], existing["region"])
-            await interaction.followup.send(
-                "You are already registered.\n\n"
-                f"IGN        : {existing['ign']}\n"
-                f"Region     : {existing['region']}\n"
-                f"Registered : {registered_at}\n\n"
-                "Contact an admin if you need to update your details.",
-                ephemeral=True,
-            )
-            return
-
         # Insert the player.
         player = await db.register_player(
             discord_id=discord_id,
@@ -304,9 +290,21 @@ class RegistrationCog(commands.Cog, name="Registration"):
 
         if player is None:
             # UniqueViolation — edge case (race condition or stale cache).
+            existing = await db.get_player(discord_id)
+            if existing:
+                registered_at = format_regional_time(existing["registered_at"], existing["region"])
+                await interaction.followup.send(
+                    "You are already registered.\n\n"
+                    f"IGN        : {existing['ign']}\n"
+                    f"Region     : {existing['region']}\n"
+                    f"Registered : {registered_at}\n\n"
+                    "Contact an admin if you need to update your details.",
+                    ephemeral=True,
+                )
+                return
+
             await interaction.followup.send(
-                "Registration could not be completed. "
-                "You may already be registered. Please contact an admin.",
+                "Registration could not be completed. Please contact an admin.",
                 ephemeral=True,
             )
             return
