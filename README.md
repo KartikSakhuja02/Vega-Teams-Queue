@@ -60,8 +60,8 @@ Encapsulates individual modular bot features.
   - Dispatches a welcome confirmation DM to the player in the background using `asyncio.create_task` to prevent blocking slash command execution times.
 - **`team_creation.py`**:
   - `/create_team`: Creates a private setup thread for the captain and mod team.
-  - The team region is locked to the captain's registered player region.
-  - The setup thread asks for team name, team tag, and logo URL, then stores the team in the database.
+  - The team region is locked to the captain's registered region.
+  - The setup thread collects team name and tag via a modal, prompts for a team logo photo upload, saves the logo file locally on the Raspberry Pi, and stores the team record.
   - Posts and pins a persistent team creation panel in `TEAM_PANEL_CHANNEL_ID`.
 - **`profile.py`**:
   - `/profile [player]`: Ephemeral command showing registered details, ELO rating, matches played, overall K/D/A breakdown, calculated K/D ratio, and dynamic regional ranking.
@@ -272,8 +272,8 @@ To present a clean, aesthetic, and premium look, the following styling guideline
    * Spawns a private text ticket channel for assistance, pings administrators in DMs, and provides a direct close channel button.
 
 4. **`/create_team`**
-  * Opens a private team setup thread for the captain and mod team, then asks for team name, team tag, and logo URL.
-  * The team region is locked to the captain's player region.
+   * Opens a private team setup thread for the captain and mod team, collects team name and tag via a modal, and prompts the captain to upload a logo photo to save on the Raspberry Pi.
+   * The team region is locked to the captain's registered player region.
 
 5. **`/ping`**
    * Verifies connection delay between client WebSocket and Discord gateway.
