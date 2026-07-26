@@ -217,6 +217,22 @@ async def get_player_team_membership(discord_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def clear_team_members(team_id: int) -> list[dict]:
+    """
+    Remove all players from a team and return their records.
+    Used during reactivation so old members can be notified to ask for reinvites.
+    """
+    rows = await get_pool().fetch(
+        """
+        DELETE FROM team_members
+        WHERE team_id = $1
+        RETURNING *
+        """,
+        team_id,
+    )
+    return [dict(r) for r in rows]
+
+
 # =============================================================================
 # Team helpers
 # =============================================================================

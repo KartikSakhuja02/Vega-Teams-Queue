@@ -337,6 +337,10 @@ class LogoResumeView(discord.ui.View):
             )
             return
         await db.delete_team_setup_session(self.thread.id)
+        
+        # Clear previous members and notify them to ask for reinvites
+        asyncio.create_task(self.cog._notify_reactivated_members(team))
+        
         await self.thread.send(embed=_build_final_embed(team))
         await self.thread.send(
             f"Team **{team['team_name']}** ({team['team_tag']}) has been reactivated. "
@@ -735,6 +739,9 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
                     team_logo_path=filepath,
                     thread_id=thread.id,
                 )
+                if team is not None:
+                    # Clear previous members and notify them to ask for reinvites
+                    asyncio.create_task(self._notify_reactivated_members(team))
             else:
                 team = await db.create_team(
                     captain_discord_id=session["captain_discord_id"],
@@ -1097,6 +1104,10 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
                 await thread.send("Could not reactivate the team. Contact an admin.")
                 return
             await db.delete_team_setup_session(thread.id)
+            
+            # Clear previous members and notify them to ask for reinvites
+            asyncio.create_task(self._notify_reactivated_members(team))
+            
             await thread.send(embed=_build_final_embed(team))
             await thread.send(
                 f"Team **{team['team_name']}** ({team['team_tag']}) has been reactivated. "
@@ -1126,6 +1137,19 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
                 await db.delete_team_setup_session(thread.id)
             except Exception:
                 pass
+
+    async def _notify_reactivated_members(self, team: dict) -> None:
+        """Clear old team members upon reactivation and ask them to request reinvites."""
+        cleared_members = await db.clear_team_members(team['id'])
+        for member in cleared_members:
+            try:
+                user = self.bot.get_user(member['discord_id']) or await self.bot.fetch_user(member['discord_id'])
+                await user.send(
+                    f"Your previous team **{team['team_name']}** ({team['team_tag']}) has just been reactivated! "
+                    f"Please ask the captain ({team['captain_username']}) to `/invite` you back so you can regain your role as a **{member['role']}**."
+                )
+            except Exception as e:
+                log.warning("Could not notify cleared member %d: %s", member['discord_id'], e)
 
 
 async def setup(bot: commands.Bot) -> None:
