@@ -41,6 +41,7 @@ log = logging.getLogger(__name__)
 
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True  # Required to read message.attachments in wait_for('message')
 
 
 class VegaBot(commands.Bot):
