@@ -7,7 +7,8 @@ import asyncio
 import logging
 import os
 import re
-from typing import Iterable, Optional
+from collections.abc import Iterable
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -126,23 +127,7 @@ def _build_final_embed(team: dict) -> discord.Embed:
     return embed
 
 
-def _parse_thread_session(topic: str | None) -> dict[str, str] | None:
-    if not topic:
-        return None
-    parts = [part.strip() for part in topic.split("|") if part.strip()]
-    if not parts or parts[0] != "team-setup":
-        return None
-    parsed: dict[str, str] = {}
-    for part in parts[1:]:
-        if "=" not in part:
-            continue
-        key, value = part.split("=", 1)
-        parsed[key] = value
-    return parsed
 
-
-def _thread_topic_for_session(captain_id: int, region: str) -> str:
-    return f"team-setup|captain={captain_id}|region={region}"
 
 
 def _is_allowed_mod(member: discord.Member, role_ids: Iterable[int]) -> bool:
@@ -441,6 +426,13 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
         if interaction.guild is None or not isinstance(interaction.channel, discord.Thread):
             await interaction.response.send_message(
                 "This form can only be used inside the private team setup thread.",
+                ephemeral=True,
+            )
+            return
+
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used inside a server.",
                 ephemeral=True,
             )
             return
