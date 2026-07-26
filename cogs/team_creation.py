@@ -322,13 +322,25 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
 
         existing_session = await db.get_team_setup_session_by_captain(interaction.user.id)
         if existing_session is not None:
-            thread = interaction.guild.get_thread(existing_session["thread_id"])
-            thread_mention = thread.mention if thread is not None else f"thread ID {existing_session['thread_id']}"
-            await interaction.followup.send(
-                f"You already have an active team setup thread: {thread_mention}",
-                ephemeral=True,
-            )
-            return
+            # Check whether the thread still actually exists in Discord.
+            # If it was deleted externally the session is orphaned — clean it up and let the
+            # user create a fresh one rather than blocking them permanently.
+            existing_thread = interaction.guild.get_thread(existing_session["thread_id"])
+            if existing_thread is None:
+                log.warning(
+                    "Orphaned team setup session found for captain %d (thread %d missing) "
+                    "— purging session and continuing.",
+                    interaction.user.id,
+                    existing_session["thread_id"],
+                )
+                await db.delete_team_setup_session(existing_session["thread_id"])
+                # Fall through and create a new thread.
+            else:
+                await interaction.followup.send(
+                    f"You already have an active team setup thread: {existing_thread.mention}",
+                    ephemeral=True,
+                )
+                return
 
         if not TEAM_PANEL_CHANNEL_ID:
             await interaction.followup.send(
@@ -516,7 +528,7 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
         team_tag: str,
         team_tag_key: str,
     ) -> None:
-        """Wait for the captain (or a mod) to post an image attachment in the setup thread."""
+        """Wait for the captain to post an image attachment in the setup thread."""
         captain_id: int = session["captain_discord_id"]
         _IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 
@@ -527,85 +539,114 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
             return ext in {"png", "jpg", "jpeg", "gif", "webp"}
 
         def _check(m: discord.Message) -> bool:
+            # Only accept an image from the captain themselves — not mods — so that
+            # a mod watching the thread cannot accidentally finalize someone else's team.
             if m.channel.id != thread.id:
                 return False
-            is_captain = m.author.id == captain_id
-            is_mod = (
-                isinstance(m.author, discord.Member)
-                and _is_allowed_mod(m.author, TEAM_MOD_ROLE_IDS)
-            )
-            if not (is_captain or is_mod):
+            if m.author.id != captain_id:
                 return False
             return any(_is_image_attachment(a) for a in m.attachments)
 
         try:
-            message: discord.Message = await self.bot.wait_for(
-                "message", check=_check, timeout=300.0
+            try:
+                message: discord.Message = await self.bot.wait_for(
+                    "message", check=_check, timeout=300.0
+                )
+            except asyncio.TimeoutError:
+                await thread.send(
+                    "Logo upload timed out after 5 minutes. Team setup has been cancelled. "
+                    "Use the Create Team button again to restart."
+                )
+                await db.delete_team_setup_session(thread.id)
+                return
+
+            # Pick the first valid image attachment.
+            attachment = next(a for a in message.attachments if _is_image_attachment(a))
+
+            # Determine save path — use abspath so it resolves correctly regardless of CWD.
+            ext = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else "png"
+            logo_dir = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "team_logos")
             )
-        except asyncio.TimeoutError:
-            await thread.send(
-                "Logo upload timed out after 5 minutes. Team setup has been cancelled. "
-                "Run the team creation flow again to start over."
+            os.makedirs(logo_dir, exist_ok=True)
+            filename = f"{team_tag_key.lower()}_{thread.id}.{ext}"
+            filepath = os.path.join(logo_dir, filename)
+
+            try:
+                await attachment.save(filepath)
+                log.info("Team logo saved — path=%s", filepath)
+            except Exception as exc:
+                log.error("Failed to save team logo: %s", exc, exc_info=True)
+                await thread.send(
+                    "Could not save the logo image due to a server error. Please send it again."
+                )
+                return
+
+            # Create the team record.
+            team = await db.create_team(
+                captain_discord_id=session["captain_discord_id"],
+                captain_username=session["captain_username"],
+                captain_ign=session["captain_ign"],
+                team_name=team_name,
+                team_name_key=team_name_key,
+                team_tag=team_tag,
+                team_tag_key=team_tag_key,
+                region=session["region"],
+                team_logo_path=filepath,
+                thread_id=thread.id,
             )
+            if team is None:
+                await thread.send(
+                    "The team could not be created because the name or tag is already taken. "
+                    "Contact an admin to resolve this."
+                )
+                return
+
             await db.delete_team_setup_session(thread.id)
-            return
 
-        # Pick the first valid image attachment.
-        attachment = next(a for a in message.attachments if _is_image_attachment(a))
+            # Send confirmation embed then delete the thread after a short delay.
+            await thread.send(embed=_build_final_embed(team))
+            await thread.send(
+                f"Team **{team['team_name']}** ({team['team_tag']}) has been registered. "
+                "This thread will be deleted in 10 seconds."
+            )
 
-        # Determine save path.
-        ext = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else "png"
-        logo_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "team_logos")
-        os.makedirs(logo_dir, exist_ok=True)
-        filename = f"{team_tag_key.lower()}_{thread.id}.{ext}"
-        filepath = os.path.join(logo_dir, filename)
+            log.info(
+                "Team created — team_id=%d captain_id=%d region=%s logo=%s",
+                team["id"],
+                session["captain_discord_id"],
+                session["region"],
+                filepath,
+            )
 
-        try:
-            await attachment.save(filepath)
-            log.info("Team logo saved — path=%s", filepath)
+            await asyncio.sleep(10)
+            try:
+                await thread.delete()
+            except discord.HTTPException as exc:
+                log.warning("Could not delete team setup thread %d: %s", thread.id, exc)
+
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            log.error("Failed to save team logo: %s", exc)
-            await thread.send(
-                "Could not save the logo image due to a server error. Please try again."
+            # Catch-all: log the error and always clean up the DB session so the user
+            # is not permanently locked out of creating a team.
+            log.error(
+                "Unhandled error in _await_logo_upload for thread %d: %s",
+                thread.id,
+                exc,
+                exc_info=True,
             )
-            return
-
-        # Create the team record.
-        team = await db.create_team(
-            captain_discord_id=session["captain_discord_id"],
-            captain_username=session["captain_username"],
-            captain_ign=session["captain_ign"],
-            team_name=team_name,
-            team_name_key=team_name_key,
-            team_tag=team_tag,
-            team_tag_key=team_tag_key,
-            region=session["region"],
-            team_logo_path=filepath,
-            thread_id=thread.id,
-        )
-        if team is None:
-            await thread.send(
-                "The team could not be created because one of the values is already in use."
-            )
-            return
-
-        await db.delete_team_setup_session(thread.id)
-
-        new_thread_name = f"team-{team_tag_key.lower()}"
-        try:
-            await thread.edit(name=new_thread_name)
-        except discord.Forbidden:
-            log.warning("Missing permission to rename team setup thread %s.", thread.id)
-
-        await thread.send(embed=_build_final_embed(team))
-
-        log.info(
-            "Team created — team_id=%d captain_id=%d region=%s logo=%s",
-            team["id"],
-            session["captain_discord_id"],
-            session["region"],
-            filepath,
-        )
+            try:
+                await thread.send(
+                    "An unexpected error occurred during team setup. "
+                    "The session has been reset — please use the Create Team button to try again."
+                )
+            except Exception:
+                pass
+            try:
+                await db.delete_team_setup_session(thread.id)
+            except Exception:
+                pass
 
 
 async def setup(bot: commands.Bot) -> None:
