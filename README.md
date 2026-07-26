@@ -1,6 +1,6 @@
 # Vega Queue Bot — Handoff Guide
 
-This README is intended for other AI agents, developers, and maintainers. It summarizes the current state of the bot, the major workflow changes, and the project structure so future work can be understood quickly.
+This README is intended for other AI agents, developers, and maintainers. It summarises the current state of the bot, the codebase structure, all slash commands, and all database helpers so future work can be picked up without re-reading every file.
 
 ---
 
@@ -8,182 +8,255 @@ This README is intended for other AI agents, developers, and maintainers. It sum
 
 Vega Queue is a Discord bot for managing player registration, player profiles, team creation, and support tickets for Vega Scrims. The bot uses Python with discord.py, PostgreSQL via asyncpg, and a modular cog-based architecture.
 
-The project has recently been expanded from a simple registration bot into a fuller community management system with:
+Current feature set:
 
-- persistent onboarding and command-info embeds
-- a button-driven registration experience
-- player profile lookup with regional ranking
-- private help-ticket channels
-- private team setup threads with validation and persistence
+- Persistent onboarding and command-info embeds that auto-refresh on startup
+- Button-driven player registration with region selection
+- Player profile lookup with regional ranking (ELO, K/D/A, matches played)
+- Private help-ticket channels with close buttons
+- Private team setup threads with modal validation, local logo storage, and full disband / resume flow
 
 ---
 
-## Current File Structure
+## File Structure
 
 ```text
 Vega-Queue/
 ├── cogs/
 │   ├── __init__.py
-│   ├── commands_info.py
-│   ├── help_ticket.py
-│   ├── profile.py
-│   ├── registration.py
-│   └── team_creation.py
+│   ├── commands_info.py      # Posts/updates the pinned commands overview embed
+│   ├── help_ticket.py        # /help — private support ticket channels
+│   ├── profile.py            # /profile — player stats and regional ranking
+│   ├── registration.py       # /register — player registration flow
+│   └── team_creation.py      # /create_team, /disband — team setup and management
 ├── database/
 │   ├── __init__.py
-│   ├── db.py
-│   └── schema.sql
-├── main.py
+│   ├── db.py                 # All async DB helpers (asyncpg)
+│   └── schema.sql            # Full table definitions (apply once to PostgreSQL)
+├── team_logos/               # Auto-created at runtime — stores uploaded team logos
+├── main.py                   # Bot entry point, pool init, cog loader, command sync
 ├── README.md
 ├── requirements.txt
-└── .env.example (if present in your environment)
+└── .env.example
 ```
-
----
-
-## Main Components
-
-### main.py
-The entry point for the bot.
-
-What it does:
-- creates the custom Discord bot class
-- initializes the database pool during startup
-- loads all feature cogs
-- syncs slash commands globally or to a specific guild if configured
-- closes the database pool cleanly on shutdown
-
-### cogs/registration.py
-Handles player registration.
-
-Recent behavior:
-- posts a pinned registration guide embed in the configured registration channel
-- supports two registration entry points:
-  - slash command: /register
-  - button flow: region dropdown → IGN modal → registration
-- validates channel restrictions
-- sends a welcome DM after successful registration
-- stores registration state and persistent message IDs in the database
-
-### cogs/profile.py
-Handles player profile lookup.
-
-Recent behavior:
-- slash command: /profile
-- shows ELO, region, matches played, K/D/A, K/D ratio, and dynamic regional rank
-- defaults to the calling user if no target is provided
-- replies ephemerally to keep channels clean
-
-### cogs/commands_info.py
-Handles the pinned commands overview embed.
-
-Recent behavior:
-- posts or updates a persistent embed showing bot commands
-- keeps the message pinned and refreshes it on startup
-
-### cogs/help_ticket.py
-Handles support tickets.
-
-Recent behavior:
-- slash command: /help
-- creates a private text channel for the user and configured admin roles
-- adds a close button to the ticket channel
-- notifies admins through direct messages
-- deletes the channel when the ticket is closed
-
-### cogs/team_creation.py
-Handles private team setup.
-
-Recent behavior:
-- slash command: /create_team
-- opens a private team setup thread for the captain and mod team
-- locks the team region to the captain’s registered region
-- collects team name, tag, and logo URL via a modal
-- stores team records and temporary setup sessions in the database
-- prevents duplicate team names or tags
-
----
-
-## Database Design
-
-The bot uses PostgreSQL with asyncpg and a connection pool created at startup.
-
-### Tables
-
-- players
-  - stores registered Discord users, IGN, region, ELO, K/D/A stats, and match count
-- teams
-  - stores finalized teams, captain details, team name/tag, region, logo URL, and the private thread ID
-- team_setup_sessions
-  - stores temporary state while a private team setup thread is in progress
-- bot_config
-  - stores persistent message IDs so embeds can be updated instead of recreated
-
-### Important database helpers
-
-The database layer in [database/db.py](database/db.py) includes helpers for:
-- registering players
-- retrieving player profiles
-- calculating regional ranking using SQL window functions
-- creating and validating team setup sessions
-- creating team records
-- storing and reading config values
 
 ---
 
 ## Environment Variables
 
-The bot expects runtime configuration through environment variables, such as:
+Configured via a `.env` file (see `.env.example`):
 
-- DISCORD_BOT_TOKEN
-- DATABASE_URL
-- REGISTRATION_CHANNEL_ID
-- COMMANDS_CHANNEL_ID
-- TEAM_PANEL_CHANNEL_ID
-- HELP_ADMIN_ROLE_IDS
-- TEAM_MOD_ROLE_IDS
-- GUILD_ID
+| Variable | Purpose |
+|---|---|
+| `DISCORD_BOT_TOKEN` | Bot token from the Discord Developer Portal |
+| `DATABASE_URL` | asyncpg-compatible PostgreSQL connection string |
+| `REGISTRATION_CHANNEL_ID` | Channel where /register and the onboarding embed live |
+| `COMMANDS_CHANNEL_ID` | Channel where the bot commands overview embed is posted |
+| `TEAM_PANEL_CHANNEL_ID` | Channel where the Create Team panel and private threads are created |
+| `HELP_ADMIN_ROLE_IDS` | Comma-separated role IDs added to help-ticket channels |
+| `TEAM_MOD_ROLE_IDS` | Comma-separated role IDs added to team setup threads |
+| `GUILD_ID` | (Optional) Guild ID for instant command sync during development |
 
-For local development, create a .env file with the values required by the bot.
+> **Required Discord intents (set in Developer Portal → Bot → Privileged Gateway Intents):**
+> - Server Members Intent
+> - Message Content Intent
 
 ---
 
 ## Slash Commands
 
-Current slash commands include:
+### Player
 
-- /register
-  - register a player profile
-- /profile
-  - view a player’s stats and ranking
-- /help
-  - open a private help ticket
-- /create_team
-  - start the private team setup flow
+| Command | Description |
+|---|---|
+| `/register ign:<ign> region:<region>` | Register a player profile. Region is locked at registration. Can only be used in the registration channel. |
+| `/profile` | View your own ELO, K/D/A, matches played, and regional ranking. Response is ephemeral. |
+| `/profile player:<@user>` | View another registered player's profile. Shows error if user is not in the database. |
 
----
+### Support
 
-## Design Notes for Future AI Work
+| Command | Description |
+|---|---|
+| `/help` | Opens a private help-ticket channel visible to the user and configured admin roles. Includes a close button that deletes the channel. |
 
-When making changes, keep these conventions in mind:
+### Teams
 
-- keep the interface professional and emoji-free
-- use the shared brand color #5B4FCF for embeds
-- prefer ephemeral responses for command outputs
-- reuse existing persistent message IDs instead of spamming new embeds
-- preserve the modular cog structure
-- keep database changes compatible with the schema in [database/schema.sql](database/schema.sql)
+| Command | Description |
+|---|---|
+| `/create_team` | Opens a private team setup thread. Captain fills in team name and tag via a modal, then uploads the logo image directly in the thread. Region is locked to the captain's registered region. If the captain previously disbanded a team, they are offered to resume the old team or start fresh. |
+| `/disband` | Disbands the captain's current team. Data is soft-deleted (`is_active = FALSE`) — nothing is erased. The captain receives a DM confirming the disband. Next time they use `/create_team` they can choose to resume or start fresh. |
 
 ---
 
-## Setup and Run
+## Team Setup Flow
+
+### New Team
+1. Captain uses `/create_team` or clicks the **Create Team** button on the panel.
+2. Bot creates a private thread and adds the captain + all mod-role members.
+3. Captain clicks **Enter Team Details** → fills in team name and tag via modal.
+4. Captain sends the team logo image directly in the thread (no prompt needed).
+5. Bot saves the image to `team_logos/<tag>_<thread_id>.<ext>` on the server.
+6. Team record is inserted into the database. Thread is deleted after 10 seconds.
+
+### Disband + Resume
+1. Captain runs `/disband` → confirmation buttons → team marked `is_active = FALSE`.
+2. Next time captain uses `/create_team`:
+   - **Continue with Old Team** → private thread opens, shows old team details.
+     - If logo file still exists on disk: shown with **Keep This Logo / Upload New Logo** buttons.
+     - If logo file is missing: bot waits for a new upload.
+   - **Start Fresh** → normal setup flow (modal → logo upload) but the old DB record is updated rather than inserting a new row (avoids UNIQUE constraint on `captain_discord_id`).
+
+---
+
+## Database
+
+### Connection
+
+Managed via asyncpg connection pool. Pool is created in `main.py` during `on_ready` and injected into `database/db.py` via `set_pool()`.
+
+### Tables
+
+#### `players`
+Stores registered Discord users.
+
+| Column | Type | Notes |
+|---|---|---|
+| `discord_id` | BIGINT PK | Discord user snowflake |
+| `discord_username` | TEXT | Username at registration time |
+| `ign` | TEXT UNIQUE | In-game name |
+| `region` | region_enum | Locked at registration |
+| `elo` | INTEGER | Defaults to 1000 |
+| `kills` | INTEGER | Lifetime kills |
+| `deaths` | INTEGER | Lifetime deaths |
+| `assists` | INTEGER | Lifetime assists |
+| `matches_played` | INTEGER | Total matches |
+| `registered_at` | TIMESTAMPTZ | Auto-set |
+| `is_active` | BOOLEAN | TRUE by default |
+
+#### `teams`
+Stores team records. One row per captain (`captain_discord_id` UNIQUE).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | SERIAL PK | |
+| `captain_discord_id` | BIGINT UNIQUE | |
+| `captain_username` | TEXT | |
+| `captain_ign` | TEXT | |
+| `team_name` | TEXT UNIQUE | Display name |
+| `team_name_key` | TEXT UNIQUE | Casefolded for conflict checks |
+| `team_tag` | TEXT UNIQUE | Uppercase alphanumeric |
+| `team_tag_key` | TEXT UNIQUE | Same as team_tag (uppercase) |
+| `region` | region_enum | |
+| `team_logo_path` | TEXT | Absolute path on the Raspberry Pi |
+| `thread_id` | BIGINT | Private setup thread snowflake |
+| `is_active` | BOOLEAN | FALSE = disbanded, TRUE = active |
+| `created_at` | TIMESTAMPTZ | |
+
+#### `team_setup_sessions`
+Temporary state while a team setup thread is in progress. Deleted when the team is finalized or the session times out.
+
+| Column | Type | Notes |
+|---|---|---|
+| `thread_id` | BIGINT PK | |
+| `captain_discord_id` | BIGINT UNIQUE | |
+| `captain_username` | TEXT | |
+| `captain_ign` | TEXT | |
+| `region` | region_enum | |
+| `created_at` | TIMESTAMPTZ | |
+
+#### `bot_config`
+Key-value store for persistent message IDs (so embeds are edited instead of re-posted).
+
+| Column | Type |
+|---|---|
+| `key` | TEXT PK |
+| `value` | TEXT |
+
+---
+
+## Database Helper Functions (`database/db.py`)
+
+### Pool management
+```
+set_pool(pool)           — inject the asyncpg pool
+get_pool()               — retrieve the pool (raises if not set)
+```
+
+### Players
+```
+get_player(discord_id)               — fetch player by Discord ID
+create_player(discord_id, username, ign, region)
+                                     — insert new player record
+get_regional_ranking(discord_id, region)
+                                     — returns dict with elo, rank, total_in_region, kda, matches
+```
+
+### Teams
+```
+get_team_by_captain(captain_discord_id)   — active team only
+get_team_by_name_key(name_key)            — active team by normalised name
+get_team_by_tag_key(tag_key)              — active team by normalised tag
+get_team_by_thread_id(thread_id)          — active team by thread ID
+get_inactive_team_by_captain(captain_discord_id)
+                                          — most recently disbanded team
+create_team(captain_discord_id, captain_username, captain_ign,
+            team_name, team_name_key, team_tag, team_tag_key,
+            region, team_logo_path, thread_id)
+                                          — INSERT new team record
+deactivate_team(captain_discord_id)       — sets is_active=FALSE (disband)
+reactivate_team(captain_discord_id, thread_id, team_logo_path=None)
+                                          — sets is_active=TRUE, optionally updates logo
+reactivate_team_fresh(captain_discord_id, team_name, team_name_key,
+                      team_tag, team_tag_key, region, team_logo_path, thread_id)
+                                          — UPDATE entire row with new details (fresh restart)
+```
+
+### Team Setup Sessions
+```
+create_team_setup_session(thread_id, captain_discord_id, captain_username,
+                          captain_ign, region)
+get_team_setup_session_by_thread_id(thread_id)
+get_team_setup_session_by_captain(captain_discord_id)
+delete_team_setup_session(thread_id)
+```
+
+### Bot Config
+```
+get_config(key)          — returns value string or None
+set_config(key, value)   — upsert key-value pair
+```
+
+---
+
+## Applying the Database Schema
+
+```bash
+psql -U "VEGA-QUEUES" -d Vega_Queue_System_New -f database/schema.sql
+```
+
+The schema uses a custom `region_enum` PostgreSQL type. Run the full schema file once on a fresh database. On updates, apply only the new `ALTER TABLE` / `CREATE TABLE IF NOT EXISTS` statements manually.
+
+---
+
+## Running the Bot
 
 ```bash
 python -m venv venv
-source venv/bin/activate
+source venv/bin/activate        # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 python main.py
 ```
 
-If you are updating the database schema, apply the SQL in [database/schema.sql](database/schema.sql) to your PostgreSQL instance.
+---
 
+## Design Conventions
+
+Keep these consistent when making any future changes:
+
+- **No emojis** in any bot message or embed
+- **Ephemeral-only** responses for all slash commands
+- **Brand colour** `#5B4FCF` for all embeds
+- **Soft-delete** data rather than hard-deleting (use `is_active = FALSE`)
+- **Persistent message IDs** stored in `bot_config` so embeds are edited on restart
+- **Modular cog structure** — one file per feature domain
+- **message_content intent** must be enabled in the Developer Portal for `wait_for('message')` to receive attachments

@@ -61,7 +61,10 @@ def _build_commands_embed() -> discord.Embed:
         name="Team Creation",
         value=(
             "`/create_team`\n"
-            "Open a private team setup thread and submit your team details."
+            "Open a private team setup thread and submit your team details.\n\n"
+            "`/disband`\n"
+            "Disband your current team. Your data is preserved — you can resume the old team "
+            "or start fresh next time you use `/create_team`."
         ),
         inline=False,
     )
