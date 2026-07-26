@@ -27,6 +27,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'region_enum') THEN
         CREATE TYPE region_enum AS ENUM ('India', 'APAC', 'EMEA', 'Americas');
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'team_role_enum') THEN
+        CREATE TYPE team_role_enum AS ENUM ('Player', 'Manager', 'Coach');
+    END IF;
 END
 $$;
 
@@ -91,6 +94,22 @@ CREATE TABLE IF NOT EXISTS teams (
 
 CREATE INDEX IF NOT EXISTS idx_teams_region ON teams (region);
 CREATE INDEX IF NOT EXISTS idx_teams_created ON teams (created_at DESC);
+
+
+-- ---------------------------------------------------------------------------
+-- team_members
+-- ---------------------------------------------------------------------------
+-- One row per player in a team.
+
+CREATE TABLE IF NOT EXISTS team_members (
+    id                    BIGSERIAL    PRIMARY KEY,
+    team_id               BIGINT       NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
+    discord_id            BIGINT       NOT NULL UNIQUE,
+    role                  team_role_enum NOT NULL,
+    joined_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_members_team_id ON team_members (team_id);
 
 
 -- ---------------------------------------------------------------------------

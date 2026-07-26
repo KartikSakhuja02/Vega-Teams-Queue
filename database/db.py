@@ -161,8 +161,74 @@ async def get_player_profile(discord_id: int) -> Optional[dict]:
 
 
 # =============================================================================
+# Team Member helpers
+# =============================================================================
+
+async def add_team_member(team_id: int, discord_id: int, role: str) -> Optional[dict]:
+    """
+    Add a player to a team with a specific role.
+    Returns the inserted row on success, None if the player is already in a team.
+    """
+    try:
+        row = await get_pool().fetchrow(
+            """
+            INSERT INTO team_members (team_id, discord_id, role)
+            VALUES ($1, $2, $3::team_role_enum)
+            RETURNING *
+            """,
+            team_id,
+            discord_id,
+            role,
+        )
+        return dict(row) if row else None
+    except asyncpg.UniqueViolationError:
+        return None
+
+
+async def get_team_members(team_id: int) -> list[dict]:
+    """Fetch all members of a team, ordered by role and joined date."""
+    rows = await get_pool().fetch(
+        """
+        SELECT tm.*, p.ign, p.discord_username 
+        FROM team_members tm
+        JOIN players p ON tm.discord_id = p.discord_id
+        WHERE tm.team_id = $1
+        ORDER BY tm.role ASC, tm.joined_at ASC
+        """,
+        team_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_player_team_membership(discord_id: int) -> Optional[dict]:
+    """
+    Check if a player is currently in any active team.
+    Returns a dict with team and member details if found.
+    """
+    row = await get_pool().fetchrow(
+        """
+        SELECT tm.*, t.team_name, t.team_tag, t.is_active 
+        FROM team_members tm
+        JOIN teams t ON tm.team_id = t.id
+        WHERE tm.discord_id = $1 AND t.is_active = TRUE
+        """,
+        discord_id,
+    )
+    return dict(row) if row else None
+
+
+# =============================================================================
 # Team helpers
 # =============================================================================
+
+async def get_team_by_id(team_id: int) -> Optional[dict]:
+    """Fetch a team by its primary key ID."""
+    row = await get_pool().fetchrow(
+        "SELECT * FROM teams WHERE id = $1",
+        team_id,
+    )
+    return dict(row) if row else None
+
 
 async def get_team_by_captain(captain_discord_id: int) -> Optional[dict]:
     """Fetch a team by the captain's Discord ID."""
