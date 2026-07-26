@@ -383,7 +383,7 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
             region=player["region"],
         )
         if session is None:
-            await thread.delete(reason="Team setup session could not be created.")
+            await thread.delete()
             await interaction.followup.send(
                 "I could not start the team setup session. Please try again.",
                 ephemeral=True,
