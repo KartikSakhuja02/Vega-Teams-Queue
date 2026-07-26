@@ -496,18 +496,7 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
             )
             return
 
-        # Prompt the captain to upload the logo image in the thread.
-        await interaction.channel.send(
-            "Team name and tag accepted. Please upload your team logo as an image file in this "
-            "thread (PNG, JPG, GIF, or WEBP). Send a message with the image attached to "
-            "finalize your team. You have 5 minutes."
-        )
-        await interaction.followup.send(
-            "Details validated. Upload your team logo image in the thread to complete setup.",
-            ephemeral=True,
-        )
-
-        # Hand off to the background logo-await task so the interaction can close.
+        # Silently start waiting — the captain just sends the image in the thread.
         asyncio.create_task(
             self._await_logo_upload(
                 thread=interaction.channel,
@@ -517,6 +506,11 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
                 team_tag=normalized_tag,
                 team_tag_key=normalized_tag_key,
             )
+        )
+
+        await interaction.followup.send(
+            "Team details saved. Send your logo image in this thread to complete registration.",
+            ephemeral=True,
         )
 
     async def _await_logo_upload(
