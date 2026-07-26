@@ -213,15 +213,42 @@ class DisbandConfirmView(discord.ui.View):
         self.stop()
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
-        await db.deactivate_team(interaction.user.id)
-        try:
-            await interaction.user.send(
-                f"Your team **{self.team['team_name']}** ({self.team['team_tag']}) has been "
-                "disbanded. Your team data is preserved — you can resume it or start fresh "
-                "anytime using the Create Team button."
+        await db.deactivate_team(self.team['captain_discord_id'])
+        
+        # Notify the captain and the person who disbanded it (if different)
+        notified_ids = set()
+        
+        async def _notify_user(discord_id: int, message: str):
+            if discord_id in notified_ids:
+                return
+            notified_ids.add(discord_id)
+            try:
+                user = self.cog.bot.get_user(discord_id) or await self.cog.bot.fetch_user(discord_id)
+                await user.send(message)
+            except Exception:
+                pass
+                
+        # Message for the person who clicked disband
+        await _notify_user(
+            interaction.user.id,
+            f"You have disbanded the team **{self.team['team_name']}** ({self.team['team_tag']}). "
+            "The team data is preserved — the captain can resume it or start fresh anytime using the Create Team button."
+        )
+        
+        # Message for the captain (if they didn't click it)
+        await _notify_user(
+            self.team['captain_discord_id'],
+            f"Your team **{self.team['team_name']}** ({self.team['team_tag']}) has been disbanded by **{interaction.user.display_name}**. "
+            "Your team data is preserved — you can resume it or start fresh anytime using the Create Team button."
+        )
+        
+        # Notify all other players in the team
+        members = await db.get_team_members(self.team['id'])
+        for member in members:
+            await _notify_user(
+                member['discord_id'],
+                f"The team **{self.team['team_name']}** ({self.team['team_tag']}) has been disbanded."
             )
-        except discord.Forbidden:
-            pass
         await interaction.followup.send(
             f"Team **{self.team['team_name']}** has been disbanded.",
             ephemeral=True,
@@ -778,7 +805,7 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
     # /disband command
     # -------------------------------------------------------------------------
 
-    @app_commands.command(name="disband", description="Disband your current team.")
+    @app_commands.command(name="disband", description="Disband your current team (Captains and Managers only).")
     async def disband(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message(
@@ -786,12 +813,19 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
             )
             return
         await interaction.response.defer(ephemeral=True)
+        
         team = await db.get_team_by_captain(interaction.user.id)
-        if team is None:
+        if not team:
+            membership = await db.get_player_team_membership(interaction.user.id)
+            if membership and membership["role"] == "Manager":
+                team = await db.get_team_by_id(membership["team_id"])
+                
+        if not team or not team.get("is_active"):
             await interaction.followup.send(
-                "You do not have a team to disband.", ephemeral=True
+                "You must be the Captain or a Manager of an active team to disband it.", ephemeral=True
             )
             return
+            
         view = DisbandConfirmView(cog=self, team=team)
         await interaction.followup.send(
             f"Are you sure you want to disband **{team['team_name']}** ({team['team_tag']})? "
