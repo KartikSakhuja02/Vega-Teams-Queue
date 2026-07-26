@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS teams (
     team_tag              TEXT         NOT NULL,
     team_tag_key          TEXT         NOT NULL UNIQUE,
     region                region_enum  NOT NULL,
-    team_logo_url         TEXT,
+    team_logo_path        TEXT,
     thread_id             BIGINT       NOT NULL UNIQUE,
     created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     is_active             BOOLEAN      NOT NULL DEFAULT TRUE
@@ -118,4 +118,16 @@ ALTER TABLE players ADD COLUMN IF NOT EXISTS kills INT NOT NULL DEFAULT 0;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS deaths INT NOT NULL DEFAULT 0;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS assists INT NOT NULL DEFAULT 0;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS matches_played INT NOT NULL DEFAULT 0;
+
+-- Rename logo column from URL to local path (safe to re-run; will no-op if already renamed).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'teams' AND column_name = 'team_logo_url'
+    ) THEN
+        ALTER TABLE teams RENAME COLUMN team_logo_url TO team_logo_path;
+    END IF;
+END
+$$;
 

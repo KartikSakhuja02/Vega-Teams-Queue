@@ -209,7 +209,7 @@ async def create_team(
     team_tag: str,
     team_tag_key: str,
     region: str,
-    team_logo_url: Optional[str],
+    team_logo_path: Optional[str],
     thread_id: int,
 ) -> Optional[dict]:
     """Insert a new team row and return the created record."""
@@ -225,7 +225,7 @@ async def create_team(
                 team_tag,
                 team_tag_key,
                 region,
-                team_logo_url,
+                team_logo_path,
                 thread_id
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::region_enum, $9, $10)

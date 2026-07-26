@@ -121,8 +121,8 @@ def _build_final_embed(team: dict) -> discord.Embed:
     embed.add_field(name="Team Tag", value=team["team_tag"], inline=True)
     embed.add_field(name="Region", value=team["region"], inline=True)
     embed.add_field(name="Captain", value=team["captain_username"], inline=False)
-    if team.get("team_logo_url"):
-        embed.set_thumbnail(url=team["team_logo_url"])
+    if team.get("team_logo_path"):
+        embed.add_field(name="Logo", value="Saved to server storage.", inline=False)
     embed.set_footer(text="Vega Scrims Team Setup")
     return embed
 
@@ -164,11 +164,6 @@ class TeamDetailsModal(discord.ui.Modal, title="Finalize Team"):
         placeholder="Enter the team tag, e.g. VQ",
         max_length=12,
     )
-    team_logo_url = discord.ui.TextInput(
-        label="Team Logo URL",
-        placeholder="Paste a direct image URL for the team logo",
-        max_length=300,
-    )
 
     def __init__(self, cog: "TeamCreationCog", session: dict[str, str]) -> None:
         super().__init__()
@@ -181,7 +176,6 @@ class TeamDetailsModal(discord.ui.Modal, title="Finalize Team"):
             session=self.session,
             team_name=str(self.team_name.value).strip(),
             team_tag=str(self.team_tag.value).strip(),
-            team_logo_url=str(self.team_logo_url.value).strip(),
         )
 
 
@@ -421,7 +415,6 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
         session: dict,
         team_name: str,
         team_tag: str,
-        team_logo_url: str,
     ) -> None:
         if interaction.guild is None or not isinstance(interaction.channel, discord.Thread):
             await interaction.response.send_message(
@@ -451,7 +444,6 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
         normalized_name_key = _normalize_key(team_name)
         normalized_tag = _normalize_tag(team_tag)
         normalized_tag_key = normalized_tag
-        logo_url = team_logo_url.strip() or None
 
         if len(normalized_name) < 2:
             await interaction.followup.send(
@@ -463,13 +455,6 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
         if len(normalized_tag) < 2 or len(normalized_tag) > 8:
             await interaction.followup.send(
                 "Team tag must be between 2 and 8 alphanumeric characters.",
-                ephemeral=True,
-            )
-            return
-
-        if logo_url and not re.match(r"^https?://", logo_url, flags=re.IGNORECASE):
-            await interaction.followup.send(
-                "Team logo must be a direct image URL starting with http:// or https://.",
                 ephemeral=True,
             )
             return
@@ -499,45 +484,127 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
             )
             return
 
+        # Prompt the captain to upload the logo image in the thread.
+        await interaction.channel.send(
+            "Team name and tag accepted. Please upload your team logo as an image file in this "
+            "thread (PNG, JPG, GIF, or WEBP). Send a message with the image attached to "
+            "finalize your team. You have 5 minutes."
+        )
+        await interaction.followup.send(
+            "Details validated. Upload your team logo image in the thread to complete setup.",
+            ephemeral=True,
+        )
+
+        # Hand off to the background logo-await task so the interaction can close.
+        asyncio.create_task(
+            self._await_logo_upload(
+                thread=interaction.channel,
+                session=session,
+                team_name=normalized_name,
+                team_name_key=normalized_name_key,
+                team_tag=normalized_tag,
+                team_tag_key=normalized_tag_key,
+            )
+        )
+
+    async def _await_logo_upload(
+        self,
+        thread: discord.Thread,
+        session: dict,
+        team_name: str,
+        team_name_key: str,
+        team_tag: str,
+        team_tag_key: str,
+    ) -> None:
+        """Wait for the captain (or a mod) to post an image attachment in the setup thread."""
+        captain_id: int = session["captain_discord_id"]
+        _IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+
+        def _is_image_attachment(a: discord.Attachment) -> bool:
+            if a.content_type and a.content_type.split(";")[0].strip() in _IMAGE_TYPES:
+                return True
+            ext = a.filename.rsplit(".", 1)[-1].lower() if "." in a.filename else ""
+            return ext in {"png", "jpg", "jpeg", "gif", "webp"}
+
+        def _check(m: discord.Message) -> bool:
+            if m.channel.id != thread.id:
+                return False
+            is_captain = m.author.id == captain_id
+            is_mod = (
+                isinstance(m.author, discord.Member)
+                and _is_allowed_mod(m.author, TEAM_MOD_ROLE_IDS)
+            )
+            if not (is_captain or is_mod):
+                return False
+            return any(_is_image_attachment(a) for a in m.attachments)
+
+        try:
+            message: discord.Message = await self.bot.wait_for(
+                "message", check=_check, timeout=300.0
+            )
+        except asyncio.TimeoutError:
+            await thread.send(
+                "Logo upload timed out after 5 minutes. Team setup has been cancelled. "
+                "Run the team creation flow again to start over."
+            )
+            await db.delete_team_setup_session(thread.id)
+            return
+
+        # Pick the first valid image attachment.
+        attachment = next(a for a in message.attachments if _is_image_attachment(a))
+
+        # Determine save path.
+        ext = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else "png"
+        logo_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "team_logos")
+        os.makedirs(logo_dir, exist_ok=True)
+        filename = f"{team_tag_key.lower()}_{thread.id}.{ext}"
+        filepath = os.path.join(logo_dir, filename)
+
+        try:
+            await attachment.save(filepath)
+            log.info("Team logo saved — path=%s", filepath)
+        except Exception as exc:
+            log.error("Failed to save team logo: %s", exc)
+            await thread.send(
+                "Could not save the logo image due to a server error. Please try again."
+            )
+            return
+
+        # Create the team record.
         team = await db.create_team(
             captain_discord_id=session["captain_discord_id"],
             captain_username=session["captain_username"],
             captain_ign=session["captain_ign"],
-            team_name=normalized_name,
-            team_name_key=normalized_name_key,
-            team_tag=normalized_tag,
-            team_tag_key=normalized_tag_key,
+            team_name=team_name,
+            team_name_key=team_name_key,
+            team_tag=team_tag,
+            team_tag_key=team_tag_key,
             region=session["region"],
-            team_logo_url=logo_url,
-            thread_id=interaction.channel.id,
+            team_logo_path=filepath,
+            thread_id=thread.id,
         )
         if team is None:
-            await interaction.followup.send(
-                "The team could not be created because one of the values is already in use.",
-                ephemeral=True,
+            await thread.send(
+                "The team could not be created because one of the values is already in use."
             )
             return
 
-        await db.delete_team_setup_session(interaction.channel.id)
+        await db.delete_team_setup_session(thread.id)
 
-        new_thread_name = f"team-{normalized_tag.lower()}"
+        new_thread_name = f"team-{team_tag_key.lower()}"
         try:
-            await interaction.channel.edit(name=new_thread_name)
+            await thread.edit(name=new_thread_name)
         except discord.Forbidden:
-            log.warning("Missing permission to rename team setup thread %s.", interaction.channel.id)
+            log.warning("Missing permission to rename team setup thread %s.", thread.id)
 
-        await interaction.channel.send(embed=_build_final_embed(team))
-
-        await interaction.followup.send(
-            f"Team created successfully: **{team['team_name']}** ({team['team_tag']})",
-            ephemeral=True,
-        )
+        await thread.send(embed=_build_final_embed(team))
 
         log.info(
-            "Team created — team_id=%d captain_id=%d region=%s",
+            "Team created — team_id=%d captain_id=%d region=%s logo=%s",
             team["id"],
             session["captain_discord_id"],
             session["region"],
+            filepath,
         )
 
 
