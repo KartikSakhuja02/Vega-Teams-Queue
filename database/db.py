@@ -239,7 +239,7 @@ async def create_team(
             team_tag,
             team_tag_key,
             region,
-            team_logo_url,
+            team_logo_path,
             thread_id,
         )
         return dict(row) if row else None
