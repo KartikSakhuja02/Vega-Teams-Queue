@@ -200,6 +200,102 @@ async def get_team_by_thread_id(thread_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def deactivate_team(captain_discord_id: int) -> None:
+    """Soft-delete a team — marks is_active=FALSE, keeps all data."""
+    await get_pool().execute(
+        "UPDATE teams SET is_active = FALSE WHERE captain_discord_id = $1",
+        captain_discord_id,
+    )
+
+
+async def get_inactive_team_by_captain(captain_discord_id: int) -> Optional[dict]:
+    """Fetch the most recently disbanded team for a captain."""
+    row = await get_pool().fetchrow(
+        """
+        SELECT * FROM teams
+        WHERE captain_discord_id = $1 AND is_active = FALSE
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        captain_discord_id,
+    )
+    return dict(row) if row else None
+
+
+async def reactivate_team(
+    captain_discord_id: int,
+    thread_id: int,
+    team_logo_path: Optional[str] = None,
+) -> Optional[dict]:
+    """Reactivate a disbanded team, keeping existing details.  Optionally updates the logo path."""
+    if team_logo_path is not None:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE teams
+            SET is_active = TRUE, thread_id = $2, team_logo_path = $3
+            WHERE captain_discord_id = $1 AND is_active = FALSE
+            RETURNING *
+            """,
+            captain_discord_id,
+            thread_id,
+            team_logo_path,
+        )
+    else:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE teams
+            SET is_active = TRUE, thread_id = $2
+            WHERE captain_discord_id = $1 AND is_active = FALSE
+            RETURNING *
+            """,
+            captain_discord_id,
+            thread_id,
+        )
+    return dict(row) if row else None
+
+
+async def reactivate_team_fresh(
+    captain_discord_id: int,
+    team_name: str,
+    team_name_key: str,
+    team_tag: str,
+    team_tag_key: str,
+    region: str,
+    team_logo_path: Optional[str],
+    thread_id: int,
+) -> Optional[dict]:
+    """Reactivate a disbanded team with completely new details (fresh start)."""
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE teams
+            SET
+                is_active     = TRUE,
+                team_name     = $2,
+                team_name_key = $3,
+                team_tag      = $4,
+                team_tag_key  = $5,
+                region        = $6::region_enum,
+                team_logo_path= $7,
+                thread_id     = $8,
+                created_at    = NOW()
+            WHERE captain_discord_id = $1 AND is_active = FALSE
+            RETURNING *
+            """,
+            captain_discord_id,
+            team_name,
+            team_name_key,
+            team_tag,
+            team_tag_key,
+            region,
+            team_logo_path,
+            thread_id,
+        )
+        return dict(row) if row else None
+    except asyncpg.UniqueViolationError:
+        return None
+
+
 async def create_team(
     captain_discord_id: int,
     captain_username: str,

@@ -127,6 +127,21 @@ def _build_final_embed(team: dict) -> discord.Embed:
     return embed
 
 
+def _build_resume_embed(team: dict) -> discord.Embed:
+    """Embed shown inside a resume thread to display old team details."""
+    embed = discord.Embed(
+        title="Resuming Team Setup",
+        colour=EMBED_COLOUR,
+    )
+    embed.description = (
+        "Your previous team details are shown below. Confirm or update your logo to reactivate."
+    )
+    embed.add_field(name="Team Name", value=team["team_name"], inline=True)
+    embed.add_field(name="Team Tag", value=team["team_tag"], inline=True)
+    embed.add_field(name="Region", value=team["region"], inline=True)
+    embed.add_field(name="Captain", value=team["captain_username"], inline=False)
+    embed.set_footer(text="Vega Scrims — Team Resume")
+    return embed
 
 
 
@@ -177,6 +192,173 @@ class TeamDetailsModal(discord.ui.Modal, title="Finalize Team"):
             team_name=str(self.team_name.value).strip(),
             team_tag=str(self.team_tag.value).strip(),
         )
+
+
+class DisbandConfirmView(discord.ui.View):
+    """Confirmation prompt for /disband — one-time, 60-second timeout."""
+
+    def __init__(self, cog: "TeamCreationCog", team: dict) -> None:
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.team = team
+        self._done = False
+
+    @discord.ui.button(label="Disband", style=discord.ButtonStyle.danger)
+    async def confirm_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self._done:
+            return
+        self._done = True
+        self.stop()
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        await db.deactivate_team(interaction.user.id)
+        try:
+            await interaction.user.send(
+                f"Your team **{self.team['team_name']}** ({self.team['team_tag']}) has been "
+                "disbanded. Your team data is preserved — you can resume it or start fresh "
+                "anytime using the Create Team button."
+            )
+        except discord.Forbidden:
+            pass
+        await interaction.followup.send(
+            f"Team **{self.team['team_name']}** has been disbanded.",
+            ephemeral=True,
+        )
+        log.info(
+            "Team disbanded — captain_id=%d team=%s",
+            interaction.user.id,
+            self.team["team_name"],
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self._done:
+            return
+        self._done = True
+        self.stop()
+        await interaction.response.send_message("Disband cancelled.", ephemeral=True)
+
+
+class TeamResumeView(discord.ui.View):
+    """Offered when a captain tries to create a team but has a disbanded one."""
+
+    def __init__(self, cog: "TeamCreationCog", inactive_team: dict) -> None:
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.inactive_team = inactive_team
+        self._done = False
+
+    @discord.ui.button(label="Continue with Old Team", style=discord.ButtonStyle.primary)
+    async def continue_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self._done:
+            return
+        self._done = True
+        self.stop()
+        await self.cog._start_resume_setup(interaction, self.inactive_team)
+
+    @discord.ui.button(label="Start Fresh", style=discord.ButtonStyle.secondary)
+    async def fresh_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self._done:
+            return
+        self._done = True
+        self.stop()
+        await self.cog._start_fresh_team_setup(interaction)
+
+
+class LogoResumeView(discord.ui.View):
+    """Shown in the resume thread — captain chooses to keep old logo or upload a new one."""
+
+    def __init__(
+        self,
+        cog: "TeamCreationCog",
+        old_team: dict,
+        session: dict,
+        thread: discord.Thread,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.old_team = old_team
+        self.session = session
+        self.thread = thread
+        self._done = False
+
+    @discord.ui.button(label="Keep This Logo", style=discord.ButtonStyle.success)
+    async def keep_logo_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self._done:
+            return
+        self._done = True
+        self.stop()
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        team = await db.reactivate_team(
+            captain_discord_id=self.old_team["captain_discord_id"],
+            thread_id=self.thread.id,
+        )
+        if team is None:
+            await interaction.followup.send(
+                "Could not reactivate the team. Please contact an admin.", ephemeral=True
+            )
+            return
+        await db.delete_team_setup_session(self.thread.id)
+        await self.thread.send(embed=_build_final_embed(team))
+        await self.thread.send(
+            f"Team **{team['team_name']}** ({team['team_tag']}) has been reactivated. "
+            "This thread will be deleted in 10 seconds."
+        )
+        await interaction.followup.send("Your team has been reactivated.", ephemeral=True)
+        log.info(
+            "Team reactivated (keep logo) — captain_id=%d team=%s",
+            self.old_team["captain_discord_id"],
+            team["team_name"],
+        )
+        await asyncio.sleep(10)
+        try:
+            await self.thread.delete()
+        except discord.HTTPException as exc:
+            log.warning("Could not delete resume thread %d: %s", self.thread.id, exc)
+
+    @discord.ui.button(label="Upload New Logo", style=discord.ButtonStyle.secondary)
+    async def upload_logo_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self._done:
+            return
+        self._done = True
+        self.stop()
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        await interaction.followup.send(
+            "Send your new team logo image directly in this thread.", ephemeral=True
+        )
+        asyncio.create_task(
+            self.cog._await_logo_resume_upload(
+                thread=self.thread,
+                session=self.session,
+                old_team=self.old_team,
+            )
+        )
+
+    async def on_timeout(self) -> None:
+        if not self._done:
+            self._done = True
+            try:
+                await self.thread.send(
+                    "Logo confirmation timed out. The session has been reset — "
+                    "use Create Team to try again."
+                )
+                await db.delete_team_setup_session(self.thread.id)
+            except Exception:
+                pass
 
 
 class TeamSetupView(discord.ui.View):
@@ -320,6 +502,19 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
             )
             return
 
+        # Check for a disbanded team — offer resume or fresh start.
+        inactive_team = await db.get_inactive_team_by_captain(interaction.user.id)
+        if inactive_team is not None:
+            resume_view = TeamResumeView(cog=self, inactive_team=inactive_team)
+            await interaction.followup.send(
+                f"You previously had a team: **{inactive_team['team_name']}** "
+                f"({inactive_team['team_tag']}) — Region: {inactive_team['region']}.\n\n"
+                "Would you like to continue with your old team or start completely fresh?",
+                view=resume_view,
+                ephemeral=True,
+            )
+            return
+
         existing_session = await db.get_team_setup_session_by_captain(interaction.user.id)
         if existing_session is not None:
             # Check whether the thread still actually exists in Discord.
@@ -342,84 +537,7 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
                 )
                 return
 
-        if not TEAM_PANEL_CHANNEL_ID:
-            await interaction.followup.send(
-                "Team panel is not configured yet. Please contact an admin.",
-                ephemeral=True,
-            )
-            return
-
-        panel_channel = self.bot.get_channel(TEAM_PANEL_CHANNEL_ID)
-        if not isinstance(panel_channel, discord.TextChannel):
-            try:
-                fetched = await self.bot.fetch_channel(TEAM_PANEL_CHANNEL_ID)
-            except discord.HTTPException:
-                await interaction.followup.send(
-                    "Team panel channel could not be found.",
-                    ephemeral=True,
-                )
-                return
-            if not isinstance(fetched, discord.TextChannel):
-                await interaction.followup.send(
-                    "Team panel channel is invalid.",
-                    ephemeral=True,
-                )
-                return
-            panel_channel = fetched
-
-        thread_name = f"team-setup-{_normalize_thread_name(interaction.user.display_name)[:32]}"
-        try:
-            thread = await panel_channel.create_thread(
-                name=thread_name,
-                type=discord.ChannelType.private_thread,
-                reason=f"Team setup requested by {interaction.user}",
-            )
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "I do not have permission to create private team threads.",
-                ephemeral=True,
-            )
-            return
-
-        session = await db.create_team_setup_session(
-            thread_id=thread.id,
-            captain_discord_id=interaction.user.id,
-            captain_username=str(interaction.user),
-            captain_ign=player["ign"],
-            region=player["region"],
-        )
-        if session is None:
-            await thread.delete()
-            await interaction.followup.send(
-                "I could not start the team setup session. Please try again.",
-                ephemeral=True,
-            )
-            return
-
-        participants: list[discord.Member] = [interaction.user]
-        participants.extend(_collect_mod_members(interaction.guild, TEAM_MOD_ROLE_IDS))
-
-        await asyncio.gather(
-            *(thread.add_user(member) for member in participants),
-            return_exceptions=True,
-        )
-
-        await thread.send(
-            embed=_build_thread_embed(player["region"], interaction.user),
-            view=TeamSetupView(self),
-        )
-
-        await interaction.followup.send(
-            f"Your private team setup thread is ready: {thread.mention}",
-            ephemeral=True,
-        )
-
-        log.info(
-            "Team setup thread created — thread_id=%d captain_id=%d region=%s",
-            thread.id,
-            interaction.user.id,
-            player["region"],
-        )
+        await self._create_setup_thread(interaction, player)
 
     async def complete_team_setup(
         self,
@@ -576,19 +694,33 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
                 )
                 return
 
-            # Create the team record.
-            team = await db.create_team(
-                captain_discord_id=session["captain_discord_id"],
-                captain_username=session["captain_username"],
-                captain_ign=session["captain_ign"],
-                team_name=team_name,
-                team_name_key=team_name_key,
-                team_tag=team_tag,
-                team_tag_key=team_tag_key,
-                region=session["region"],
-                team_logo_path=filepath,
-                thread_id=thread.id,
-            )
+            # If the captain has a disbanded team (fresh restart scenario), update that record.
+            # Otherwise insert a new one.  This handles the UNIQUE constraint on captain_discord_id.
+            inactive_record = await db.get_inactive_team_by_captain(session["captain_discord_id"])
+            if inactive_record is not None:
+                team = await db.reactivate_team_fresh(
+                    captain_discord_id=session["captain_discord_id"],
+                    team_name=team_name,
+                    team_name_key=team_name_key,
+                    team_tag=team_tag,
+                    team_tag_key=team_tag_key,
+                    region=session["region"],
+                    team_logo_path=filepath,
+                    thread_id=thread.id,
+                )
+            else:
+                team = await db.create_team(
+                    captain_discord_id=session["captain_discord_id"],
+                    captain_username=session["captain_username"],
+                    captain_ign=session["captain_ign"],
+                    team_name=team_name,
+                    team_name_key=team_name_key,
+                    team_tag=team_tag,
+                    team_tag_key=team_tag_key,
+                    region=session["region"],
+                    team_logo_path=filepath,
+                    thread_id=thread.id,
+                )
             if team is None:
                 await thread.send(
                     "The team could not be created because the name or tag is already taken. "
@@ -638,6 +770,325 @@ class TeamCreationCog(commands.Cog, name="TeamCreation"):
             except Exception:
                 pass
             try:
+                await db.delete_team_setup_session(thread.id)
+            except Exception:
+                pass
+
+    # -------------------------------------------------------------------------
+    # /disband command
+    # -------------------------------------------------------------------------
+
+    @app_commands.command(name="disband", description="Disband your current team.")
+    async def disband(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        team = await db.get_team_by_captain(interaction.user.id)
+        if team is None:
+            await interaction.followup.send(
+                "You do not have a team to disband.", ephemeral=True
+            )
+            return
+        view = DisbandConfirmView(cog=self, team=team)
+        await interaction.followup.send(
+            f"Are you sure you want to disband **{team['team_name']}** ({team['team_tag']})? "
+            "Your team data will be preserved and you can resume it later.",
+            view=view,
+            ephemeral=True,
+        )
+
+    # -------------------------------------------------------------------------
+    # Resume helpers
+    # -------------------------------------------------------------------------
+
+    async def _start_fresh_team_setup(self, interaction: discord.Interaction) -> None:
+        """Create a new setup thread for a fresh-start captain, skipping the inactive-team gate."""
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        player = await db.get_player(interaction.user.id)
+        if player is None:
+            await interaction.followup.send(
+                "You are not registered yet. Please complete player registration first.",
+                ephemeral=True,
+            )
+            return
+        # Orphan-cleanup for stale sessions.
+        existing_session = await db.get_team_setup_session_by_captain(interaction.user.id)
+        if existing_session is not None:
+            existing_thread = interaction.guild.get_thread(existing_session["thread_id"])
+            if existing_thread is None:
+                await db.delete_team_setup_session(existing_session["thread_id"])
+            else:
+                await interaction.followup.send(
+                    f"You already have an active setup thread: {existing_thread.mention}",
+                    ephemeral=True,
+                )
+                return
+        await self._create_setup_thread(interaction, player)
+
+    async def _start_resume_setup(
+        self, interaction: discord.Interaction, old_team: dict
+    ) -> None:
+        """Create a private thread for resuming a disbanded team."""
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        player = await db.get_player(interaction.user.id)
+        if player is None:
+            await interaction.followup.send(
+                "Could not find your player registration.", ephemeral=True
+            )
+            return
+        existing_session = await db.get_team_setup_session_by_captain(interaction.user.id)
+        if existing_session is not None:
+            existing_thread = interaction.guild.get_thread(existing_session["thread_id"])
+            if existing_thread is None:
+                await db.delete_team_setup_session(existing_session["thread_id"])
+            else:
+                await interaction.followup.send(
+                    f"You already have an active setup thread: {existing_thread.mention}",
+                    ephemeral=True,
+                )
+                return
+        if not TEAM_PANEL_CHANNEL_ID:
+            await interaction.followup.send(
+                "Team panel is not configured. Please contact an admin.", ephemeral=True
+            )
+            return
+        panel_channel = self.bot.get_channel(TEAM_PANEL_CHANNEL_ID)
+        if not isinstance(panel_channel, discord.TextChannel):
+            try:
+                panel_channel = await self.bot.fetch_channel(TEAM_PANEL_CHANNEL_ID)
+            except discord.HTTPException:
+                await interaction.followup.send(
+                    "Team panel channel not found.", ephemeral=True
+                )
+                return
+            if not isinstance(panel_channel, discord.TextChannel):
+                await interaction.followup.send(
+                    "Team panel channel is invalid.", ephemeral=True
+                )
+                return
+        thread_name = f"team-resume-{_normalize_thread_name(interaction.user.display_name)[:28]}"
+        try:
+            thread = await panel_channel.create_thread(
+                name=thread_name,
+                type=discord.ChannelType.private_thread,
+                reason=f"Team resume for {interaction.user}",
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "I do not have permission to create private threads.", ephemeral=True
+            )
+            return
+        session = await db.create_team_setup_session(
+            thread_id=thread.id,
+            captain_discord_id=interaction.user.id,
+            captain_username=str(interaction.user),
+            captain_ign=player["ign"],
+            region=player["region"],
+        )
+        if session is None:
+            await thread.delete()
+            await interaction.followup.send(
+                "Could not start the resume session. Please try again.", ephemeral=True
+            )
+            return
+        participants: list[discord.Member] = [interaction.user]
+        participants.extend(_collect_mod_members(interaction.guild, TEAM_MOD_ROLE_IDS))
+        await asyncio.gather(
+            *(thread.add_user(m) for m in participants), return_exceptions=True
+        )
+        await thread.send(embed=_build_resume_embed(old_team))
+        logo_path: Optional[str] = old_team.get("team_logo_path")
+        if logo_path and os.path.exists(logo_path):
+            logo_file = discord.File(logo_path)
+            logo_view = LogoResumeView(
+                cog=self, old_team=old_team, session=session, thread=thread
+            )
+            await thread.send(
+                "This was your team's logo. Would you like to keep it or upload a new one?",
+                file=logo_file,
+                view=logo_view,
+            )
+        else:
+            await thread.send(
+                "No saved logo was found. Send your team logo image in this thread to reactivate."
+            )
+            asyncio.create_task(
+                self._await_logo_resume_upload(
+                    thread=thread, session=session, old_team=old_team
+                )
+            )
+        await interaction.followup.send(
+            f"Your team resume thread is ready: {thread.mention}", ephemeral=True
+        )
+        log.info(
+            "Team resume thread created — thread_id=%d captain_id=%d",
+            thread.id,
+            interaction.user.id,
+        )
+
+    async def _create_setup_thread(
+        self, interaction: discord.Interaction, player: dict
+    ) -> None:
+        """Shared helper — creates the private setup thread, session, and posts the embed."""
+        if not TEAM_PANEL_CHANNEL_ID:
+            await interaction.followup.send(
+                "Team panel is not configured yet. Please contact an admin.", ephemeral=True
+            )
+            return
+        panel_channel = self.bot.get_channel(TEAM_PANEL_CHANNEL_ID)
+        if not isinstance(panel_channel, discord.TextChannel):
+            try:
+                fetched = await self.bot.fetch_channel(TEAM_PANEL_CHANNEL_ID)
+            except discord.HTTPException:
+                await interaction.followup.send(
+                    "Team panel channel could not be found.", ephemeral=True
+                )
+                return
+            if not isinstance(fetched, discord.TextChannel):
+                await interaction.followup.send(
+                    "Team panel channel is invalid.", ephemeral=True
+                )
+                return
+            panel_channel = fetched
+        thread_name = f"team-setup-{_normalize_thread_name(interaction.user.display_name)[:32]}"
+        try:
+            thread = await panel_channel.create_thread(
+                name=thread_name,
+                type=discord.ChannelType.private_thread,
+                reason=f"Team setup requested by {interaction.user}",
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "I do not have permission to create private team threads.", ephemeral=True
+            )
+            return
+        session = await db.create_team_setup_session(
+            thread_id=thread.id,
+            captain_discord_id=interaction.user.id,
+            captain_username=str(interaction.user),
+            captain_ign=player["ign"],
+            region=player["region"],
+        )
+        if session is None:
+            await thread.delete()
+            await interaction.followup.send(
+                "I could not start the team setup session. Please try again.", ephemeral=True
+            )
+            return
+        participants: list[discord.Member] = [interaction.user]
+        participants.extend(_collect_mod_members(interaction.guild, TEAM_MOD_ROLE_IDS))
+        await asyncio.gather(
+            *(thread.add_user(member) for member in participants), return_exceptions=True
+        )
+        await thread.send(
+            embed=_build_thread_embed(player["region"], interaction.user),
+            view=TeamSetupView(self),
+        )
+        await interaction.followup.send(
+            f"Your private team setup thread is ready: {thread.mention}", ephemeral=True
+        )
+        log.info(
+            "Team setup thread created — thread_id=%d captain_id=%d region=%s",
+            thread.id,
+            interaction.user.id,
+            player["region"],
+        )
+
+    async def _await_logo_resume_upload(
+        self,
+        thread: discord.Thread,
+        session: dict,
+        old_team: dict,
+    ) -> None:
+        """Wait for a new logo upload in a resume thread, then reactivate the team."""
+        captain_id: int = session["captain_discord_id"]
+        _IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+
+        def _is_image_attachment(a: discord.Attachment) -> bool:
+            if a.content_type and a.content_type.split(";")[0].strip() in _IMAGE_TYPES:
+                return True
+            ext = a.filename.rsplit(".", 1)[-1].lower() if "." in a.filename else ""
+            return ext in {"png", "jpg", "jpeg", "gif", "webp"}
+
+        def _check(m: discord.Message) -> bool:
+            return (
+                m.channel.id == thread.id
+                and m.author.id == captain_id
+                and any(_is_image_attachment(a) for a in m.attachments)
+            )
+
+        try:
+            try:
+                message = await self.bot.wait_for("message", check=_check, timeout=300.0)
+            except asyncio.TimeoutError:
+                await thread.send(
+                    "Logo upload timed out. Use Create Team to try again."
+                )
+                await db.delete_team_setup_session(thread.id)
+                return
+            attachment = next(a for a in message.attachments if _is_image_attachment(a))
+            ext = (
+                attachment.filename.rsplit(".", 1)[-1].lower()
+                if "." in attachment.filename
+                else "png"
+            )
+            logo_dir = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "team_logos")
+            )
+            os.makedirs(logo_dir, exist_ok=True)
+            tag_key = old_team.get("team_tag_key") or old_team["team_tag"].lower()
+            filename = f"{tag_key.lower()}_{thread.id}.{ext}"
+            filepath = os.path.join(logo_dir, filename)
+            try:
+                await attachment.save(filepath)
+            except Exception as exc:
+                log.error("Failed to save resume logo: %s", exc, exc_info=True)
+                await thread.send("Could not save the image. Please try again.")
+                return
+            team = await db.reactivate_team(
+                captain_discord_id=old_team["captain_discord_id"],
+                thread_id=thread.id,
+                team_logo_path=filepath,
+            )
+            if team is None:
+                await thread.send("Could not reactivate the team. Contact an admin.")
+                return
+            await db.delete_team_setup_session(thread.id)
+            await thread.send(embed=_build_final_embed(team))
+            await thread.send(
+                f"Team **{team['team_name']}** ({team['team_tag']}) has been reactivated. "
+                "This thread will be deleted in 10 seconds."
+            )
+            log.info(
+                "Team reactivated (new logo) — captain_id=%d team=%s",
+                old_team["captain_discord_id"],
+                team["team_name"],
+            )
+            await asyncio.sleep(10)
+            try:
+                await thread.delete()
+            except discord.HTTPException as exc:
+                log.warning("Could not delete resume thread %d: %s", thread.id, exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error(
+                "Error in _await_logo_resume_upload for thread %d: %s",
+                thread.id, exc, exc_info=True,
+            )
+            try:
+                await thread.send(
+                    "An unexpected error occurred. Please use Create Team to try again."
+                )
                 await db.delete_team_setup_session(thread.id)
             except Exception:
                 pass
