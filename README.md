@@ -89,6 +89,7 @@ Configured via a `.env` file (see `.env.example`):
 | `/disband` | Disbands the current team. Only Captains or Managers can do this. Data is soft-deleted (`is_active = FALSE`). All team members receive a DM confirming the disband. Next time they use `/create_team` they can choose to resume or start fresh. |
 | `/invite player:<@user>` | Invites a registered player to your active team. Only Captains or Managers can use this. You select the role (Player, Manager, or Coach) and the player receives an interactive DM to Accept or Decline. Upon acceptance, the bot assigns the Discord role to the player. |
 | `/kick player:<@user>` | Kicks a player from your team. Only Captains or Managers can use this. The kicked player is notified via DM, and their Discord role is automatically removed. |
+| `/leave` | Leaves your current team. Captains cannot use this command; they must use `/disband` instead. The team leadership (Captain + Managers) will receive a DM notification that you have left, and your Discord role is automatically removed. |
 
 ---
 

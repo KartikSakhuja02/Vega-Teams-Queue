@@ -369,5 +369,65 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
         await interaction.followup.send(f"Successfully kicked {player.mention} from the team.")
 
 
+    @app_commands.command(
+        name="leave",
+        description="Leave your current team.",
+    )
+    async def leave(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Leave your current team. Captains cannot use this; they must use /disband."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        membership = await db.get_player_team_membership(interaction.user.id)
+        if not membership:
+            # Check if they are a captain
+            captain_team = await db.get_team_by_captain(interaction.user.id)
+            if captain_team:
+                await interaction.followup.send("You are the Captain of a team. You cannot leave the team; use `/disband` instead.")
+            else:
+                await interaction.followup.send("You are not currently in an active team.")
+            return
+
+        full_team = await db.get_team_by_id(membership["team_id"])
+        if not full_team:
+            await interaction.followup.send("Could not retrieve your team data.")
+            return
+
+        removed = await db.remove_team_member(full_team["id"], interaction.user.id)
+        if not removed:
+            await interaction.followup.send("Could not remove you from the team. You might have already left.")
+            return
+
+        # Remove their discord role if they have it
+        try:
+            if hasattr(self.bot, 'guilds') and len(self.bot.guilds) > 0:
+                guild = self.bot.guilds[0]
+                member_obj = guild.get_member(interaction.user.id) or await guild.fetch_member(interaction.user.id)
+                if member_obj:
+                    discord_role = discord.utils.get(guild.roles, name=membership['role'])
+                    if discord_role:
+                        await member_obj.remove_roles(discord_role, reason=f"Left team {full_team['team_name']}")
+        except Exception as e:
+            log.warning(f"Could not remove Discord role {membership['role']} from user {interaction.user.id}: {e}")
+
+        # Notify leadership (Captain + Managers)
+        await _notify_team_leadership(
+            self.bot,
+            full_team,
+            f"**{interaction.user.display_name}** has voluntarily left the team."
+        )
+
+        await interaction.followup.send(f"You have successfully left **{full_team['team_name']}**.")
+
+
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(TeamManagementCog(bot))
