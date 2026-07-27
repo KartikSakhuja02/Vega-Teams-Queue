@@ -84,7 +84,8 @@ Configured via a `.env` file (see `.env.example`):
 | Command | Description |
 |---|---|
 | `/create_team` | Opens a private team setup thread. Captain fills in team name and tag via a modal, then uploads the logo image directly in the thread. Region is locked to the captain's registered region. If the captain previously disbanded a team, they are offered to resume the old team or start fresh. |
-| `/disband` | Disbands the captain's current team. Data is soft-deleted (`is_active = FALSE`) — nothing is erased. The captain receives a DM confirming the disband. Next time they use `/create_team` they can choose to resume or start fresh. |
+| `/disband` | Disbands the current team. Only Captains or Managers can do this. Data is soft-deleted (`is_active = FALSE`). All team members receive a DM confirming the disband. Next time they use `/create_team` they can choose to resume or start fresh. |
+| `/invite player:<@user>` | Invites a registered player to your active team. Only Captains or Managers can use this. You select the role (Player, Manager, or Coach) and the player receives an interactive DM to Accept or Decline. Upon acceptance, the bot assigns the Discord role to the player. |
 
 ---
 
@@ -152,6 +153,17 @@ Stores team records. One row per captain (`captain_discord_id` UNIQUE).
 | `is_active` | BOOLEAN | FALSE = disbanded, TRUE = active |
 | `created_at` | TIMESTAMPTZ | |
 
+#### `team_members`
+Stores the active roster for teams. 
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | BIGSERIAL PK | |
+| `team_id` | BIGINT FK | References teams(id) |
+| `discord_id` | BIGINT UNIQUE | One team per player |
+| `role` | team_role_enum | 'Player', 'Manager', or 'Coach' |
+| `joined_at` | TIMESTAMPTZ | Auto-set |
+
 #### `team_setup_sessions`
 Temporary state while a team setup thread is in progress. Deleted when the team is finalized or the session times out.
 
@@ -209,6 +221,14 @@ reactivate_team(captain_discord_id, thread_id, team_logo_path=None)
 reactivate_team_fresh(captain_discord_id, team_name, team_name_key,
                       team_tag, team_tag_key, region, team_logo_path, thread_id)
                                           — UPDATE entire row with new details (fresh restart)
+
+### Team Members
+```
+add_team_member(team_id, discord_id, role)
+                                          — insert a player into a team
+get_team_members(team_id)                 — fetch all members in a team
+get_player_team_membership(discord_id)    — fetch active membership info for a player
+clear_team_members(team_id)               — wipe members on reactivation (returns old members)
 ```
 
 ### Team Setup Sessions
