@@ -155,9 +155,9 @@ class ProfileCog(commands.Cog, name="Profile"):
 
         members = await db.get_team_members(team_id)
         
-        players = [f"<@{m['discord_id']}>" for m in members if m['role'] == 'Player']
-        managers = [f"<@{m['discord_id']}>" for m in members if m['role'] == 'Manager']
-        coaches = [f"<@{m['discord_id']}>" for m in members if m['role'] == 'Coach']
+        players = [f"<@{m['discord_id']}> * {m['ign']}" for m in members if m['role'] == 'Player']
+        managers = [f"<@{m['discord_id']}> * {m['ign']}" for m in members if m['role'] == 'Manager']
+        coaches = [f"<@{m['discord_id']}> * {m['ign']}" for m in members if m['role'] == 'Coach']
 
         embed = discord.Embed(
             title="Vega Scrims — Team Profile",
@@ -168,7 +168,7 @@ class ProfileCog(commands.Cog, name="Profile"):
         embed.add_field(name="Tag", value=full_team['team_tag'], inline=True)
         embed.add_field(name="Region", value=full_team['region'], inline=True)
         
-        embed.add_field(name="Captain", value=f"<@{full_team['captain_discord_id']}>", inline=False)
+        embed.add_field(name="Captain", value=f"<@{full_team['captain_discord_id']}> * {full_team['captain_ign']}", inline=False)
         
         if managers:
             embed.add_field(name="Managers", value="\n".join(managers), inline=True)
