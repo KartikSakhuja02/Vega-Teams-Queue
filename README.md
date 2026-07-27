@@ -72,6 +72,8 @@ Configured via a `.env` file (see `.env.example`):
 | `/register ign:<ign> region:<region>` | Register a player profile. Region is locked at registration. Can only be used in the registration channel. |
 | `/profile` | View your own ELO, K/D/A, matches played, and regional ranking. Response is ephemeral. |
 | `/profile player:<@user>` | View another registered player's profile. Shows error if user is not in the database. |
+| `/team-profile` | View the profile, region, and roster of your own team. Response is ephemeral. |
+| `/team-profile player:<@user>` | View the team profile and roster for another player's team. |
 
 ### Support
 

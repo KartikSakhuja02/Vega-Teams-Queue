@@ -115,5 +115,82 @@ class ProfileCog(commands.Cog, name="Profile"):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+    @app_commands.command(
+        name="team-profile",
+        description="View the profile and roster of a team.",
+    )
+    @app_commands.describe(
+        player="A player whose team you want to view (defaults to your own team)."
+    )
+    async def team_profile(
+        self,
+        interaction: discord.Interaction,
+        player: Optional[discord.User] = None,
+    ) -> None:
+        """View a team's profile and members. Ephemeral response."""
+        await interaction.response.defer(ephemeral=True)
+
+        target_user = player or interaction.user
+        
+        # Determine the user's team
+        team = await db.get_team_by_captain(target_user.id)
+        team_id = team["id"] if team else None
+        
+        if not team_id:
+            membership = await db.get_player_team_membership(target_user.id)
+            if membership:
+                team_id = membership["team_id"]
+                
+        if not team_id:
+            if target_user.id == interaction.user.id:
+                await interaction.followup.send("You are not currently in an active team.")
+            else:
+                await interaction.followup.send(f"{target_user.display_name} is not currently in an active team.")
+            return
+
+        full_team = await db.get_team_by_id(team_id)
+        if not full_team or not full_team.get("is_active"):
+            await interaction.followup.send("This team is no longer active.")
+            return
+
+        members = await db.get_team_members(team_id)
+        
+        players = [f"<@{m['discord_id']}>" for m in members if m['role'] == 'Player']
+        managers = [f"<@{m['discord_id']}>" for m in members if m['role'] == 'Manager']
+        coaches = [f"<@{m['discord_id']}>" for m in members if m['role'] == 'Coach']
+
+        embed = discord.Embed(
+            title="Vega Scrims — Team Profile",
+            colour=EMBED_COLOUR,
+        )
+        
+        embed.add_field(name="Team", value=full_team['team_name'], inline=True)
+        embed.add_field(name="Tag", value=full_team['team_tag'], inline=True)
+        embed.add_field(name="Region", value=full_team['region'], inline=True)
+        
+        embed.add_field(name="Captain", value=f"<@{full_team['captain_discord_id']}>", inline=False)
+        
+        if managers:
+            embed.add_field(name="Managers", value="\n".join(managers), inline=True)
+        if coaches:
+            embed.add_field(name="Coaches", value="\n".join(coaches), inline=True)
+        if players:
+            embed.add_field(name="Players", value="\n".join(players), inline=False)
+
+        embed.set_footer(text="Vega Scrims Teams")
+
+        # Attach logo if available
+        logo_path = full_team.get("team_logo_path")
+        if logo_path:
+            import os
+            if os.path.exists(logo_path):
+                file = discord.File(logo_path, filename="logo.png")
+                embed.set_thumbnail(url="attachment://logo.png")
+                await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+                return
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(ProfileCog(bot))

@@ -43,7 +43,11 @@ def _build_commands_embed() -> discord.Embed:
             "`/profile`\n"
             "View your own stats, ELO, overall K/D/A, matches played, and regional ranking.\n\n"
             "`/profile player:<@user>`\n"
-            "View the profile and statistics of another registered player."
+            "View the profile and statistics of another registered player.\n\n"
+            "`/team-profile`\n"
+            "View the profile, region, and roster of your own team.\n\n"
+            "`/team-profile player:<@user>`\n"
+            "View the team profile and roster for another player's team."
         ),
         inline=False,
     )
