@@ -74,7 +74,9 @@ def _build_commands_embed() -> discord.Embed:
         value=(
             "`/invite player:<@user>`\n"
             "Invite a registered player to your active team. Only Captains and Managers can invite players. "
-            "You will be prompted to select their role (Player, Manager, or Coach)."
+            "You will be prompted to select their role (Player, Manager, or Coach).\n\n"
+            "`/kick player:<@user>`\n"
+            "Kick a player from your team. Only Captains and Managers can do this."
         ),
         inline=False,
     )

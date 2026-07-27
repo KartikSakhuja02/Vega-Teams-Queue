@@ -233,6 +233,22 @@ async def clear_team_members(team_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def remove_team_member(team_id: int, discord_id: int) -> bool:
+    """
+    Remove a specific player from a team. Returns True if a row was deleted.
+    """
+    status = await get_pool().execute(
+        """
+        DELETE FROM team_members
+        WHERE team_id = $1 AND discord_id = $2
+        """,
+        team_id,
+        discord_id,
+    )
+    # status is usually something like "DELETE 1" or "DELETE 0"
+    return status.endswith(" 1")
+
+
 # =============================================================================
 # Team helpers
 # =============================================================================

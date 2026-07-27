@@ -86,6 +86,7 @@ Configured via a `.env` file (see `.env.example`):
 | `/create_team` | Opens a private team setup thread. Captain fills in team name and tag via a modal, then uploads the logo image directly in the thread. Region is locked to the captain's registered region. If the captain previously disbanded a team, they are offered to resume the old team or start fresh. |
 | `/disband` | Disbands the current team. Only Captains or Managers can do this. Data is soft-deleted (`is_active = FALSE`). All team members receive a DM confirming the disband. Next time they use `/create_team` they can choose to resume or start fresh. |
 | `/invite player:<@user>` | Invites a registered player to your active team. Only Captains or Managers can use this. You select the role (Player, Manager, or Coach) and the player receives an interactive DM to Accept or Decline. Upon acceptance, the bot assigns the Discord role to the player. |
+| `/kick player:<@user>` | Kicks a player from your team. Only Captains or Managers can use this. The kicked player is notified via DM, and their Discord role is automatically removed. |
 
 ---
 
@@ -226,6 +227,7 @@ reactivate_team_fresh(captain_discord_id, team_name, team_name_key,
 ```
 add_team_member(team_id, discord_id, role)
                                           — insert a player into a team
+remove_team_member(team_id, discord_id)   — remove a specific player from a team
 get_team_members(team_id)                 — fetch all members in a team
 get_player_team_membership(discord_id)    — fetch active membership info for a player
 clear_team_members(team_id)               — wipe members on reactivation (returns old members)

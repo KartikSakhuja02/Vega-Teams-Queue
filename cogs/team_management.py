@@ -17,6 +17,30 @@ log = logging.getLogger(__name__)
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 
 
+async def _notify_team_leadership(bot: commands.Bot, team: dict, message: str) -> None:
+    """Notify the captain and all managers of a team."""
+    notified_ids = set()
+    
+    async def _send(user_id: int):
+        if user_id in notified_ids:
+            return
+        notified_ids.add(user_id)
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+            await user.send(message)
+        except Exception:
+            pass
+            
+    # Notify captain
+    await _send(team['captain_discord_id'])
+    
+    # Notify managers
+    members = await db.get_team_members(team['id'])
+    for member in members:
+        if member['role'] == "Manager":
+            await _send(member['discord_id'])
+
+
 class InviteResponseView(discord.ui.View):
     """View sent to the invited player in DMs."""
     
@@ -84,11 +108,12 @@ class InviteResponseView(discord.ui.View):
             child.disabled = True
         await interaction.message.edit(content=f"You accepted the invite to join **{self.team['team_name']}** as a **{self.role}**!{assigned_role_msg}", view=self, embed=None)
 
-        # Notify the inviter
-        try:
-            await self.inviter.send(f"**{self.target.display_name}** has accepted your invite to join **{self.team['team_name']}** as a **{self.role}**.")
-        except discord.Forbidden:
-            pass
+        # Notify leadership
+        await _notify_team_leadership(
+            self.bot, 
+            self.team, 
+            f"**{self.target.display_name}** has accepted the invite to join **{self.team['team_name']}** as a **{self.role}**."
+        )
 
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
@@ -104,15 +129,17 @@ class InviteResponseView(discord.ui.View):
         
         await interaction.response.defer()
 
+        # Update the original DM message
         for child in self.children:
             child.disabled = True
         await interaction.message.edit(content=f"You declined the invite to join **{self.team['team_name']}**.", view=self, embed=None)
 
-        # Notify the inviter
-        try:
-            await self.inviter.send(f"**{self.target.display_name}** has declined your invite to join **{self.team['team_name']}**.")
-        except discord.Forbidden:
-            pass
+        # Notify leadership
+        await _notify_team_leadership(
+            self.bot, 
+            self.team, 
+            f"**{self.target.display_name}** has declined the invite to join **{self.team['team_name']}**."
+        )
 
 
 class RoleSelectView(discord.ui.View):
@@ -252,6 +279,94 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
             view=view,
             ephemeral=True
         )
+
+    @app_commands.command(
+        name="kick",
+        description="Kick a player from your team.",
+    )
+    @app_commands.describe(
+        player="The registered player you want to kick."
+    )
+    async def kick(
+        self,
+        interaction: discord.Interaction,
+        player: discord.User,
+    ) -> None:
+        """Kick a player from the team. Only captains and managers can use this."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        # 1. Check if caller is captain or manager
+        caller_team = await db.get_team_by_captain(interaction.user.id)
+        
+        # If not captain, check if they are a manager in team_members
+        if not caller_team:
+            membership = await db.get_player_team_membership(interaction.user.id)
+            if membership and membership["role"] == "Manager":
+                pass
+            if not membership or membership["role"] != "Manager":
+                await interaction.response.send_message("You must be the Captain or a Manager of a team to kick players.", ephemeral=True)
+                return
+                
+        team_id = caller_team["id"] if caller_team else membership["team_id"]
+        full_team = await db.get_team_by_id(team_id)
+        
+        if not full_team or not full_team["is_active"]:
+            await interaction.response.send_message("Your team is not active.", ephemeral=True)
+            return
+            
+        # 2. Prevent kicking the captain
+        if player.id == full_team["captain_discord_id"]:
+            await interaction.response.send_message("You cannot kick the captain of the team.", ephemeral=True)
+            return
+            
+        # 3. Check if target is in the team
+        target_membership = await db.get_player_team_membership(player.id)
+        if not target_membership or target_membership["team_id"] != full_team["id"]:
+            await interaction.response.send_message(
+                f"{player.mention} is not in your team.",
+                ephemeral=True,
+            )
+            return
+            
+        # 4. Remove them from the team
+        await interaction.response.defer(ephemeral=True)
+        removed = await db.remove_team_member(full_team["id"], player.id)
+        
+        if not removed:
+            await interaction.followup.send("Could not remove the player. They might have already left.")
+            return
+            
+        # 5. Remove their discord role if they have it
+        try:
+            if hasattr(self.bot, 'guilds') and len(self.bot.guilds) > 0:
+                guild = self.bot.guilds[0]
+                member_obj = guild.get_member(player.id) or await guild.fetch_member(player.id)
+                if member_obj:
+                    discord_role = discord.utils.get(guild.roles, name=target_membership['role'])
+                    if discord_role:
+                        await member_obj.remove_roles(discord_role, reason=f"Kicked from team {full_team['team_name']}")
+        except Exception as e:
+            log.warning(f"Could not remove Discord role {target_membership['role']} from user {player.id}: {e}")
+            
+        # 6. Notify the kicked player
+        try:
+            await player.send(f"You have been kicked from the team **{full_team['team_name']}** by **{interaction.user.display_name}**.")
+        except discord.Forbidden:
+            pass
+            
+        # 7. Notify leadership (Captain + Managers)
+        await _notify_team_leadership(
+            self.bot,
+            full_team,
+            f"**{player.display_name}** has been kicked from the team by **{interaction.user.display_name}**."
+        )
+        
+        await interaction.followup.send(f"Successfully kicked {player.mention} from the team.")
 
 
 async def setup(bot: commands.Bot) -> None:
