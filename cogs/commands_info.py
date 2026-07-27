@@ -69,6 +69,16 @@ def _build_commands_embed() -> discord.Embed:
         inline=False,
     )
 
+    embed.add_field(
+        name="Team Management",
+        value=(
+            "`/invite player:<@user>`\n"
+            "Invite a registered player to your active team. Only Captains and Managers can invite players. "
+            "You will be prompted to select their role (Player, Manager, or Coach)."
+        ),
+        inline=False,
+    )
+
     embed.set_footer(text="Vega Scrims — Do not delete this message.")
     return embed
 
