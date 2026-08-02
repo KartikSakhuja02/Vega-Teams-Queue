@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS players (
     kills            INT          NOT NULL DEFAULT 0,
     deaths           INT          NOT NULL DEFAULT 0,
     assists          INT          NOT NULL DEFAULT 0,
-    matches_played   INT          NOT NULL DEFAULT 0
+    matches_played   INT          NOT NULL DEFAULT 0,
+    wins             INT          NOT NULL DEFAULT 0,
+    mvp_count        INT          NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_players_discord_id ON players (discord_id);
@@ -137,6 +139,8 @@ ALTER TABLE players ADD COLUMN IF NOT EXISTS kills INT NOT NULL DEFAULT 0;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS deaths INT NOT NULL DEFAULT 0;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS assists INT NOT NULL DEFAULT 0;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS matches_played INT NOT NULL DEFAULT 0;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS wins INT NOT NULL DEFAULT 0;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS mvp_count INT NOT NULL DEFAULT 0;
 
 -- Rename logo column from URL to local path (safe to re-run; will no-op if already renamed).
 DO $$

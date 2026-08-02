@@ -4,6 +4,7 @@ Player profile cog — /profile command to fetch player stats and rankings.
 """
 
 import logging
+import traceback
 from typing import Optional
 
 import discord
@@ -11,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import db
+from utils.generate_profile import generate_profile_card
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +46,6 @@ class ProfileCog(commands.Cog, name="Profile"):
         profile_data = await db.get_player_profile(target_user.id)
 
         if not profile_data:
-            # Handle user not found in the database
             if target_user.id == interaction.user.id:
                 await interaction.followup.send(
                     "You are not registered in the database. "
@@ -58,61 +59,25 @@ class ProfileCog(commands.Cog, name="Profile"):
                 )
             return
 
-        # Calculate K/D ratio
-        kills = profile_data["kills"]
-        deaths = profile_data["deaths"]
-        assists = profile_data["assists"]
-        matches_played = profile_data["matches_played"]
-        
-        kd_ratio = kills / deaths if deaths > 0 else float(kills)
-
-        # Build professional, emoji-free profile embed
-        embed = discord.Embed(
-            title="Vega Scrims — Player Profile",
-            colour=EMBED_COLOUR,
-        )
-        
-        embed.add_field(
-            name="Player",
-            value=f"{profile_data['ign']} ({target_user.mention})",
-            inline=True,
-        )
-        embed.add_field(
-            name="Region",
-            value=profile_data["region"],
-            inline=True,
-        )
-        embed.add_field(
-            name="Matches Played",
-            value=str(matches_played),
-            inline=True,
-        )
-        
-        embed.add_field(
-            name="ELO rating",
-            value=str(profile_data["elo"]),
-            inline=True,
-        )
-        embed.add_field(
-            name="Regional Rank",
-            value=f"#{profile_data['regional_rank']}",
-            inline=True,
-        )
-        embed.add_field(
-            name="K/D Ratio",
-            value=f"{kd_ratio:.2f}",
-            inline=True,
-        )
-        
-        embed.add_field(
-            name="Overall K/D/A",
-            value=f"Kills: {kills} | Deaths: {deaths} | Assists: {assists}",
-            inline=False,
+        # Determine avatar URL (1024px PNG for quality)
+        avatar_url = (
+            target_user.display_avatar.replace(format="png", size=512).url
+            if target_user.display_avatar
+            else None
         )
 
-        embed.set_footer(text="Vega Scrims Statistics")
-
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        try:
+            card_buf = await generate_profile_card(profile_data, avatar_url=avatar_url)
+            await interaction.followup.send(
+                file=discord.File(card_buf, filename="profile.png"),
+                ephemeral=True,
+            )
+        except Exception:
+            log.exception("Failed to generate profile card for %s", target_user.id)
+            await interaction.followup.send(
+                "An error occurred while generating the profile card. Please try again later.",
+                ephemeral=True,
+            )
 
 
     @app_commands.command(

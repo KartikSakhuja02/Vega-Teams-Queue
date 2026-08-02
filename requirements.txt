@@ -6,3 +6,9 @@ python-dotenv>=1.0.0
 
 # Async PostgreSQL driver
 asyncpg>=0.29.0
+
+# Image generation for profile cards
+Pillow>=10.0.0
+
+# Async HTTP client (avatar download)
+aiohttp>=3.9.0

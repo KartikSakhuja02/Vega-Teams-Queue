@@ -149,6 +149,8 @@ async def get_player_profile(discord_id: int) -> Optional[dict]:
                 deaths,
                 assists,
                 matches_played,
+                wins,
+                mvp_count,
                 ROW_NUMBER() OVER (PARTITION BY region ORDER BY elo DESC) as regional_rank
             FROM players
             WHERE is_active = TRUE
