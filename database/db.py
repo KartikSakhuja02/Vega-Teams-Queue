@@ -162,6 +162,39 @@ async def get_player_profile(discord_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def update_player_ign(discord_id: int, new_ign: str) -> Optional[dict]:
+    """Update a player's in-game name. Returns the updated row or None."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE players
+        SET ign = $1
+        WHERE discord_id = $2
+        RETURNING *
+        """,
+        new_ign,
+        discord_id,
+    )
+    return dict(row) if row else None
+
+
+async def update_player_region(discord_id: int, new_region: str) -> Optional[dict]:
+    """Update a player's region. Returns the updated row or None."""
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE players
+            SET region = $1::region_enum
+            WHERE discord_id = $2
+            RETURNING *
+            """,
+            new_region,
+            discord_id,
+        )
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
 # =============================================================================
 # Team Member helpers
 # =============================================================================

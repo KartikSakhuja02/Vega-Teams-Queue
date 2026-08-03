@@ -65,6 +65,8 @@ class VegaBot(commands.Bot):
         log.info("Loaded cog: cogs.registration")
         await self.load_extension("cogs.profile")
         log.info("Loaded cog: cogs.profile")
+        await self.load_extension("cogs.edit_profile")
+        log.info("Loaded cog: cogs.edit_profile")
         await self.load_extension("cogs.commands_info")
         log.info("Loaded cog: cogs.commands_info")
         await self.load_extension("cogs.team_creation")
