@@ -31,8 +31,6 @@ log = logging.getLogger(__name__)
 
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 
-VALID_REGIONS = ("India", "APAC", "EMEA", "Americas")
-
 
 # =============================================================================
 # Modals
@@ -64,38 +62,53 @@ class EditIGNModal(discord.ui.Modal, title="Edit In-Game Name"):
         view.message = await interaction.original_response()
 
 
-class EditRegionModal(discord.ui.Modal, title="Edit Region"):
-    new_region: discord.ui.TextInput = discord.ui.TextInput(
-        label="New Region",
-        placeholder="India | APAC | EMEA | Americas",
-        min_length=2,
-        max_length=16,
-        required=True,
-    )
+
+class RegionSelectView(discord.ui.View):
+    """Ephemeral dropdown panel for picking a new region."""
 
     def __init__(self, current_region: str) -> None:
-        super().__init__()
-        self.new_region.default = current_region
+        super().__init__(timeout=60)
+        self.current_region = current_region
+        self.select.placeholder = f"Current: {current_region} — pick a new one"
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        value = self.new_region.value.strip()
-        # Validate region
-        if value not in VALID_REGIONS:
+    @discord.ui.select(
+        cls=discord.ui.Select,
+        placeholder="Select your region…",
+        options=[
+            discord.SelectOption(label="India",    value="India",    emoji="🇮🇳"),
+            discord.SelectOption(label="APAC",     value="APAC",     emoji="🌏"),
+            discord.SelectOption(label="EMEA",     value="EMEA",     emoji="🌍"),
+            discord.SelectOption(label="Americas", value="Americas", emoji="🌎"),
+        ],
+        min_values=1,
+        max_values=1,
+    )
+    async def select(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
+        chosen = select.values[0]
+        if chosen == self.current_region:
             await interaction.response.send_message(
-                f"Invalid region `{value}`. Choose from: {', '.join(VALID_REGIONS)}",
+                f"You already have **{chosen}** as your region. No change needed.",
                 ephemeral=True,
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
-        view = ConfirmChangeView(
+        # Disable the dropdown so it can't be clicked again
+        select.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        # Show confirmation view
+        confirm_view = ConfirmChangeView(
             field="Region",
-            old_value=self.new_region.default or "",
-            new_value=value,
+            old_value=self.current_region,
+            new_value=chosen,
         )
-        embed = _confirm_embed("Region", self.new_region.default or "—", value)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        view.message = await interaction.original_response()
+        embed = _confirm_embed("Region", self.current_region, chosen)
+        await interaction.followup.send(embed=embed, view=confirm_view, ephemeral=True)
+        confirm_view.message = await interaction.original_response()
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
 
 
 # =============================================================================
@@ -210,8 +223,15 @@ class EditFieldView(discord.ui.View):
 
     @discord.ui.button(label="Region", style=discord.ButtonStyle.primary, emoji="🌍", row=0)
     async def edit_region(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        modal = EditRegionModal(current_region=self.profile.get("region", ""))
-        await interaction.response.send_modal(modal)
+        current_region = self.profile.get("region", "India")
+        view = RegionSelectView(current_region=current_region)
+        embed = discord.Embed(
+            title="Select New Region",
+            description="Pick your new region from the dropdown below.",
+            colour=EMBED_COLOUR,
+        )
+        embed.add_field(name="Current Region", value=f"`{current_region}`", inline=False)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     async def on_timeout(self) -> None:
         for item in self.children:
