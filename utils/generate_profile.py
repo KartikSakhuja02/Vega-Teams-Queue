@@ -187,13 +187,21 @@ async def generate_profile_card(
 
     registered_at = profile.get("registered_at")
     created_at_str = (
-        registered_at.strftime("%b %d, %Y") if registered_at else "—"
+        registered_at.strftime("%d/%m/%y") if registered_at else "—"
     )
+
+    # Mask discord ID: show first 3 + last 4, hide middle with 'x', pad to 14 chars
+    # Format: nnnxxxnnnn.... (3 visible, 3 x's, 4 visible, 4 dots = 14 chars)
+    raw_id = str(profile.get("discord_id", ""))
+    if len(raw_id) >= 7:
+        masked_id = raw_id[:3] + "xxx" + raw_id[-4:] + "...."
+    else:
+        masked_id = raw_id  # too short to mask, show as-is
 
     data: dict[str, str] = {
         "discord":    profile.get("discord_username", "—"),
         "created_at": created_at_str,
-        "discord_id": str(profile.get("discord_id", "—")),
+        "discord_id": masked_id,
         "ign":        profile.get("ign", "—"),
         "rank":       f"#{profile.get('regional_rank', '—')}",
         "points":     str(profile.get("elo", 0)),
@@ -205,6 +213,7 @@ async def generate_profile_card(
         "matches":    str(matches),
         "mvp":        str(mvp_count),
     }
+
 
     # ── fetch avatar in the background while we open the template ────────
     diameter   = AVATAR_RADIUS * 2
