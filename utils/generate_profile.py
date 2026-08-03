@@ -55,68 +55,68 @@ COLOUR_PURPLE = (180, 100, 255, 255)
 FIELDS: dict[str, dict[str, Any]] = {
     # ── Player Info card ─────────────────────────────────────────────────
     "discord": {
-        "x": 588, "y": 417,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 950, "y": 532,
+        "size": 35, "colour": COLOUR_WHITE,
     },
     "created_at": {
-        "x": 588, "y": 451,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1000, "y": 576,
+        "size": 35, "colour": COLOUR_WHITE,
     },
     "discord_id": {
-        "x": 588, "y": 485,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 820, "y": 617,
+        "size": 35, "colour": COLOUR_WHITE,
     },
 
     # ── Game Stats card ──────────────────────────────────────────────────
     "ign": {
-        "x": 1050, "y": 155,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1455, "y": 180,
+        "size": 35, "colour": COLOUR_WHITE,
     },
     "rank": {
-        "x": 1050, "y": 207,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1380, "y": 250,
+        "size": 35, "colour": COLOUR_WHITE,
     },
     "points": {
-        "x": 1230, "y": 207,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1660, "y": 250,
+        "size": 35, "colour": COLOUR_WHITE,
     },
     "region": {
-        "x": 1050, "y": 261,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1405, "y": 320,
+        "size": 35, "colour": COLOUR_WHITE,
     },
 
     # ── Player Stats card ────────────────────────────────────────────────
     "kills": {
-        "x": 1050, "y": 399,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1365, "y": 505,
+        "size": 35, "colour": COLOUR_WHITE,
     },
     "kdr": {
-        "x": 1230, "y": 399,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1640, "y": 502,
+        "size": 35, "colour": COLOUR_WHITE,
     },
     "deaths": {
-        "x": 1050, "y": 452,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1405, "y": 570,
+        "size": 35, "colour": COLOUR_WHITE,
     },
     "winrate": {
-        "x": 1230, "y": 452,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1690, "y": 570,
+        "size": 35, "colour": COLOUR_WHITE,
     },
     "matches": {
-        "x": 1050, "y": 506,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1430, "y": 645,
+        "size": 35, "colour": COLOUR_WHITE,
     },
     "mvp": {
-        "x": 1230, "y": 506,
-        "size": 28, "colour": COLOUR_WHITE,
+        "x": 1635, "y": 645,
+        "size": 35, "colour": COLOUR_WHITE,
     },
 }
 
 # ---------------------------------------------------------------------------
 # Avatar compositing
 # ---------------------------------------------------------------------------
-AVATAR_CENTRE = (714, 270)   # (x, y) pixel coords of circle centre
-AVATAR_RADIUS = 120          # radius in pixels
+AVATAR_CENTRE = (940, 360)   # (x, y) pixel coords of circle centre
+AVATAR_RADIUS = 140          # radius in pixels
 
 
 # ---------------------------------------------------------------------------

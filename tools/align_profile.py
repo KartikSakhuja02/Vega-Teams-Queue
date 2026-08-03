@@ -28,7 +28,7 @@ OUTPUT_PATH   = os.path.join("tools", "align_preview.png")
 # ---------------------------------------------------------------------------
 # Font sizes
 # ---------------------------------------------------------------------------
-FONT_SIZE_VALUE = 28
+FONT_SIZE_VALUE = 35
 FONT_SIZE_SMALL = 22
 
 # ---------------------------------------------------------------------------
@@ -53,98 +53,101 @@ COLOUR_PURPLE = (180, 100, 255, 255)
 # ---------------------------------------------------------------------------
 FIELDS = {
     # ── Player Info card ─────────────────────────────────────────────────
+    # Labels: "Discord:", "Created At:", "ID:"
     "discord": {
         "value":  "DarkWiz",
-        "x":      588,
-        "y":      417,
+        "x":      950,
+        "y":      532,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
     "created_at": {
-        "value":  "Jan 5, 2020",
-        "x":      588,
-        "y":      451,
+        "value":  "Jan 5",
+        "x":      1000,
+        "y":      576,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
     "discord_id": {
-        "value":  "123456789012345678",
-        "x":      588,
-        "y":      485,
+        "value":  "12345678901234",
+        "x":      820,
+        "y":      617,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
 
     # ── Game Stats card ──────────────────────────────────────────────────
+    # Labels: "In Game ID:", "Rank:", "Points:", "Region:"
     "ign": {
         "value":  "DarkWizard",
-        "x":      1050,
-        "y":      155,
+        "x":      1455,
+        "y":      180,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
     "rank": {
         "value":  "#3",
-        "x":      1050,
-        "y":      207,
+        "x":      1380,
+        "y":      250,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
     "points": {
         "value":  "1450",
-        "x":      1230,
-        "y":      207,
+        "x":      1660,
+        "y":      250,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
     "region": {
         "value":  "India",
-        "x":      1050,
-        "y":      261,
+        "x":      1405,
+        "y":      320,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
 
     # ── Player Stats card ────────────────────────────────────────────────
+    # Labels: "Kills:", "KDR:", "Deaths:", "Winrate:", "Matches:", "MVP:"
     "kills": {
         "value":  "342",
-        "x":      1050,
-        "y":      399,
+        "x":      1365,
+        "y":      505,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
     "kdr": {
         "value":  "2.41",
-        "x":      1230,
-        "y":      399,
+        "x":      1640,
+        "y":      502,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
     "deaths": {
         "value":  "142",
-        "x":      1050,
-        "y":      452,
+        "x":      1405,
+        "y":      570,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
     "winrate": {
         "value":  "63%",
-        "x":      1230,
-        "y":      452,
+        "x":      1690,
+        "y":      570,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
     "matches": {
         "value":  "88",
-        "x":      1050,
-        "y":      506,
+        "x":      1430,
+        "y":      645,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
     "mvp": {
         "value":  "12",
-        "x":      1230,
-        "y":      506,
+        "x":      1635,
+        "y":      645,
         "size":   FONT_SIZE_VALUE,
         "colour": COLOUR_WHITE,
     },
@@ -153,8 +156,8 @@ FIELDS = {
 # ---------------------------------------------------------------------------
 # Avatar circle  (the purple blob in the Player Info card)
 # ---------------------------------------------------------------------------
-AVATAR_CENTRE = (714, 270)   # (x, y) pixel coords of circle centre
-AVATAR_RADIUS = 120          # radius in pixels
+AVATAR_CENTRE = (940, 360)   # (x, y) pixel coords of circle centre
+AVATAR_RADIUS = 140         # radius in pixels
 
 # ---------------------------------------------------------------------------
 # Render preview
@@ -172,14 +175,6 @@ def main() -> None:
 
         draw.text((cfg["x"], cfg["y"]), cfg["value"], font=font, fill=colour)
 
-        # Red dot at the anchor so you can see the exact anchor point
-        draw.rectangle(
-            [cfg["x"] - 3, cfg["y"] - 3, cfg["x"] + 3, cfg["y"] + 3],
-            fill=(255, 0, 0, 200),
-        )
-        # Tiny label floating above, to identify the field
-        label_font = ImageFont.truetype(FONT_PATH, 14)
-        draw.text((cfg["x"], cfg["y"] - 18), key, font=label_font, fill=(255, 80, 80, 220))
 
     # Yellow ring showing the avatar boundary
     ax, ay = AVATAR_CENTRE
@@ -192,7 +187,7 @@ def main() -> None:
 
     out = Image.alpha_composite(img, overlay).convert("RGB")
     out.save(OUTPUT_PATH)
-    print(f"\nPreview saved → {OUTPUT_PATH}")
+    print(f"\nPreview saved -> {OUTPUT_PATH}")
     print("Open the image, tweak x/y values in FIELDS, re-run, repeat until perfect.")
     print("Then copy the final FIELDS / AVATAR_CENTRE / AVATAR_RADIUS to utils/generate_profile.py.\n")
 
