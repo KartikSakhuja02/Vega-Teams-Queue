@@ -59,7 +59,7 @@ FIELDS: dict[str, dict[str, Any]] = {
         "size": 35, "colour": COLOUR_WHITE,
     },
     "created_at": {
-        "x": 1000, "y": 560,
+        "x": 1010, "y": 576,
         "size": 35, "colour": COLOUR_WHITE,
     },
     "discord_id": {
