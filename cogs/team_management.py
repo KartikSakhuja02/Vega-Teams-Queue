@@ -11,6 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import db
+from cogs.bot_logger import send_log, COL_SUCCESS, COL_DANGER
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +116,20 @@ class InviteResponseView(discord.ui.View):
             f"**{self.target.display_name}** has accepted the invite to join **{self.team['team_name']}** as a **{self.role}**."
         )
 
+        # Log to Discord log channel
+        await send_log(
+            self.bot,
+            title="Invite Accepted",
+            description=f"**{self.target}** accepted an invite to join **{self.team['team_name']}**",
+            colour=COL_SUCCESS,
+            fields=[
+                ("Player",  f"{self.target} ({self.target.id})", True),
+                ("Team",    self.team['team_name'],               True),
+                ("Role",    self.role,                            True),
+                ("Invited by", str(self.inviter),                 True),
+            ],
+        )
+
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
     async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -139,6 +154,19 @@ class InviteResponseView(discord.ui.View):
             self.bot, 
             self.team, 
             f"**{self.target.display_name}** has declined the invite to join **{self.team['team_name']}**."
+        )
+
+        # Log to Discord log channel
+        await send_log(
+            self.bot,
+            title="Invite Declined",
+            description=f"**{self.target}** declined an invite to join **{self.team['team_name']}**",
+            colour=COL_DANGER,
+            fields=[
+                ("Player",    f"{self.target} ({self.target.id})", True),
+                ("Team",      self.team['team_name'],               True),
+                ("Invited by", str(self.inviter),                   True),
+            ],
         )
 
 

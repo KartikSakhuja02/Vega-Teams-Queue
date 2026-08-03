@@ -59,6 +59,8 @@ class VegaBot(commands.Bot):
         await db.init_db()
 
         # 2. Load feature cogs.
+        await self.load_extension("cogs.bot_logger")   # must be first — logs all events
+        log.info("Loaded cog: cogs.bot_logger")
         await self.load_extension("cogs.registration")
         log.info("Loaded cog: cogs.registration")
         await self.load_extension("cogs.profile")
