@@ -32,7 +32,10 @@ def _build_commands_embed() -> discord.Embed:
         name="Player Registration",
         value=(
             "`/register ign:<ign> region:<region>`\n"
-            "Register your player profile. Can only be used in the registration channel."
+            "Register your player profile. Can only be used in the registration channel.\n\n"
+            "`/unregister`\n"
+            "Unregister your profile. Your stats and history are preserved — "
+            "if you register again you can choose to restore your old profile or start completely fresh."
         ),
         inline=False,
     )

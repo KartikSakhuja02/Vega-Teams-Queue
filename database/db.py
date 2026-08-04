@@ -103,12 +103,88 @@ async def register_player(
 
 
 async def get_player(discord_id: int) -> Optional[dict]:
-    """Fetch a player record by Discord snowflake ID."""
+    """Fetch a player record by Discord snowflake ID (active or inactive)."""
     row = await get_pool().fetchrow(
         "SELECT * FROM players WHERE discord_id = $1",
         discord_id,
     )
     return dict(row) if row else None
+
+
+async def deactivate_player(discord_id: int) -> Optional[dict]:
+    """
+    Soft-delete a player by setting is_active = FALSE.
+    Stats and history are preserved. Returns the updated row, or None.
+    """
+    row = await get_pool().fetchrow(
+        """
+        UPDATE players
+        SET is_active = FALSE
+        WHERE discord_id = $1
+        RETURNING *
+        """,
+        discord_id,
+    )
+    return dict(row) if row else None
+
+
+async def reactivate_player(discord_id: int, new_username: str) -> Optional[dict]:
+    """
+    Re-activate an inactive player, refreshing their Discord username.
+    All existing stats, IGN and region are kept intact.
+    Returns the updated row, or None.
+    """
+    row = await get_pool().fetchrow(
+        """
+        UPDATE players
+        SET is_active = TRUE, discord_username = $2
+        WHERE discord_id = $1
+        RETURNING *
+        """,
+        discord_id,
+        new_username,
+    )
+    return dict(row) if row else None
+
+
+async def reset_and_reactivate_player(
+    discord_id: int,
+    new_username: str,
+    new_ign: str,
+    new_region: str,
+) -> Optional[dict]:
+    """
+    Re-activate an inactive player with a completely fresh profile.
+    All previous stats are wiped to 0 and ELO reset to 1000.
+    Returns the updated row, or None.
+    """
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE players
+            SET is_active        = TRUE,
+                discord_username = $2,
+                ign              = $3,
+                region           = $4::region_enum,
+                elo              = 1000,
+                kills            = 0,
+                deaths           = 0,
+                assists          = 0,
+                matches_played   = 0,
+                wins             = 0,
+                mvp_count        = 0,
+                registered_at    = NOW()
+            WHERE discord_id = $1
+            RETURNING *
+            """,
+            discord_id,
+            new_username,
+            new_ign,
+            new_region,
+        )
+        return dict(row) if row else None
+    except Exception:
+        return None
 
 
 async def get_all_players(region: Optional[str] = None) -> list:

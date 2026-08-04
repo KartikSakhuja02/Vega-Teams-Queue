@@ -14,6 +14,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import db
+from cogs.bot_logger import send_log, COL_SUCCESS, COL_DANGER
 
 log = logging.getLogger(__name__)
 
@@ -153,6 +154,159 @@ class RegistrationRegionView(discord.ui.View):
     def __init__(self, cog: "RegistrationCog") -> None:
         super().__init__(timeout=180)
         self.add_item(RegistrationRegionSelect(cog))
+
+
+class ResumeOrFreshView(discord.ui.View):
+    """
+    Shown when an unregistered (inactive) user tries to register again.
+    Lets them keep their old profile or start completely fresh.
+    """
+
+    def __init__(self, cog: "RegistrationCog", existing: dict, new_ign: str, new_region: str) -> None:
+        super().__init__(timeout=120)
+        self.cog        = cog
+        self.existing   = existing
+        self.new_ign    = new_ign
+        self.new_region = new_region
+
+    async def _finish(self, interaction: discord.Interaction) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        self.stop()
+
+    @discord.ui.button(label="Continue with old profile", style=discord.ButtonStyle.primary, emoji="♻️")
+    async def resume_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._finish(interaction)
+
+        player = await db.reactivate_player(
+            discord_id=interaction.user.id,
+            new_username=str(interaction.user),
+        )
+        if not player:
+            await interaction.followup.send("Something went wrong. Please contact an admin.", ephemeral=True)
+            return
+
+        registered_at = format_regional_time(player["registered_at"], player["region"])
+        await interaction.followup.send(
+            "Welcome back! Your old profile has been restored.\n\n"
+            f"IGN        : {player['ign']}\n"
+            f"Region     : {player['region']}\n"
+            f"Registered : {registered_at}",
+            ephemeral=True,
+        )
+        asyncio.create_task(self.cog._send_welcome_dm(interaction.user, player))
+        await send_log(
+            interaction.client,
+            title="Player Re-registered (Resumed)",
+            description=f"{interaction.user.mention} restored their old profile.",
+            colour=COL_SUCCESS,
+            fields=[
+                ("User",   f"{interaction.user} ({interaction.user.id})", True),
+                ("IGN",    player["ign"],                                  True),
+                ("Region", player["region"],                               True),
+            ],
+        )
+
+    @discord.ui.button(label="Start fresh", style=discord.ButtonStyle.danger, emoji="🆕")
+    async def fresh_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._finish(interaction)
+
+        player = await db.reset_and_reactivate_player(
+            discord_id=interaction.user.id,
+            new_username=str(interaction.user),
+            new_ign=self.new_ign,
+            new_region=self.new_region,
+        )
+        if not player:
+            await interaction.followup.send("Something went wrong. Please contact an admin.", ephemeral=True)
+            return
+
+        registered_at = format_regional_time(player["registered_at"], player["region"])
+        await interaction.followup.send(
+            "Fresh profile created! All previous stats have been reset.\n\n"
+            f"IGN        : {player['ign']}\n"
+            f"Region     : {player['region']}\n"
+            f"Registered : {registered_at}",
+            ephemeral=True,
+        )
+        asyncio.create_task(self.cog._send_welcome_dm(interaction.user, player))
+        await send_log(
+            interaction.client,
+            title="Player Re-registered (Fresh Start)",
+            description=f"{interaction.user.mention} started a fresh profile (stats wiped).",
+            colour=COL_SUCCESS,
+            fields=[
+                ("User",   f"{interaction.user} ({interaction.user.id})", True),
+                ("IGN",    player["ign"],                                  True),
+                ("Region", player["region"],                               True),
+            ],
+        )
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+
+
+class UnregisterConfirmView(discord.ui.View):
+    """Asks the user to confirm before unregistering."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=60)
+
+    async def _disable(self, interaction: discord.Interaction) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        self.stop()
+
+    @discord.ui.button(label="Yes, unregister me", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+
+        result = await db.deactivate_player(interaction.user.id)
+        if not result:
+            await interaction.followup.send(
+                "Could not unregister you — you may not be registered. Contact an admin if this is wrong.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "You have been unregistered from Vega Scrims.\n"
+            "Your stats and history are preserved. "
+            "If you register again you will be asked whether to restore your old profile or start fresh.",
+            ephemeral=True,
+        )
+        await send_log(
+            interaction.client,
+            title="Player Unregistered",
+            description=f"{interaction.user.mention} unregistered from Vega Scrims.",
+            colour=COL_DANGER,
+            fields=[
+                ("User", f"{interaction.user} ({interaction.user.id})", True),
+                ("IGN",  result["ign"],                                  True),
+            ],
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+        await interaction.followup.send("Cancelled. You are still registered.", ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
 
 
 class RegistrationView(discord.ui.View):
@@ -304,9 +458,45 @@ class RegistrationCog(commands.Cog, name="Registration"):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
-        discord_id = interaction.user.id
+        discord_id       = interaction.user.id
         discord_username = str(interaction.user)
 
+        # ── Check for an existing (possibly inactive) account ────────────
+        existing = await db.get_player(discord_id)
+
+        if existing and not existing["is_active"]:
+            # User previously unregistered — ask resume or fresh start
+            embed = discord.Embed(
+                title="Previous Profile Found",
+                description=(
+                    "You have previously unregistered from Vega Scrims, "
+                    "but your old profile is still on record.\n\n"
+                    "What would you like to do?"
+                ),
+                colour=EMBED_COLOUR,
+            )
+            embed.add_field(name="Old IGN",    value=existing["ign"],    inline=True)
+            embed.add_field(name="Old Region", value=existing["region"], inline=True)
+            embed.add_field(
+                name="♻️ Continue with old profile",
+                value="Restore your previous IGN, region, and all stats.",
+                inline=False,
+            )
+            embed.add_field(
+                name="🆕 Start fresh",
+                value=f"Wipe all stats and register as **{ign}** in **{region_value}**.",
+                inline=False,
+            )
+            view = ResumeOrFreshView(
+                cog=self,
+                existing=existing,
+                new_ign=ign,
+                new_region=region_value,
+            )
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            return
+
+        # ── Normal registration ──────────────────────────────────────────
         # Insert the player.
         player = await db.register_player(
             discord_id=discord_id,
@@ -316,16 +506,15 @@ class RegistrationCog(commands.Cog, name="Registration"):
         )
 
         if player is None:
-            # UniqueViolation — edge case (race condition or stale cache).
-            existing = await db.get_player(discord_id)
-            if existing:
+            # UniqueViolation — already active.
+            if existing and existing["is_active"]:
                 registered_at = format_regional_time(existing["registered_at"], existing["region"])
                 await interaction.followup.send(
                     "You are already registered.\n\n"
                     f"IGN        : {existing['ign']}\n"
                     f"Region     : {existing['region']}\n"
                     f"Registered : {registered_at}\n\n"
-                    "Contact an admin if you need to update your details.",
+                    "Use `/edit-profile` to update your IGN or region.",
                     ephemeral=True,
                 )
                 return
@@ -338,7 +527,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
 
         registered_at = format_regional_time(player["registered_at"], player["region"])
 
-        # Ephemeral success reply in the channel.
+        # Ephemeral success reply.
         await interaction.followup.send(
             "Registration successful.\n\n"
             f"IGN        : {ign}\n"
@@ -347,14 +536,61 @@ class RegistrationCog(commands.Cog, name="Registration"):
             ephemeral=True,
         )
 
-        # Send welcome DM concurrently so the command interaction is finalized instantly.
         asyncio.create_task(self._send_welcome_dm(interaction.user, player))
+        await send_log(
+            interaction.client,
+            title="Player Registered",
+            description=f"{interaction.user.mention} registered for Vega Scrims.",
+            colour=COL_SUCCESS,
+            fields=[
+                ("User",   f"{interaction.user} ({interaction.user.id})", True),
+                ("IGN",    ign,                                            True),
+                ("Region", player["region"],                               True),
+            ],
+        )
         log.info(
             "Player registered — discord_id=%d  ign=%s  region=%s",
-            discord_id,
-            ign,
-            player["region"],
+            discord_id, ign, player["region"],
         )
+
+    # ------------------------------------------------------------------
+    # /unregister command
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="unregister",
+        description="Unregister your Vega Scrims profile. Your stats are preserved and can be restored later.",
+    )
+    async def unregister(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Soft-delete the calling user's player profile."""
+        await interaction.response.defer(ephemeral=True)
+
+        player = await db.get_player(interaction.user.id)
+        if not player or not player["is_active"]:
+            await interaction.followup.send(
+                "You are not currently registered in Vega Scrims.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="Unregister from Vega Scrims",
+            description=(
+                "Are you sure you want to unregister?\n\n"
+                "Your stats and history **will be preserved**. "
+                "If you register again you will be able to restore your old profile or start fresh."
+            ),
+            colour=discord.Colour.red(),
+        )
+        embed.add_field(name="IGN",    value=player["ign"],    inline=True)
+        embed.add_field(name="Region", value=player["region"], inline=True)
+        embed.set_footer(text="This action can be reversed by registering again.")
+
+        view = UnregisterConfirmView()
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ------------------------------------------------------------------
     # DM helper
