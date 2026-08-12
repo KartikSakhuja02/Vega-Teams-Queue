@@ -160,9 +160,19 @@ class ResumeOrFreshView(discord.ui.View):
     """
     Shown when an unregistered (inactive) user tries to register again.
     Lets them keep their old profile or start completely fresh.
+
+    new_ign / new_region are optional:
+      - Provided   → came from the slash command; "Start fresh" uses them directly.
+      - Not provided → came from the button form; "Start fresh" collects new details.
     """
 
-    def __init__(self, cog: "RegistrationCog", existing: dict, new_ign: str, new_region: str) -> None:
+    def __init__(
+        self,
+        cog: "RegistrationCog",
+        existing: dict,
+        new_ign: str | None = None,
+        new_region: str | None = None,
+    ) -> None:
         super().__init__(timeout=120)
         self.cog        = cog
         self.existing   = existing
@@ -214,17 +224,87 @@ class ResumeOrFreshView(discord.ui.View):
 
     @discord.ui.button(label="Start fresh", style=discord.ButtonStyle.danger, emoji="🆕")
     async def fresh_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.defer(ephemeral=True)
-        await self._finish(interaction)
+        if self.new_ign and self.new_region:
+            # Details already supplied (slash command path) — reset immediately.
+            await interaction.response.defer(ephemeral=True)
+            await self._finish(interaction)
+
+            player = await db.reset_and_reactivate_player(
+                discord_id=interaction.user.id,
+                new_username=str(interaction.user),
+                new_ign=self.new_ign,
+                new_region=self.new_region,
+            )
+            if not player:
+                await interaction.followup.send("Something went wrong. Please contact an admin.", ephemeral=True)
+                return
+
+            registered_at = format_regional_time(player["registered_at"], player["region"])
+            await interaction.followup.send(
+                "Fresh profile created! All previous stats have been reset.\n\n"
+                f"IGN        : {player['ign']}\n"
+                f"Region     : {player['region']}\n"
+                f"Registered : {registered_at}",
+                ephemeral=True,
+            )
+            asyncio.create_task(self.cog._send_welcome_dm(interaction.user, player))
+            await send_log(
+                interaction.client,
+                title="Player Re-registered (Fresh Start)",
+                description=f"{interaction.user.mention} started a fresh profile (stats wiped).",
+                colour=COL_SUCCESS,
+                fields=[
+                    ("User",   f"{interaction.user} ({interaction.user.id})", True),
+                    ("IGN",    player["ign"],                                  True),
+                    ("Region", player["region"],                               True),
+                ],
+            )
+        else:
+            # No details yet (button path) — collect them via region select + modal.
+            await self._finish(interaction)
+            await interaction.response.send_message(
+                "Select your new region to continue.",
+                view=FreshStartRegionView(self.cog),
+                ephemeral=True,
+            )
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# Fresh-start region select + modal  (used when "Start fresh" is clicked from
+# the button form — no details pre-filled).
+# ---------------------------------------------------------------------------
+
+class FreshStartModal(discord.ui.Modal, title="Start Fresh — New Profile"):
+    ign = discord.ui.TextInput(
+        label="New In-Game Name",
+        placeholder="Enter your exact IGN",
+        max_length=100,
+    )
+
+    def __init__(self, cog: "RegistrationCog", region_value: str) -> None:
+        super().__init__()
+        self.cog          = cog
+        self.region_value = region_value
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
 
         player = await db.reset_and_reactivate_player(
             discord_id=interaction.user.id,
             new_username=str(interaction.user),
-            new_ign=self.new_ign,
-            new_region=self.new_region,
+            new_ign=str(self.ign.value).strip(),
+            new_region=self.region_value,
         )
         if not player:
-            await interaction.followup.send("Something went wrong. Please contact an admin.", ephemeral=True)
+            await interaction.followup.send(
+                "Something went wrong during reset. Please contact an admin.",
+                ephemeral=True,
+            )
             return
 
         registered_at = format_regional_time(player["registered_at"], player["region"])
@@ -239,7 +319,7 @@ class ResumeOrFreshView(discord.ui.View):
         await send_log(
             interaction.client,
             title="Player Re-registered (Fresh Start)",
-            description=f"{interaction.user.mention} started a fresh profile (stats wiped).",
+            description=f"{interaction.user.mention} started a fresh profile via button form (stats wiped).",
             colour=COL_SUCCESS,
             fields=[
                 ("User",   f"{interaction.user} ({interaction.user.id})", True),
@@ -248,9 +328,26 @@ class ResumeOrFreshView(discord.ui.View):
             ],
         )
 
-    async def on_timeout(self) -> None:
-        for item in self.children:
-            item.disabled = True  # type: ignore[union-attr]
+
+class FreshStartRegionSelect(discord.ui.Select):
+    def __init__(self, cog: "RegistrationCog") -> None:
+        super().__init__(
+            placeholder="Choose your new region",
+            min_values=1,
+            max_values=1,
+            options=_build_region_options(),
+        )
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        region_value = self.values[0]
+        await interaction.response.send_modal(FreshStartModal(self.cog, region_value))
+
+
+class FreshStartRegionView(discord.ui.View):
+    def __init__(self, cog: "RegistrationCog") -> None:
+        super().__init__(timeout=180)
+        self.add_item(FreshStartRegionSelect(cog))
 
 
 class UnregisterConfirmView(discord.ui.View):
@@ -331,6 +428,50 @@ class RegistrationView(discord.ui.View):
             )
             return
 
+        # ── Check DB BEFORE collecting any details ─────────────────────────
+        existing = await db.get_player(interaction.user.id)
+
+        if existing and existing["is_active"]:
+            registered_at = format_regional_time(existing["registered_at"], existing["region"])
+            await interaction.response.send_message(
+                f"You are already registered!\n\n"
+                f"IGN        : {existing['ign']}\n"
+                f"Region     : {existing['region']}\n"
+                f"Registered : {registered_at}\n\n"
+                "Use `/edit-profile` to update your IGN or region.",
+                ephemeral=True,
+            )
+            return
+
+        if existing and not existing["is_active"]:
+            # Previously unregistered — ask resume or fresh start NOW
+            embed = discord.Embed(
+                title="Previous Profile Found",
+                description=(
+                    "You have previously unregistered from Vega Scrims, "
+                    "but your old profile is still on record.\n\n"
+                    "What would you like to do?"
+                ),
+                colour=EMBED_COLOUR,
+            )
+            embed.add_field(name="Old IGN",    value=existing["ign"],    inline=True)
+            embed.add_field(name="Old Region", value=existing["region"], inline=True)
+            embed.add_field(
+                name="♻️ Continue with old profile",
+                value="Restore your previous IGN, region, and all stats.",
+                inline=False,
+            )
+            embed.add_field(
+                name="🆕 Start fresh",
+                value="Wipe all stats and register a brand-new profile.",
+                inline=False,
+            )
+            # new_ign / new_region are None — "Start fresh" will collect them
+            view = ResumeOrFreshView(cog=self.cog, existing=existing)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            return
+
+        # New user — normal registration flow
         await interaction.response.send_message(
             "Select your region to continue with registration.",
             view=RegistrationRegionView(self.cog),
