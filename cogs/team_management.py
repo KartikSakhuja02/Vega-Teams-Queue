@@ -903,65 +903,35 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
 
     @app_commands.command(
         name="player_change_region",
-        description="Change a specific player's region. Captain/Manager only.",
+        description="Change your own region.",
     )
-    @app_commands.describe(player="The team member whose region you want to change.")
     async def player_change_region(
         self,
         interaction: discord.Interaction,
-        player: discord.User,
     ) -> None:
-        """Captain/Manager: change a specific player's region."""
+        """Any registered player can change their own region."""
         await interaction.response.defer(ephemeral=True)
 
-        # Auth: must be captain or manager
-        caller_team = await db.get_team_by_captain(interaction.user.id)
-        caller_membership = await db.get_player_team_membership(interaction.user.id)
-
-        if not caller_team and (
-            not caller_membership or caller_membership.get("role") not in ("Manager",)
-        ):
+        # Just needs to be registered
+        player_record = await db.get_player(interaction.user.id)
+        if not player_record or not player_record["is_active"]:
             await interaction.followup.send(
-                "You must be the Captain or a Manager of a team to use this command.",
-                ephemeral=True,
-            )
-            return
-
-        team_id = caller_team["id"] if caller_team else caller_membership["team_id"]
-        full_team = await db.get_team_by_id(team_id)
-        if not full_team or not full_team["is_active"]:
-            await interaction.followup.send("Your team is not active.", ephemeral=True)
-            return
-
-        # Target must be in the same team
-        target_membership = await db.get_player_team_membership(player.id)
-        is_target_captain = full_team["captain_discord_id"] == player.id
-        if not is_target_captain and (
-            not target_membership or target_membership["team_id"] != team_id
-        ):
-            await interaction.followup.send(
-                f"{player.mention} is not in your team.",
-                ephemeral=True,
-            )
-            return
-
-        # Fetch current player record
-        target_player = await db.get_player(player.id)
-        if not target_player:
-            await interaction.followup.send(
-                f"{player.mention} does not have a registered profile.",
+                "You are not registered. Use `/register` first.",
                 ephemeral=True,
             )
             return
 
         embed = discord.Embed(
-            title="Change Player Region",
-            description=f"Select a new region for {player.mention}.",
+            title="Change Your Region",
+            description="Select your new region from the dropdown below.",
             colour=EMBED_COLOUR,
         )
-        embed.add_field(name="Player",         value=str(player),                   inline=True)
-        embed.add_field(name="Current Region", value=f"`{target_player['region']}`", inline=True)
-        view = _PlayerRegionSelectView(bot=self.bot, target=player, current_region=target_player["region"])
+        embed.add_field(name="Current Region", value=f"`{player_record['region']}`", inline=False)
+        view = _PlayerRegionSelectView(
+            bot=self.bot,
+            target=interaction.user,
+            current_region=player_record["region"],
+        )
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 

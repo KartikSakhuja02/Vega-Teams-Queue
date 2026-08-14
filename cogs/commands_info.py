@@ -94,8 +94,8 @@ def _build_commands_embed() -> discord.Embed:
             "`/team_change_region`\n"
             "Change the entire team's region via dropdown. Captain only. "
             "Also updates every team member's individual region and DMs all members.\n\n"
-            "`/player_change_region player:<@user>`\n"
-            "Change a specific team member's individual region via dropdown. Captain/Manager only."
+            "`/player_change_region`\n"
+            "Change your own region via dropdown. Available to all registered players."
         ),
         inline=False,
     )
