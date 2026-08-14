@@ -90,8 +90,12 @@ def _build_commands_embed() -> discord.Embed:
             "`/leave`\n"
             "Leave your current team (Players, Managers, and Coaches only).\n\n"
             "`/change_team_tag new_tag:<tag>`\n"
-            "Change your team's tag (e.g. `VGA`). Captain only. 2–6 alphanumeric characters. "
-            "All team members are notified via DM when the tag changes."
+            "Change your team's tag (e.g. `VGA`). Captain only. 2–6 alphanumeric characters.\n\n"
+            "`/team_change_region`\n"
+            "Change the entire team's region via dropdown. Captain only. "
+            "Also updates every team member's individual region and DMs all members.\n\n"
+            "`/player_change_region player:<@user>`\n"
+            "Change a specific team member's individual region via dropdown. Captain/Manager only."
         ),
         inline=False,
     )

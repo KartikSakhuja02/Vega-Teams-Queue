@@ -217,6 +217,279 @@ class RoleSelectView(discord.ui.View):
         await self._send_invite(interaction, "Coach")
 
 
+REGION_OPTIONS = [
+    discord.SelectOption(label="India",    value="India",    emoji="🇮🇳"),
+    discord.SelectOption(label="APAC",     value="APAC",     emoji="🌏"),
+    discord.SelectOption(label="EMEA",     value="EMEA",     emoji="🌍"),
+    discord.SelectOption(label="Americas", value="Americas", emoji="🌎"),
+]
+
+
+# ---------------------------------------------------------------------------
+# /team_change_region  views
+# ---------------------------------------------------------------------------
+
+class _TeamRegionConfirmView(discord.ui.View):
+    """Confirm/Cancel before changing every team member's region."""
+
+    def __init__(self, bot: commands.Bot, team: dict, new_region: str) -> None:
+        super().__init__(timeout=60)
+        self.bot        = bot
+        self.team       = team
+        self.new_region = new_region
+
+    async def _disable(self, interaction: discord.Interaction) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        self.stop()
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+
+        old_region = self.team["region"]
+
+        # 1. Update team row
+        updated_team = await db.update_team_region(self.team["id"], self.new_region)
+        if not updated_team:
+            await interaction.followup.send("Failed to update team region. Please try again.", ephemeral=True)
+            return
+
+        # 2. Bulk-update all member rows
+        count = await db.bulk_update_team_members_region(self.team["id"], self.new_region)
+
+        await interaction.followup.send(
+            f"✅ Team region updated to **{self.new_region}**.\n"
+            f"**{count}** team member(s) had their individual region updated too.",
+            ephemeral=True,
+        )
+
+        # 3. DM every member
+        members = await db.get_team_members(self.team["id"])
+        for member in members:
+            try:
+                user = self.bot.get_user(member["discord_id"]) or await self.bot.fetch_user(member["discord_id"])
+                await user.send(
+                    f"Your team **{self.team['team_name']}** has moved to a new region: "
+                    f"**{self.new_region}** (was `{old_region}`).\n"
+                    f"Your individual player region has also been updated to **{self.new_region}**."
+                )
+            except Exception:
+                pass
+
+        # 4. Also DM/notify captain if they're not in team_members
+        try:
+            captain = self.bot.get_user(self.team["captain_discord_id"]) or \
+                      await self.bot.fetch_user(self.team["captain_discord_id"])
+            await captain.send(
+                f"Your team **{self.team['team_name']}** has moved to a new region: "
+                f"**{self.new_region}** (was `{old_region}`).\n"
+                f"Your individual player region has also been updated to **{self.new_region}**."
+            )
+        except Exception:
+            pass
+
+        await send_log(
+            self.bot,
+            title="Team Region Changed",
+            description=f"**{self.team['team_name']}** region changed by {interaction.user.mention}",
+            colour=COL_SUCCESS,
+            fields=[
+                ("Team",        self.team["team_name"],                        True),
+                ("Old Region",  f"`{old_region}`",                             True),
+                ("New Region",  f"`{self.new_region}`",                        True),
+                ("Members updated", str(count),                                True),
+                ("Captain",     f"{interaction.user} ({interaction.user.id})", True),
+            ],
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+        await interaction.followup.send("Cancelled. Region was not changed.", ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+
+
+class _TeamRegionSelectView(discord.ui.View):
+    """Dropdown to pick new team region."""
+
+    def __init__(self, bot: commands.Bot, team: dict) -> None:
+        super().__init__(timeout=60)
+        self.bot  = bot
+        self.team = team
+
+    @discord.ui.select(
+        cls=discord.ui.Select,
+        placeholder="Select new region…",
+        options=REGION_OPTIONS,
+        min_values=1,
+        max_values=1,
+    )
+    async def region_select(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
+        chosen = select.values[0]
+        if chosen == self.team["region"]:
+            await interaction.response.send_message(
+                f"Your team is already in **{chosen}**. No change needed.",
+                ephemeral=True,
+            )
+            return
+
+        # Disable dropdown then show confirmation
+        select.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        members = await db.get_team_members(self.team["id"])
+        member_count = len(members) + 1  # +1 for captain
+
+        confirm_embed = discord.Embed(
+            title="Confirm Region Change",
+            description=(
+                f"Are you sure you want to move **{self.team['team_name']}** to **{chosen}**?\n\n"
+                f"⚠️ This will update the individual region of **{member_count} player(s)** in the team."
+            ),
+            colour=EMBED_COLOUR,
+        )
+        confirm_embed.add_field(name="Current Region", value=f"`{self.team['region']}`", inline=True)
+        confirm_embed.add_field(name="New Region",     value=f"`{chosen}`",              inline=True)
+
+        view = _TeamRegionConfirmView(bot=self.bot, team=self.team, new_region=chosen)
+        await interaction.followup.send(embed=confirm_embed, view=view, ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# /player_change_region  views
+# ---------------------------------------------------------------------------
+
+class _PlayerRegionConfirmView(discord.ui.View):
+    """Confirm/Cancel before changing a single player's region."""
+
+    def __init__(self, bot: commands.Bot, target: discord.User, old_region: str, new_region: str) -> None:
+        super().__init__(timeout=60)
+        self.bot        = bot
+        self.target     = target
+        self.old_region = old_region
+        self.new_region = new_region
+
+    async def _disable(self, interaction: discord.Interaction) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        self.stop()
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+
+        updated = await db.update_player_region(self.target.id, self.new_region)
+        if not updated:
+            await interaction.followup.send("Failed to update region. Please try again.", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            f"✅ {self.target.mention}'s region updated from **{self.old_region}** → **{self.new_region}**.",
+            ephemeral=True,
+        )
+
+        # DM the affected player
+        try:
+            await self.target.send(
+                f"Your individual region has been updated to **{self.new_region}** "
+                f"(was `{self.old_region}`) by a team manager/captain."
+            )
+        except Exception:
+            pass
+
+        await send_log(
+            self.bot,
+            title="Player Region Changed",
+            description=f"{self.target.mention}'s region changed by {interaction.user.mention}",
+            colour=COL_SUCCESS,
+            fields=[
+                ("Player",      f"{self.target} ({self.target.id})",           True),
+                ("Old Region",  f"`{self.old_region}`",                        True),
+                ("New Region",  f"`{self.new_region}`",                        True),
+                ("Changed by",  f"{interaction.user} ({interaction.user.id})", True),
+            ],
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+        await interaction.followup.send("Cancelled. Region was not changed.", ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+
+
+class _PlayerRegionSelectView(discord.ui.View):
+    """Dropdown to pick a player's new region."""
+
+    def __init__(self, bot: commands.Bot, target: discord.User, current_region: str) -> None:
+        super().__init__(timeout=60)
+        self.bot            = bot
+        self.target         = target
+        self.current_region = current_region
+
+    @discord.ui.select(
+        cls=discord.ui.Select,
+        placeholder="Select new region…",
+        options=REGION_OPTIONS,
+        min_values=1,
+        max_values=1,
+    )
+    async def region_select(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
+        chosen = select.values[0]
+        if chosen == self.current_region:
+            await interaction.response.send_message(
+                f"{self.target.mention} is already in **{chosen}**. No change needed.",
+                ephemeral=True,
+            )
+            return
+
+        select.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        confirm_embed = discord.Embed(
+            title="Confirm Region Change",
+            description=f"Change {self.target.mention}'s region?",
+            colour=EMBED_COLOUR,
+        )
+        confirm_embed.add_field(name="Player",         value=str(self.target),         inline=True)
+        confirm_embed.add_field(name="Current Region", value=f"`{self.current_region}`", inline=True)
+        confirm_embed.add_field(name="New Region",     value=f"`{chosen}`",             inline=True)
+
+        view = _PlayerRegionConfirmView(
+            bot=self.bot,
+            target=self.target,
+            old_region=self.current_region,
+            new_region=chosen,
+        )
+        await interaction.followup.send(embed=confirm_embed, view=view, ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+
+
 class _TagChangeConfirmView(discord.ui.View):
     """Confirmation view for /change_team_tag."""
 
@@ -591,6 +864,104 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
         embed.add_field(name="Current Tag", value=f"`{team['team_tag']}`", inline=True)
         embed.add_field(name="New Tag",     value=f"`{tag}`",              inline=True)
         embed.add_field(name="Team",        value=team["team_name"],        inline=False)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ── /team_change_region ──────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="team_change_region",
+        description="Change your team's region. Changes all team members' individual regions too. Captain only.",
+    )
+    async def team_change_region(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Captain-only: change the entire team's region."""
+        await interaction.response.defer(ephemeral=True)
+
+        team = await db.get_team_by_captain(interaction.user.id)
+        if not team:
+            await interaction.followup.send(
+                "You are not the Captain of an active team.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="Change Team Region",
+            description=(
+                f"Select the new region for **{team['team_name']}**.\n\n"
+                "⚠️ **This will also update the individual region of every team member.**"
+            ),
+            colour=EMBED_COLOUR,
+        )
+        embed.add_field(name="Current Region", value=f"`{team['region']}`", inline=False)
+        view = _TeamRegionSelectView(bot=self.bot, team=team)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ── /player_change_region ────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="player_change_region",
+        description="Change a specific player's region. Captain/Manager only.",
+    )
+    @app_commands.describe(player="The team member whose region you want to change.")
+    async def player_change_region(
+        self,
+        interaction: discord.Interaction,
+        player: discord.User,
+    ) -> None:
+        """Captain/Manager: change a specific player's region."""
+        await interaction.response.defer(ephemeral=True)
+
+        # Auth: must be captain or manager
+        caller_team = await db.get_team_by_captain(interaction.user.id)
+        caller_membership = await db.get_player_team_membership(interaction.user.id)
+
+        if not caller_team and (
+            not caller_membership or caller_membership.get("role") not in ("Manager",)
+        ):
+            await interaction.followup.send(
+                "You must be the Captain or a Manager of a team to use this command.",
+                ephemeral=True,
+            )
+            return
+
+        team_id = caller_team["id"] if caller_team else caller_membership["team_id"]
+        full_team = await db.get_team_by_id(team_id)
+        if not full_team or not full_team["is_active"]:
+            await interaction.followup.send("Your team is not active.", ephemeral=True)
+            return
+
+        # Target must be in the same team
+        target_membership = await db.get_player_team_membership(player.id)
+        is_target_captain = full_team["captain_discord_id"] == player.id
+        if not is_target_captain and (
+            not target_membership or target_membership["team_id"] != team_id
+        ):
+            await interaction.followup.send(
+                f"{player.mention} is not in your team.",
+                ephemeral=True,
+            )
+            return
+
+        # Fetch current player record
+        target_player = await db.get_player(player.id)
+        if not target_player:
+            await interaction.followup.send(
+                f"{player.mention} does not have a registered profile.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="Change Player Region",
+            description=f"Select a new region for {player.mention}.",
+            colour=EMBED_COLOUR,
+        )
+        embed.add_field(name="Player",         value=str(player),                   inline=True)
+        embed.add_field(name="Current Region", value=f"`{target_player['region']}`", inline=True)
+        view = _PlayerRegionSelectView(bot=self.bot, target=player, current_region=target_player["region"])
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 

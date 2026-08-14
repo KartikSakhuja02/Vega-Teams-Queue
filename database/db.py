@@ -271,6 +271,47 @@ async def update_player_region(discord_id: int, new_region: str) -> Optional[dic
         return None
 
 
+async def update_team_region(team_id: int, new_region: str) -> Optional[dict]:
+    """Update the region of a team row. Returns updated row or None."""
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE teams
+            SET region = $1::region_enum
+            WHERE id = $2
+            RETURNING *
+            """,
+            new_region,
+            team_id,
+        )
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+async def bulk_update_team_members_region(team_id: int, new_region: str) -> int:
+    """
+    Update the region of every player who is a member of *team_id*.
+    Returns the number of rows updated.
+    """
+    try:
+        result = await get_pool().execute(
+            """
+            UPDATE players
+            SET region = $1::region_enum
+            WHERE discord_id IN (
+                SELECT discord_id FROM team_members WHERE team_id = $2
+            )
+            """,
+            new_region,
+            team_id,
+        )
+        # result is e.g. "UPDATE 5"
+        return int(result.split()[-1])
+    except Exception:
+        return 0
+
+
 # =============================================================================
 # Team Member helpers
 # =============================================================================
