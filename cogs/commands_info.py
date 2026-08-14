@@ -88,7 +88,10 @@ def _build_commands_embed() -> discord.Embed:
             "`/kick player:<@user>`\n"
             "Kick a player from your team. Only Captains and Managers can do this.\n\n"
             "`/leave`\n"
-            "Leave your current team (Players, Managers, and Coaches only)."
+            "Leave your current team (Players, Managers, and Coaches only).\n\n"
+            "`/change_team_tag new_tag:<tag>`\n"
+            "Change your team's tag (e.g. `VGA`). Captain only. 2–6 alphanumeric characters. "
+            "All team members are notified via DM when the tag changes."
         ),
         inline=False,
     )

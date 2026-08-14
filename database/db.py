@@ -409,6 +409,33 @@ async def get_team_by_thread_id(thread_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def update_team_tag(team_id: int, new_tag: str) -> Optional[dict]:
+    """
+    Update a team's tag.
+    new_tag     — the display tag (e.g. 'VGA')
+    team_tag_key — normalised lowercase used for uniqueness checks.
+
+    Returns the updated row on success, None on unique-key conflict or error.
+    """
+    new_tag_key = new_tag.strip().lower()
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE teams
+            SET team_tag     = $1,
+                team_tag_key = $2
+            WHERE id = $3
+            RETURNING *
+            """,
+            new_tag.strip(),
+            new_tag_key,
+            team_id,
+        )
+        return dict(row) if row else None
+    except asyncpg.UniqueViolationError:
+        return None
+
+
 async def deactivate_team(captain_discord_id: int) -> None:
     """Soft-delete a team — marks is_active=FALSE, keeps all data."""
     await get_pool().execute(

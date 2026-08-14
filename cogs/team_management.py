@@ -217,6 +217,78 @@ class RoleSelectView(discord.ui.View):
         await self._send_invite(interaction, "Coach")
 
 
+class _TagChangeConfirmView(discord.ui.View):
+    """Confirmation view for /change_team_tag."""
+
+    def __init__(self, bot: commands.Bot, team: dict, new_tag: str) -> None:
+        super().__init__(timeout=60)
+        self.bot     = bot
+        self.team    = team
+        self.new_tag = new_tag
+
+    async def _disable(self, interaction: discord.Interaction) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        self.stop()
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+
+        old_tag = self.team["team_tag"]
+        updated = await db.update_team_tag(self.team["id"], self.new_tag)
+        if not updated:
+            await interaction.followup.send(
+                f"Could not update the tag — **{self.new_tag}** may already be taken by another team.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Team tag updated from **{old_tag}** → **{self.new_tag}**.",
+            ephemeral=True,
+        )
+
+        # Notify all team members
+        members = await db.get_team_members(self.team["id"])
+        for member in members:
+            try:
+                user = self.bot.get_user(member["discord_id"]) or await self.bot.fetch_user(member["discord_id"])
+                await user.send(
+                    f"Your team **{self.team['team_name']}** has a new tag: **{self.new_tag}** (was `{old_tag}`)."
+                )
+            except Exception:
+                pass
+
+        await send_log(
+            self.bot,
+            title="Team Tag Changed",
+            description=f"**{self.team['team_name']}** tag changed by captain {interaction.user.mention}",
+            colour=COL_SUCCESS,
+            fields=[
+                ("Team",    self.team["team_name"],                         True),
+                ("Old Tag", f"`{old_tag}`",                                 True),
+                ("New Tag", f"`{self.new_tag}`",                            True),
+                ("Captain", f"{interaction.user} ({interaction.user.id})",  True),
+            ],
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+        await interaction.followup.send("Cancelled. Tag was not changed.", ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+
+
 class TeamManagementCog(commands.Cog, name="TeamManagement"):
     """Handles team management commands like inviting players."""
 
@@ -455,6 +527,71 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
         )
 
         await interaction.followup.send(f"You have successfully left **{full_team['team_name']}**.")
+
+
+    @app_commands.command(
+        name="change_team_tag",
+        description="Change your team's tag. Captain only.",
+    )
+    @app_commands.describe(new_tag="New team tag (2–6 uppercase characters, e.g. VGA).")
+    async def change_team_tag(
+        self,
+        interaction: discord.Interaction,
+        new_tag: str,
+    ) -> None:
+        """Let the captain change their team tag."""
+        await interaction.response.defer(ephemeral=True)
+
+        # 1. Must be a captain of an active team
+        team = await db.get_team_by_captain(interaction.user.id)
+        if not team:
+            await interaction.followup.send(
+                "You are not the Captain of an active team.",
+                ephemeral=True,
+            )
+            return
+
+        # 2. Validate tag format: 2–6 alphanumeric chars
+        tag = new_tag.strip()
+        if not (2 <= len(tag) <= 6) or not tag.isalnum():
+            await interaction.followup.send(
+                "Invalid tag. Tags must be **2–6 alphanumeric characters** (letters and numbers only, no spaces or symbols).",
+                ephemeral=True,
+            )
+            return
+
+        # 3. Check for same tag
+        if tag.lower() == team["team_tag_key"]:
+            await interaction.followup.send(
+                f"Your team tag is already **{team['team_tag']}**. No change needed.",
+                ephemeral=True,
+            )
+            return
+
+        # 4. Check uniqueness
+        existing = await db.get_team_by_tag_key(tag.lower())
+        if existing:
+            await interaction.followup.send(
+                f"The tag **{tag}** is already taken by another team. Please choose a different one.",
+                ephemeral=True,
+            )
+            return
+
+        # 5. Confirmation view
+        view = _TagChangeConfirmView(
+            bot=self.bot,
+            team=team,
+            new_tag=tag,
+        )
+        embed = discord.Embed(
+            title="Confirm Tag Change",
+            description=f"Are you sure you want to change your team tag?",
+            colour=EMBED_COLOUR,
+        )
+        embed.add_field(name="Current Tag", value=f"`{team['team_tag']}`", inline=True)
+        embed.add_field(name="New Tag",     value=f"`{tag}`",              inline=True)
+        embed.add_field(name="Team",        value=team["team_name"],        inline=False)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
