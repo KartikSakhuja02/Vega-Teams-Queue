@@ -84,24 +84,36 @@ class PlayerStatusCog(commands.Cog, name="PlayerStatus"):
 
     @app_commands.command(
         name="player_status",
-        description="Check your current system state (IDLE, IN_QUEUE, IN_MATCH, PENALTY_COOLDOWN).",
+        description="Check a player's current system state. Leave @user blank to check your own.",
     )
-    async def player_status(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(player="The player to look up (leave blank to check yourself).")
+    async def player_status(
+        self,
+        interaction: discord.Interaction,
+        player: discord.User | None = None,
+    ) -> None:
         await interaction.response.defer(ephemeral=True)
 
-        record = await db.get_player(interaction.user.id)
+        # Resolve target — defaults to the caller
+        target = player or interaction.user
+        is_self = target.id == interaction.user.id
+
+        record = await db.get_player(target.id)
         if not record or not record["is_active"]:
-            await interaction.followup.send(
-                "You are not registered. Use `/register` to create a profile.",
-                ephemeral=True,
+            msg = (
+                "You are not registered. Use `/register` to create a profile."
+                if is_self else
+                f"{target.mention} is not registered in Vega Scrims."
             )
+            await interaction.followup.send(msg, ephemeral=True)
             return
 
         status_key: str = record.get("status", "IDLE") or "IDLE"
         meta = _STATUS_META.get(status_key, _STATUS_META["IDLE"])
 
+        title_suffix = "" if is_self else f" — {target.display_name}"
         embed = discord.Embed(
-            title=f"{meta['emoji']} {meta['label']}",
+            title=f"{meta['emoji']} {meta['label']}{title_suffix}",
             description=meta["description"],
             colour=meta["colour"],
         )
@@ -134,7 +146,7 @@ class PlayerStatusCog(commands.Cog, name="PlayerStatus"):
                 else:
                     embed.add_field(
                         name="Cooldown Ends",
-                        value="Penalty has expired — your status will reset shortly.",
+                        value="Penalty has expired — status will reset shortly.",
                         inline=False,
                     )
             else:
@@ -144,8 +156,9 @@ class PlayerStatusCog(commands.Cog, name="PlayerStatus"):
                     inline=False,
                 )
 
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.set_footer(text=f"Discord ID: {interaction.user.id}")
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.set_footer(text=f"Discord ID: {target.id}")
+
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
