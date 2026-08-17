@@ -56,11 +56,12 @@ def _build_page_1_embed() -> discord.Embed:
     embed.add_field(
         name="Support & Help",
         value=(
-            "`/help`\n"
-            "Open a private 1-on-1 support ticket with the admin team."
+            "`/help [issue:<text>]`\n"
+            "Ask our AI Assistant for instant troubleshooting or open a private staff ticket."
         ),
         inline=False,
     )
+
     embed.set_footer(text="Vega Scrims — Page 1 of 3 • Use buttons below to switch categories")
     return embed
 
