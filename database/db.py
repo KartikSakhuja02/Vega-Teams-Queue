@@ -548,6 +548,33 @@ async def update_team_tag(team_id: int, new_tag: str) -> Optional[dict]:
         return None
 
 
+async def update_team_name(team_id: int, new_name: str) -> Optional[dict]:
+    """
+    Update a team's display name.
+    new_name     — the display name (stored as-is, e.g. 'Vega Assassins')
+    team_name_key — normalised lowercase+stripped used for uniqueness checks.
+
+    Returns the updated row on success, None on unique-key conflict or error.
+    """
+    new_name_key = new_name.strip().lower()
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE teams
+            SET team_name     = $1,
+                team_name_key = $2
+            WHERE id = $3
+            RETURNING *
+            """,
+            new_name.strip(),
+            new_name_key,
+            team_id,
+        )
+        return dict(row) if row else None
+    except asyncpg.UniqueViolationError:
+        return None
+
+
 async def deactivate_team(captain_discord_id: int) -> None:
     """Soft-delete a team — marks is_active=FALSE, keeps all data."""
     await get_pool().execute(

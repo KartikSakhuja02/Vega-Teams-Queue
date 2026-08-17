@@ -490,6 +490,93 @@ class _PlayerRegionSelectView(discord.ui.View):
             item.disabled = True  # type: ignore[union-attr]
 
 
+# ---------------------------------------------------------------------------
+# /team_rename  views
+# ---------------------------------------------------------------------------
+
+class _TeamRenameConfirmView(discord.ui.View):
+    """Confirmation view for /team_rename."""
+
+    def __init__(self, bot: commands.Bot, team: dict, new_name: str) -> None:
+        super().__init__(timeout=60)
+        self.bot      = bot
+        self.team     = team
+        self.new_name = new_name
+
+    async def _disable(self, interaction: discord.Interaction) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        self.stop()
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+
+        old_name = self.team["team_name"]
+        updated = await db.update_team_name(self.team["id"], self.new_name)
+        if not updated:
+            await interaction.followup.send(
+                f"Could not rename — **{self.new_name}** is already taken by another team. "
+                f"Please choose a different name.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Team renamed from **{old_name}** → **{self.new_name}**.",
+            ephemeral=True,
+        )
+
+        # DM all team members about the rename
+        members = await db.get_team_members(self.team["id"])
+        for member in members:
+            try:
+                user = self.bot.get_user(member["discord_id"]) or \
+                       await self.bot.fetch_user(member["discord_id"])
+                await user.send(
+                    f"Your team has been renamed from **{old_name}** to **{self.new_name}**."
+                )
+            except Exception:
+                pass
+
+        # Also notify captain
+        try:
+            captain = self.bot.get_user(self.team["captain_discord_id"]) or \
+                      await self.bot.fetch_user(self.team["captain_discord_id"])
+            await captain.send(
+                f"Your team has been renamed from **{old_name}** to **{self.new_name}**."
+            )
+        except Exception:
+            pass
+
+        await send_log(
+            self.bot,
+            title="Team Renamed",
+            description=f"**{old_name}** renamed to **{self.new_name}** by {interaction.user.mention}",
+            colour=COL_SUCCESS,
+            fields=[
+                ("Old Name", old_name,                                          True),
+                ("New Name", self.new_name,                                     True),
+                ("Changed by", f"{interaction.user} ({interaction.user.id})",  True),
+            ],
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+        await interaction.followup.send("Cancelled. Team name was not changed.", ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+
+
 class _TagChangeConfirmView(discord.ui.View):
     """Confirmation view for /change_team_tag."""
 
@@ -864,6 +951,77 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
         embed.add_field(name="Current Tag", value=f"`{team['team_tag']}`", inline=True)
         embed.add_field(name="New Tag",     value=f"`{tag}`",              inline=True)
         embed.add_field(name="Team",        value=team["team_name"],        inline=False)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ── /team_rename ──────────────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="team_rename",
+        description="Change the team's display name. Unique across the database. Captains/Managers only.",
+    )
+    @app_commands.describe(new_name="The new team name (2–50 characters).")
+    async def team_rename(
+        self,
+        interaction: discord.Interaction,
+        new_name: str,
+    ) -> None:
+        """Captain or Manager: rename the team."""
+        await interaction.response.defer(ephemeral=True)
+
+        # 1. Auth: captain or manager
+        caller_team       = await db.get_team_by_captain(interaction.user.id)
+        caller_membership = await db.get_player_team_membership(interaction.user.id)
+
+        if not caller_team and (
+            not caller_membership or caller_membership.get("role") not in ("Manager",)
+        ):
+            await interaction.followup.send(
+                "You must be the Captain or a Manager of a team to use this command.",
+                ephemeral=True,
+            )
+            return
+
+        team_id   = caller_team["id"] if caller_team else caller_membership["team_id"]
+        full_team = await db.get_team_by_id(team_id)
+        if not full_team or not full_team["is_active"]:
+            await interaction.followup.send("Your team is not active.", ephemeral=True)
+            return
+
+        # 2. Validate length (2–50 chars, non-empty after strip)
+        name = new_name.strip()
+        if not (2 <= len(name) <= 50):
+            await interaction.followup.send(
+                "Team names must be **2–50 characters** long.",
+                ephemeral=True,
+            )
+            return
+
+        # 3. Same name check
+        if name.lower() == full_team["team_name_key"]:
+            await interaction.followup.send(
+                f"Your team is already named **{full_team['team_name']}**. No change needed.",
+                ephemeral=True,
+            )
+            return
+
+        # 4. Uniqueness check
+        existing = await db.get_team_by_name_key(name.lower())
+        if existing:
+            await interaction.followup.send(
+                f"The name **{name}** is already taken by another team. Please choose a different name.",
+                ephemeral=True,
+            )
+            return
+
+        # 5. Confirmation view
+        view = _TeamRenameConfirmView(bot=self.bot, team=full_team, new_name=name)
+        embed = discord.Embed(
+            title="Confirm Team Rename",
+            description="Are you sure you want to rename the team?",
+            colour=EMBED_COLOUR,
+        )
+        embed.add_field(name="Current Name", value=full_team["team_name"], inline=True)
+        embed.add_field(name="New Name",     value=name,                   inline=True)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ── /team_change_region ──────────────────────────────────────────────────
