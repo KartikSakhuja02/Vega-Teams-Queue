@@ -3,7 +3,9 @@ cogs/team_management.py
 Team management cog — /invite command and interactive DM flows for joining teams.
 """
 
+import asyncio
 import logging
+import os
 from typing import Optional
 
 import discord
@@ -16,6 +18,16 @@ from cogs.bot_logger import send_log, COL_SUCCESS, COL_DANGER
 log = logging.getLogger(__name__)
 
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
+TEAM_PANEL_CHANNEL_ID: int = int(os.environ.get("TEAM_PANEL_CHANNEL_ID", "0"))
+
+_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+
+
+def _is_image_attachment(a: discord.Attachment) -> bool:
+    if a.content_type and a.content_type.split(";")[0].strip() in _IMAGE_TYPES:
+        return True
+    ext = a.filename.rsplit(".", 1)[-1].lower() if "." in a.filename else ""
+    return ext in {"png", "jpg", "jpeg", "gif", "webp"}
 
 
 async def _notify_team_leadership(bot: commands.Bot, team: dict, message: str) -> None:
@@ -1091,6 +1103,162 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
             current_region=player_record["region"],
         )
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # ── /team_change_logo ─────────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="team_change_logo",
+        description="Set or update the team logo. Opens a private thread where you upload the image. Captain/Manager only.",
+    )
+    async def team_change_logo(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Captain/Manager: upload a new team logo via a private thread."""
+        await interaction.response.defer(ephemeral=True)
+
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.followup.send(
+                "This command can only be used inside the server.", ephemeral=True
+            )
+            return
+
+        # 1. Auth: captain or manager
+        caller_team       = await db.get_team_by_captain(interaction.user.id)
+        caller_membership = await db.get_player_team_membership(interaction.user.id)
+
+        if not caller_team and (
+            not caller_membership or caller_membership.get("role") not in ("Manager",)
+        ):
+            await interaction.followup.send(
+                "You must be the Captain or a Manager of a team to use this command.",
+                ephemeral=True,
+            )
+            return
+
+        team_id   = caller_team["id"] if caller_team else caller_membership["team_id"]
+        full_team = await db.get_team_by_id(team_id)
+        if not full_team or not full_team["is_active"]:
+            await interaction.followup.send("Your team is not active.", ephemeral=True)
+            return
+
+        # 2. Resolve the panel channel for thread creation
+        if not TEAM_PANEL_CHANNEL_ID:
+            await interaction.followup.send(
+                "Team panel channel is not configured. Ask an admin to set `TEAM_PANEL_CHANNEL_ID` in `.env`.",
+                ephemeral=True,
+            )
+            return
+
+        panel_channel = self.bot.get_channel(TEAM_PANEL_CHANNEL_ID)
+        if not isinstance(panel_channel, discord.TextChannel):
+            try:
+                panel_channel = await self.bot.fetch_channel(TEAM_PANEL_CHANNEL_ID)
+            except discord.HTTPException:
+                panel_channel = None
+        if not isinstance(panel_channel, discord.TextChannel):
+            await interaction.followup.send(
+                "Could not find the team panel channel. Contact an admin.", ephemeral=True
+            )
+            return
+
+        # 3. Create a private thread
+        thread_name = f"logo-upload-{interaction.user.display_name[:30]}"
+        try:
+            thread = await panel_channel.create_thread(
+                name=thread_name,
+                type=discord.ChannelType.private_thread,
+                reason=f"Logo upload for {full_team['team_name']} by {interaction.user}",
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "I don't have permission to create private threads.", ephemeral=True
+            )
+            return
+
+        await thread.add_user(interaction.user)
+
+        await thread.send(
+            f"👋 {interaction.user.mention} — upload your new team logo for "
+            f"**{full_team['team_name']}** here as an image attachment.\n\n"
+            "• Accepted formats: PNG, JPG, GIF, WEBP\n"
+            "• You have **5 minutes** to upload.\n"
+            "• This thread will be deleted automatically once done."
+        )
+        await interaction.followup.send(
+            f"📂 Your private logo upload thread is ready: {thread.mention}", ephemeral=True
+        )
+
+        # 4. Wait for the image
+        def _check(m: discord.Message) -> bool:
+            return (
+                m.channel.id == thread.id
+                and m.author.id == interaction.user.id
+                and any(_is_image_attachment(a) for a in m.attachments)
+            )
+
+        try:
+            message: discord.Message = await self.bot.wait_for(
+                "message", check=_check, timeout=300.0
+            )
+        except asyncio.TimeoutError:
+            await thread.send(
+                "⏰ Upload timed out after 5 minutes. Please use `/team_change_logo` again."
+            )
+            await asyncio.sleep(5)
+            try:
+                await thread.delete()
+            except Exception:
+                pass
+            return
+
+        # 5. Save the attachment
+        attachment = next(a for a in message.attachments if _is_image_attachment(a))
+        ext = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else "png"
+        logo_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "team_logos")
+        )
+        os.makedirs(logo_dir, exist_ok=True)
+        filename = f"{full_team['team_tag_key']}_{full_team['id']}.{ext}"
+        filepath = os.path.join(logo_dir, filename)
+
+        try:
+            await attachment.save(filepath)
+            log.info("Team logo saved — team=%s path=%s", full_team["team_name"], filepath)
+        except Exception as exc:
+            log.error("Failed to save team logo: %s", exc, exc_info=True)
+            await thread.send("❌ Could not save the image due to a server error. Please try again.")
+            return
+
+        # 6. Update DB
+        old_path = full_team.get("team_logo_path") or "None"
+        updated = await db.update_team_logo(full_team["id"], filepath)
+        if not updated:
+            await thread.send("❌ Could not update the database. Please contact an admin.")
+            return
+
+        await thread.send(
+            f"✅ Logo for **{full_team['team_name']}** updated successfully!\n"
+            "This thread will be deleted in 5 seconds."
+        )
+
+        await send_log(
+            self.bot,
+            title="Team Logo Updated",
+            description=f"**{full_team['team_name']}** logo updated by {interaction.user.mention}",
+            colour=COL_SUCCESS,
+            fields=[
+                ("Team",       full_team["team_name"],                        True),
+                ("Updated by", f"{interaction.user} ({interaction.user.id})", True),
+                ("New path",   filepath,                                       False),
+            ],
+        )
+
+        await asyncio.sleep(5)
+        try:
+            await thread.delete()
+        except Exception:
+            pass
 
 
 async def setup(bot: commands.Bot) -> None:

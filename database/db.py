@@ -575,6 +575,24 @@ async def update_team_name(team_id: int, new_name: str) -> Optional[dict]:
         return None
 
 
+async def update_team_logo(team_id: int, new_logo_path: str) -> Optional[dict]:
+    """Update the saved logo file path for a team. Returns updated row or None."""
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE teams
+            SET team_logo_path = $1
+            WHERE id = $2
+            RETURNING *
+            """,
+            new_logo_path,
+            team_id,
+        )
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
 async def deactivate_team(captain_discord_id: int) -> None:
     """Soft-delete a team — marks is_active=FALSE, keeps all data."""
     await get_pool().execute(
