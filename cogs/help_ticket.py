@@ -1,7 +1,7 @@
 """
 cogs/help_ticket.py
-Private help ticket & AI support cog — /help command, OpenRouter AI troubleshooting,
-and escalation to private staff ticket channels.
+Private help ticket & in-channel AI support cog — /help command, OpenRouter AI assistant
+chatting directly in the ticket channel, and staff escalation.
 """
 
 import asyncio
@@ -44,55 +44,72 @@ HELP_ADMIN_ROLE_IDS = _parse_admin_role_ids(HELP_ADMIN_ROLE_IDS_RAW)
 # OpenRouter AI Assistant
 # ---------------------------------------------------------------------------
 
-async def _ask_openrouter_ai(user_question: str, user_name: str) -> Optional[str]:
+SYSTEM_PROMPT = (
+    "You are the official Vega Scrims AI Support Assistant on Discord.\n"
+    "Your mission is to help players and team captains with questions about the Vega Scrims bot, "
+    "queue system, player registration, team creation, team management, and commands.\n\n"
+    "=== VEGA SCRIMS COMPLETE SYSTEM REFERENCE ===\n\n"
+    "1. PLAYER & PROFILE COMMANDS:\n"
+    "• `/register ign:<ign> region:<region>`: Register player profile (India, APAC, EMEA, Americas). Must be used in the registration channel.\n"
+    "• `/unregister`: Unregister profile. Stats/history are preserved. When re-registering, players can resume old profile or start fresh.\n"
+    "• `/profile [player:@user]`: View stats, ELO (starts at 1000), K/D/A, matches, and regional ranking.\n"
+    "• `/edit-profile`: Interactive form to edit registered IGN or Region with confirmation buttons.\n"
+    "• `/player_status [player:@user]`: View current system status (IDLE, IN_QUEUE, IN_MATCH, PENALTY_COOLDOWN).\n"
+    "• `/player_change_region`: Change your personal matchmaking region via dropdown.\n"
+    "• `/toggle_dms`: Toggle queue pop alerts and match check-in DMs on/off.\n\n"
+    "2. TEAM CREATION & CUSTOMIZATION:\n"
+    "• `/create_team`: Open a private setup thread in the team panel channel to set team name, tag (2-6 alphanumeric), and upload logo.\n"
+    "• `/disband`: Disband your team (Captain/Manager). Stats are preserved and can be resumed or started fresh later.\n"
+    "• `/team-profile [player:@user]`: View team profile, tag, region, logo, and active roster.\n"
+    "• `/team_rename new_name:<name>`: Rename the team (2-50 chars). Enforces unique name across DB. Captain/Manager only.\n"
+    "• `/team_change_logo`: Upload a new team logo (PNG/JPG/GIF/WEBP) via a private 1-on-1 thread. Captain/Manager only.\n"
+    "• `/change_team_tag new_tag:<tag>`: Change team tag (2-6 chars). Captain only.\n"
+    "• `/team_change_region`: Change entire team's region via dropdown and updates all member regions too. Captain only.\n"
+    "• `/transfer_captain new_captain:<@user>`: Transfer ownership and captain permissions to an active team member. Captain only.\n\n"
+    "3. TEAM ROSTER & INVITES:\n"
+    "• ROSTER SLOTS: Exactly 5 Players (1 Captain + 4 Players), 2 Substitutes, 1 Coach, 2 Managers (Max 10 members total).\n"
+    "• `/invite player:<@user>`: Invite a player as Player, Manager, Coach, or Substitute via DM. Captain/Manager only. 24h expiry.\n"
+    "• `/invite_cancel player:<@user>`: Revoke a pending invite before player accepts. Captain/Manager only.\n"
+    "• `/invite_cancel_all`: Cancel every active pending invite sent by your team. Captain/Manager only.\n"
+    "• `/invites_pending`: List all active, unexpired invites with roles and expiration countdowns. Captain/Manager only.\n"
+    "• `/team_set_role player:<@user> role:<Player|Manager|Coach|Substitute>`: Update a roster member's role. Captain/Manager only.\n"
+    "• `/kick player:<@user>`: Kick a member from your team. Captain/Manager only. Captain cannot be kicked.\n"
+    "• `/leave`: Leave your current team (Players, Managers, Coaches only; Captains must use `/transfer_captain` or `/disband`).\n\n"
+    "4. SUPPORT & TICKETS:\n"
+    "• `/help [issue]`: Open a private support ticket.\n\n"
+    "GUIDELINES:\n"
+    "1. Give direct, actionable, step-by-step guidance.\n"
+    "2. Format commands in markdown `code` blocks (e.g. `/team_change_logo`).\n"
+    "3. Be friendly, polite, and concise (keep answers under 1500 characters).\n"
+    "4. If a problem requires human staff (bans, server bugs, match disputes), tell the user they can click the 'Request Staff' button in the channel."
+)
+
+FALLBACK_MODELS = [
+    "openai/gpt-4o-mini",
+    "google/gemini-flash-1.5",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+]
+
+
+async def _query_openrouter_messages(messages: list[dict]) -> Optional[str]:
     """
-    Query OpenRouter chat completion API with the bot's system context.
-    Returns the AI response string, or None if credits/key are missing or request fails.
+    Query OpenRouter chat completion API with a list of messages.
+    Tries user-configured model first, then falls back to reliable models if 404 or errors occur.
     """
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
-        log.info("OPENROUTER_API_KEY not configured — skipping AI support.")
+        log.info("OPENROUTER_API_KEY not configured — skipping AI response.")
         return None
 
-    model = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-001").strip() or "google/gemini-2.0-flash-001"
+    models_to_try = []
+    env_model = os.environ.get("OPENROUTER_MODEL", "").strip()
+    if env_model:
+        models_to_try.append(env_model)
 
-    system_prompt = (
-        "You are the Vega Scrims AI Assistant on Discord. Your mission is to provide fast, direct, and accurate "
-        "guidance on using the Vega Scrims bot, queue system, player registration, team creation, and roster management.\n\n"
-        "=== VEGA SCRIMS SYSTEM REFERENCE ===\n\n"
-        "1. PLAYER COMMANDS:\n"
-        "• `/register ign:<ign> region:<region>`: Register player profile (India, APAC, EMEA, Americas). Must be used in registration channel.\n"
-        "• `/unregister`: Unregister profile. Stats/history are preserved. Re-registering lets you resume old profile or start fresh.\n"
-        "• `/profile [player:@user]`: View player stats, ELO (starts at 1000), K/D/A, matches, and regional ranking.\n"
-        "• `/edit-profile`: Interactive form to edit registered IGN or Region with confirmation buttons.\n"
-        "• `/player_status [player:@user]`: View current system status (IDLE, IN_QUEUE, IN_MATCH, PENALTY_COOLDOWN).\n"
-        "• `/player_change_region`: Change your personal matchmaking region via dropdown.\n"
-        "• `/toggle_dms`: Toggle queue pop alerts and match check-in DMs on/off.\n\n"
-        "2. TEAM CREATION & CUSTOMIZATION:\n"
-        "• `/create_team`: Open a private setup thread in the team panel channel to set team name, tag (2-6 alphanumeric), and upload logo.\n"
-        "• `/disband`: Disband your team (Captain/Manager). Stats are preserved and can be resumed or started fresh later.\n"
-        "• `/team-profile [player:@user]`: View team profile, tag, region, logo, and active roster.\n"
-        "• `/team_rename new_name:<name>`: Rename the team (2-50 chars). Enforces unique name across DB. Captain/Manager only.\n"
-        "• `/team_change_logo`: Upload a new team logo (PNG/JPG/GIF/WEBP) via a private 1-on-1 thread. Captain/Manager only.\n"
-        "• `/change_team_tag new_tag:<tag>`: Change team tag (2-6 chars). Captain only.\n"
-        "• `/team_change_region`: Change entire team's region via dropdown and updates all member regions too. Captain only.\n"
-        "• `/transfer_captain new_captain:<@user>`: Transfer ownership and captain permissions to an active team member. Captain only.\n\n"
-        "3. TEAM ROSTER & INVITES:\n"
-        "• ROSTER SLOTS: Exactly 5 Players (1 Captain + 4 Players), 2 Substitutes, 1 Coach, 2 Managers (Max 10 members total).\n"
-        "• `/invite player:<@user>`: Invite a player as Player, Manager, Coach, or Substitute via DM. Captain/Manager only.\n"
-        "• `/invite_cancel player:<@user>`: Revoke a pending invite before player accepts. Captain/Manager only.\n"
-        "• `/invite_cancel_all`: Cancel every active pending invite sent by your team. Captain/Manager only.\n"
-        "• `/invites_pending`: List all active, unexpired invites with roles and expiration countdowns. Captain/Manager only.\n"
-        "• `/team_set_role player:<@user> role:<Player|Manager|Coach|Substitute>`: Update a roster member's role. Captain/Manager only.\n"
-        "• `/kick player:<@user>`: Kick a member from your team. Captain/Manager only. Captain cannot be kicked.\n"
-        "• `/leave`: Leave your current team (Players, Managers, Coaches only; Captains must use `/transfer_captain` or `/disband`).\n\n"
-        "4. SUPPORT:\n"
-        "• `/help [issue]`: Ask AI assistant for help or open a private staff ticket.\n\n"
-        "GUIDELINES:\n"
-        "1. Give direct, actionable steps. Highlight commands in markdown `code` format (e.g. `/team_change_logo`).\n"
-        "2. If the user wants human staff help or their issue is beyond bot commands (e.g. disputes, server bugs, manual overrides), remind them to use the 'Talk to Staff' button.\n"
-        "3. Keep responses concise, clear, and under 1500 characters."
-    )
+    for fallback in FALLBACK_MODELS:
+        if fallback not in models_to_try:
+            models_to_try.append(fallback)
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -101,99 +118,45 @@ async def _ask_openrouter_ai(user_question: str, user_name: str) -> Optional[str
         "Content-Type": "application/json",
     }
 
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Player {user_name} asks:\n{user_question}"},
-        ],
-        "max_tokens": 600,
-        "temperature": 0.3,
-    }
-
     timeout = aiohttp.ClientTimeout(total=15)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    choices = data.get("choices", [])
-                    if choices and "message" in choices[0]:
-                        return choices[0]["message"].get("content", "").strip()
-                else:
-                    err_text = await resp.text()
-                    log.warning("OpenRouter API returned error %d: %s", resp.status, err_text)
-                    return None
-    except Exception as exc:
-        log.error("Failed to query OpenRouter AI: %s", exc)
-        return None
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for model in models_to_try:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": 600,
+                "temperature": 0.3,
+            }
+            try:
+                async with session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        choices = data.get("choices", [])
+                        if choices and "message" in choices[0]:
+                            content = choices[0]["message"].get("content", "").strip()
+                            if content:
+                                return content
+                    else:
+                        err_text = await resp.text()
+                        log.warning(
+                            "OpenRouter API with model '%s' returned status %d: %s. Trying next model...",
+                            model,
+                            resp.status,
+                            err_text,
+                        )
+            except Exception as e:
+                log.warning("OpenRouter request failed for model %s: %s", model, e)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Embed Builders & Helpers
+# Channel & Overwrite Helpers
 # ---------------------------------------------------------------------------
-
-def _build_ticket_embed(interaction: discord.Interaction, initial_question: Optional[str] = None) -> discord.Embed:
-    embed = discord.Embed(
-        title="Private Help Ticket",
-        colour=EMBED_COLOUR,
-    )
-    embed.description = (
-        "You have opened a private help ticket with the admin team. Use this channel to "
-        "describe your issue clearly so the team can assist you."
-    )
-    embed.add_field(
-        name="Opened By",
-        value=interaction.user.mention,
-        inline=True,
-    )
-    embed.add_field(
-        name="Status",
-        value="Open",
-        inline=True,
-    )
-    if initial_question:
-        embed.add_field(
-            name="Initial Issue / Query",
-            value=initial_question[:1024],
-            inline=False,
-        )
-    embed.add_field(
-        name="Close",
-        value="When your issue is resolved, click the button below to close this ticket.",
-        inline=False,
-    )
-    embed.set_footer(text="Vega Queue Support")
-    return embed
-
-
-def _build_admin_dm_embed(
-    user: discord.abc.User,
-    channel: discord.TextChannel,
-    role_names: list[str],
-    initial_question: Optional[str] = None,
-) -> discord.Embed:
-    embed = discord.Embed(
-        title="Private Help Ticket Opened",
-        colour=EMBED_COLOUR,
-    )
-    embed.description = (
-        "A user has opened a private ticket and needs assistance. Please move the discussion "
-        "to the private channel below."
-    )
-    embed.add_field(name="User", value=str(user), inline=True)
-    embed.add_field(name="Channel", value=channel.mention, inline=True)
-    if initial_question:
-        embed.add_field(name="User Query", value=initial_question[:1024], inline=False)
-    if role_names:
-        embed.add_field(name="Target Roles", value=", ".join(role_names), inline=False)
-    embed.set_footer(text="Vega Queue Support")
-    return embed
-
 
 def _normalise_channel_name(base_name: str) -> str:
     cleaned = base_name.lower().strip()
@@ -262,6 +225,45 @@ def _build_channel_overwrites(
     return overwrites
 
 
+def _build_ticket_embed(opener: discord.Member, initial_question: Optional[str] = None) -> discord.Embed:
+    embed = discord.Embed(
+        title="🎫 Vega Scrims Support Ticket",
+        colour=EMBED_COLOUR,
+    )
+    embed.description = (
+        f"Welcome to your private support channel, {opener.mention}!\n\n"
+        "💬 **Ask our AI Assistant anything** by typing in this channel.\n"
+        "🙋 If you need human staff, click **Request Staff** below."
+    )
+    embed.add_field(name="Opened By", value=opener.mention, inline=True)
+    embed.add_field(name="Status",    value="🟢 Active (AI Support)", inline=True)
+    if initial_question:
+        embed.add_field(name="Initial Question", value=initial_question[:1024], inline=False)
+    embed.set_footer(text="Vega Queue Support • Close ticket below when finished")
+    return embed
+
+
+def _build_admin_dm_embed(
+    user: discord.abc.User,
+    channel: discord.TextChannel,
+    role_names: list[str],
+    initial_question: Optional[str] = None,
+) -> discord.Embed:
+    embed = discord.Embed(
+        title="Private Help Ticket Opened",
+        colour=EMBED_COLOUR,
+    )
+    embed.description = f"{user.mention} opened a help ticket in {channel.mention}."
+    embed.add_field(name="User",    value=str(user), inline=True)
+    embed.add_field(name="Channel", value=channel.mention, inline=True)
+    if initial_question:
+        embed.add_field(name="Question", value=initial_question[:1024], inline=False)
+    if role_names:
+        embed.add_field(name="Target Roles", value=", ".join(role_names), inline=False)
+    embed.set_footer(text="Vega Queue Support")
+    return embed
+
+
 async def _close_ticket(interaction: discord.Interaction) -> None:
     channel = interaction.channel
     if not isinstance(channel, discord.TextChannel):
@@ -312,16 +314,58 @@ async def _close_ticket(interaction: discord.Interaction) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Views & Modals
+# Persistent Ticket View
 # ---------------------------------------------------------------------------
 
 class HelpTicketView(discord.ui.View):
+    """View inside ticket channels with 'Request Staff' and 'Close Ticket' buttons."""
+
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
     @discord.ui.button(
+        label="Request Staff",
+        style=discord.ButtonStyle.primary,
+        emoji="🙋",
+        custom_id="help_ticket_request_staff",
+    )
+    async def request_staff_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("This button only works in ticket channels.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Notify admins in channel
+        admin_mentions = []
+        if interaction.guild:
+            for role_id in HELP_ADMIN_ROLE_IDS:
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    admin_mentions.append(role.mention)
+
+        mention_str = " ".join(admin_mentions) if admin_mentions else "@Staff"
+        await channel.send(
+            f"🔔 {mention_str} — {interaction.user.mention} has requested human staff assistance for this ticket."
+        )
+
+        button.label = "Staff Requested"
+        button.disabled = True
+        button.style = discord.ButtonStyle.secondary
+        with suppress(Exception):
+            await interaction.message.edit(view=self)
+
+        await interaction.followup.send("Human staff has been alerted and will assist you shortly.", ephemeral=True)
+
+    @discord.ui.button(
         label="Close Ticket",
         style=discord.ButtonStyle.danger,
+        emoji="🔒",
         custom_id="help_ticket_close",
     )
     async def close_button(
@@ -332,57 +376,8 @@ class HelpTicketView(discord.ui.View):
         await _close_ticket(interaction)
 
 
-class _AIHelpResponseView(discord.ui.View):
-    """View attached to an AI help answer giving option to escalate to human staff."""
-
-    def __init__(self, cog: "HelpTicketCog", user_question: str) -> None:
-        super().__init__(timeout=300)
-        self.cog = cog
-        self.user_question = user_question
-
-    @discord.ui.button(label="🙋 Talk to Staff", style=discord.ButtonStyle.primary, emoji="🎫")
-    async def talk_to_staff(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.defer(ephemeral=True)
-        for child in self.children:
-            child.disabled = True  # type: ignore[union-attr]
-        with suppress(Exception):
-            await interaction.message.edit(view=self)
-
-        await self.cog.create_ticket_channel(interaction, initial_question=self.user_question)
-
-    @discord.ui.button(label="✅ Resolved", style=discord.ButtonStyle.success, emoji="👍")
-    async def resolved(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.defer(ephemeral=True)
-        for child in self.children:
-            child.disabled = True  # type: ignore[union-attr]
-        with suppress(Exception):
-            await interaction.message.edit(view=self)
-        await interaction.followup.send(
-            "Glad we could help! Feel free to use `/help` anytime if you need more assistance.",
-            ephemeral=True,
-        )
-
-
-class HelpQuestionModal(discord.ui.Modal, title="Vega Scrims Support"):
-    question_input = discord.ui.TextInput(
-        label="What do you need help with?",
-        style=discord.TextStyle.paragraph,
-        placeholder="e.g. How do I invite substitutes to my team? / How do I change my IGN?",
-        required=True,
-        max_length=500,
-    )
-
-    def __init__(self, cog: "HelpTicketCog") -> None:
-        super().__init__()
-        self.cog = cog
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-        await self.cog.handle_help_request(interaction, self.question_input.value.strip())
-
-
 # ---------------------------------------------------------------------------
-# Cog Implementation
+# HelpTicket Cog
 # ---------------------------------------------------------------------------
 
 class HelpTicketCog(commands.Cog, name="HelpTicket"):
@@ -391,17 +386,17 @@ class HelpTicketCog(commands.Cog, name="HelpTicket"):
 
     @app_commands.command(
         name="help",
-        description="Ask AI assistant for instant help or open a private staff ticket.",
+        description="Open a private support ticket with AI troubleshooting and staff assistance.",
     )
     @app_commands.describe(
-        issue="Describe what you need help with (leave empty to open form)."
+        issue="Optional summary of your question or issue to get started."
     )
     async def help_ticket(
         self,
         interaction: discord.Interaction,
         issue: Optional[str] = None,
     ) -> None:
-        """Ask AI for instant troubleshooting or open a private support ticket."""
+        """Open a private ticket channel immediately and start AI assistance."""
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message(
                 "This command can only be used in a server.",
@@ -409,48 +404,9 @@ class HelpTicketCog(commands.Cog, name="HelpTicket"):
             )
             return
 
-        if issue:
-            await interaction.response.defer(ephemeral=True)
-            await self.handle_help_request(interaction, issue.strip())
-        else:
-            await interaction.response.send_modal(HelpQuestionModal(self))
+        await interaction.response.defer(ephemeral=True)
 
-    async def handle_help_request(self, interaction: discord.Interaction, user_question: str) -> None:
-        """Try to answer via OpenRouter AI first; fallback to staff ticket if unavailable."""
-        ai_response = await _ask_openrouter_ai(user_question, str(interaction.user))
-
-        if ai_response:
-            embed = discord.Embed(
-                title="🤖 Vega Scrims Support Assistant",
-                description=ai_response,
-                colour=EMBED_COLOUR,
-            )
-            embed.add_field(
-                name="Your Question",
-                value=user_question[:500],
-                inline=False,
-            )
-            embed.set_footer(text="Need human help? Click 'Talk to Staff' below to open a private ticket.")
-
-            view = _AIHelpResponseView(self, user_question)
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        else:
-            # Fallback directly to opening staff ticket
-            await interaction.followup.send(
-                "Connecting you with human staff team...",
-                ephemeral=True,
-            )
-            await self.create_ticket_channel(interaction, initial_question=user_question)
-
-    async def create_ticket_channel(
-        self,
-        interaction: discord.Interaction,
-        initial_question: Optional[str] = None,
-    ) -> None:
-        """Create the private text channel for human staff ticket support."""
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-
+        # 1. Check if user already has an active ticket channel
         existing_channel = next(
             (
                 channel
@@ -466,6 +422,7 @@ class HelpTicketCog(commands.Cog, name="HelpTicket"):
             )
             return
 
+        # 2. Create the ticket channel with private overwrites
         overwrites = _build_channel_overwrites(
             interaction.guild,
             interaction.user,
@@ -482,20 +439,22 @@ class HelpTicketCog(commands.Cog, name="HelpTicket"):
             )
         except discord.Forbidden:
             await interaction.followup.send(
-                "I do not have permission to create ticket channels in this server.",
+                "I do not have permission to create channels in this server. Please contact an admin.",
                 ephemeral=True,
             )
             return
 
-        embed = _build_ticket_embed(interaction, initial_question=initial_question)
+        # 3. Post welcome embed & view in the ticket channel
+        embed = _build_ticket_embed(interaction.user, initial_question=issue)
         await ticket_channel.send(embed=embed, view=HelpTicketView())
 
+        # 4. Inform user ephemerally
         await interaction.followup.send(
-            f"🎫 Your private support ticket with staff is ready: {ticket_channel.mention}",
+            f"🎫 Your private support ticket is ready: {ticket_channel.mention}",
             ephemeral=True,
         )
 
-        # Notify admin members via DM
+        # 5. Notify staff via DM
         if HELP_ADMIN_ROLE_IDS:
             admin_members = self._get_admin_members(interaction.guild, HELP_ADMIN_ROLE_IDS)
             await asyncio.gather(
@@ -505,19 +464,68 @@ class HelpTicketCog(commands.Cog, name="HelpTicket"):
                         interaction.user,
                         ticket_channel,
                         self._member_role_names(member, HELP_ADMIN_ROLE_IDS),
-                        initial_question=initial_question,
+                        initial_question=issue,
                     )
                     for member in admin_members
                 ),
                 return_exceptions=True,
             )
 
-        log.info(
-            "Help ticket created — channel_id=%d opener_id=%d admins_notified=%d",
-            ticket_channel.id,
-            interaction.user.id,
-            len(self._get_admin_members(interaction.guild, HELP_ADMIN_ROLE_IDS)),
-        )
+        # 6. If user provided an issue right away, post it and generate initial AI answer
+        if issue:
+            await ticket_channel.send(f"**{interaction.user.mention} asked:**\n> {issue}")
+            await self._answer_ticket_with_ai(ticket_channel, interaction.user, issue)
+
+    async def _answer_ticket_with_ai(
+        self,
+        channel: discord.TextChannel,
+        user: discord.abc.User,
+        latest_question: str,
+    ) -> None:
+        """Fetch channel conversation history and reply via OpenRouter AI."""
+        async with channel.typing():
+            messages_payload = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+            # Fetch recent message history (up to last 6 messages)
+            history_msgs = []
+            async for h in channel.history(limit=8, oldest_first=True):
+                if not h.content and h.embeds:
+                    continue
+                if h.content.startswith("🔔") or h.content.startswith("🔒"):
+                    continue
+                role = "assistant" if h.author == self.bot.user else "user"
+                history_msgs.append({"role": role, "content": h.clean_content})
+
+            for hm in history_msgs:
+                messages_payload.append(hm)
+
+            # Query AI
+            ai_reply = await _query_openrouter_messages(messages_payload)
+
+            if ai_reply:
+                if len(ai_reply) > 2000:
+                    ai_reply = ai_reply[:1990] + "…"
+                await channel.send(ai_reply)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Listen for messages inside ticket channels to trigger AI assistance."""
+        if message.author.bot or not message.guild:
+            return
+
+        if not isinstance(message.channel, discord.TextChannel):
+            return
+
+        opener_id = _get_opener_id(message.channel)
+        if opener_id is None:
+            return
+
+        # Ignore slash commands or bot commands
+        if message.content.startswith("/") or message.content.startswith("!"):
+            return
+
+        # AI responds to chat in the ticket channel
+        await self._answer_ticket_with_ai(message.channel, message.author, message.clean_content)
 
     def _get_admin_members(self, guild: discord.Guild, role_ids: Iterable[int]) -> list[discord.Member]:
         members: list[discord.Member] = []
@@ -525,7 +533,6 @@ class HelpTicketCog(commands.Cog, name="HelpTicket"):
         for role_id in role_ids:
             role = guild.get_role(role_id)
             if role is None:
-                log.warning("Configured admin role %d could not be found in guild %s.", role_id, guild.id)
                 continue
             for member in role.members:
                 if member.id in seen_ids:
