@@ -139,6 +139,27 @@ CREATE INDEX IF NOT EXISTS idx_team_setup_sessions_captain ON team_setup_session
 
 
 -- ---------------------------------------------------------------------------
+-- team_invites
+-- ---------------------------------------------------------------------------
+-- One row per pending or historical team invite.
+
+CREATE TABLE IF NOT EXISTS team_invites (
+    id                   BIGSERIAL       PRIMARY KEY,
+    team_id              BIGINT          NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
+    inviter_discord_id   BIGINT          NOT NULL,
+    target_discord_id    BIGINT          NOT NULL,
+    role                 team_role_enum  NOT NULL,
+    created_at           TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    expires_at           TIMESTAMPTZ     NOT NULL DEFAULT NOW() + INTERVAL '24 hours',
+    dm_message_id        BIGINT,
+    is_active            BOOLEAN         NOT NULL DEFAULT TRUE
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_invites_team_id ON team_invites (team_id);
+CREATE INDEX IF NOT EXISTS idx_team_invites_target  ON team_invites (target_discord_id);
+
+
+-- ---------------------------------------------------------------------------
 -- Migration support for existing installations
 -- ---------------------------------------------------------------------------
 ALTER TABLE players ADD COLUMN IF NOT EXISTS elo INT NOT NULL DEFAULT 1000;
@@ -163,6 +184,22 @@ ALTER TABLE players ADD COLUMN IF NOT EXISTS status_since    TIMESTAMPTZ;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS penalty_ends_at TIMESTAMPTZ;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS dms_enabled     BOOLEAN NOT NULL DEFAULT TRUE;
 
+-- Create team_invites table for existing databases
+CREATE TABLE IF NOT EXISTS team_invites (
+    id                   BIGSERIAL       PRIMARY KEY,
+    team_id              BIGINT          NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
+    inviter_discord_id   BIGINT          NOT NULL,
+    target_discord_id    BIGINT          NOT NULL,
+    role                 team_role_enum  NOT NULL,
+    created_at           TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    expires_at           TIMESTAMPTZ     NOT NULL DEFAULT NOW() + INTERVAL '24 hours',
+    dm_message_id        BIGINT,
+    is_active            BOOLEAN         NOT NULL DEFAULT TRUE
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_invites_team_id ON team_invites (team_id);
+CREATE INDEX IF NOT EXISTS idx_team_invites_target  ON team_invites (target_discord_id);
+
 -- Rename logo column from URL to local path (safe to re-run; will no-op if already renamed).
 DO $$
 BEGIN
@@ -174,4 +211,5 @@ BEGIN
     END IF;
 END
 $$;
+
 

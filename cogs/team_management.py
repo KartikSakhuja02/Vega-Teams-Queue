@@ -57,13 +57,14 @@ async def _notify_team_leadership(bot: commands.Bot, team: dict, message: str) -
 class InviteResponseView(discord.ui.View):
     """View sent to the invited player in DMs."""
     
-    def __init__(self, bot: commands.Bot, team: dict, inviter: discord.User, target: discord.User, role: str) -> None:
+    def __init__(self, bot: commands.Bot, team: dict, inviter: discord.User, target: discord.User, role: str, invite_id: Optional[int] = None) -> None:
         super().__init__(timeout=86400) # 24 hours timeout
         self.bot = bot
         self.team = team
         self.inviter = inviter
         self.target = target
         self.role = role
+        self.invite_id = invite_id
         self._done = False
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
@@ -79,23 +80,43 @@ class InviteResponseView(discord.ui.View):
         
         await interaction.response.defer()
 
+        # Check if the invite was revoked / cancelled in DB
+        if self.invite_id:
+            invite_check = await db.get_pending_invite_by_id(self.invite_id)
+            if not invite_check:
+                for child in self.children:
+                    child.disabled = True
+                await interaction.message.edit(content=f"This invite to join **{self.team['team_name']}** is no longer valid or has been cancelled.", view=self, embed=None)
+                await interaction.followup.send("This invite is no longer valid or has been cancelled.")
+                return
+
         # Check if they joined another team in the meantime
         existing = await db.get_player_team_membership(self.target.id)
         if existing:
+            if self.invite_id:
+                await db.complete_team_invite(self.invite_id)
             await interaction.followup.send(f"You cannot accept this invite because you are already in team **{existing['team_name']}**.")
             return
 
         # Check if team is still active
         current_team = await db.get_team_by_captain(self.team['captain_discord_id'])
         if not current_team or current_team['id'] != self.team['id']:
+            if self.invite_id:
+                await db.complete_team_invite(self.invite_id)
             await interaction.followup.send("This team has been disbanded or is no longer active.")
             return
 
         # Add to database
         member = await db.add_team_member(self.team['id'], self.target.id, self.role)
         if not member:
+            if self.invite_id:
+                await db.complete_team_invite(self.invite_id)
             await interaction.followup.send("An error occurred while adding you to the team. You might already be in a team.")
             return
+
+        # Mark invite completed
+        if self.invite_id:
+            await db.complete_team_invite(self.invite_id)
 
         # Attempt to assign Discord role if it exists by name
         assigned_role_msg = ""
@@ -156,6 +177,10 @@ class InviteResponseView(discord.ui.View):
         
         await interaction.response.defer()
 
+        # Mark invite completed in DB
+        if self.invite_id:
+            await db.complete_team_invite(self.invite_id)
+
         # Update the original DM message
         for child in self.children:
             child.disabled = True
@@ -199,20 +224,33 @@ class RoleSelectView(discord.ui.View):
         self.stop()
         
         await interaction.response.defer(ephemeral=True)
+
+        # Create pending invite in database
+        invite_record = await db.create_team_invite(
+            team_id=self.team["id"],
+            inviter_discord_id=interaction.user.id,
+            target_discord_id=self.target.id,
+            role=role,
+        )
+        invite_id = invite_record["id"] if invite_record else None
         
         embed = discord.Embed(
             title="Team Invite",
             description=f"You have been invited by **{interaction.user.display_name}** to join the team **{self.team['team_name']}** ({self.team['team_tag']}) as a **{role}**.",
             colour=EMBED_COLOUR
         )
-        embed.set_footer(text="Accept or Decline below.")
+        embed.set_footer(text="Accept or Decline below. This invite expires in 24 hours.")
         
-        view = InviteResponseView(self.cog.bot, self.team, interaction.user, self.target, role)
+        view = InviteResponseView(self.cog.bot, self.team, interaction.user, self.target, role, invite_id=invite_id)
         
         try:
-            await self.target.send(embed=embed, view=view)
+            msg = await self.target.send(embed=embed, view=view)
+            if invite_id and msg:
+                await db.set_invite_dm_message_id(invite_id, msg.id)
             await interaction.followup.send(f"Invite sent to {self.target.mention} as a **{role}**.", ephemeral=True)
         except discord.Forbidden:
+            if invite_id:
+                await db.complete_team_invite(invite_id)
             await interaction.followup.send(f"Could not send a DM to {self.target.mention}. They may have DMs disabled.", ephemeral=True)
 
 
@@ -227,6 +265,7 @@ class RoleSelectView(discord.ui.View):
     @discord.ui.button(label="Coach", style=discord.ButtonStyle.secondary)
     async def coach_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._send_invite(interaction, "Coach")
+
 
 
 REGION_OPTIONS = [
@@ -744,13 +783,265 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
             await interaction.response.send_message("Your team is not active.", ephemeral=True)
             return
 
-        # 4. Ask for role
+        # 4. Check if target already has an active pending invite from this team
+        existing_invite = await db.get_pending_invite_for_target(full_team["id"], player.id)
+        if existing_invite:
+            await interaction.response.send_message(
+                f"{player.mention} already has an active pending invite to **{full_team['team_name']}** as a **{existing_invite['role']}**.\n"
+                f"Use `/invite_cancel player:<@user>` first if you want to change or revoke it.",
+                ephemeral=True,
+            )
+            return
+
+        # 5. Ask for role
         view = RoleSelectView(self, full_team, player)
         await interaction.response.send_message(
             f"What role should {player.mention} have in **{full_team['team_name']}**?",
             view=view,
             ephemeral=True
         )
+
+    @app_commands.command(
+        name="invite_cancel",
+        description="Revoke a pending team invite before the invited player accepts.",
+    )
+    @app_commands.describe(player="The player whose pending invite you want to cancel.")
+    async def invite_cancel(
+        self,
+        interaction: discord.Interaction,
+        player: discord.User,
+    ) -> None:
+        """Revoke a pending team invite before the invited player accepts. Captains/Managers only."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        caller_team = await db.get_team_by_captain(interaction.user.id)
+        caller_membership = await db.get_player_team_membership(interaction.user.id)
+
+        if not caller_team and (
+            not caller_membership or caller_membership.get("role") not in ("Manager",)
+        ):
+            await interaction.followup.send(
+                "You must be the Captain or a Manager of a team to cancel invites.",
+                ephemeral=True,
+            )
+            return
+
+        team_id = caller_team["id"] if caller_team else caller_membership["team_id"]
+        full_team = await db.get_team_by_id(team_id)
+        if not full_team or not full_team["is_active"]:
+            await interaction.followup.send("Your team is not active.", ephemeral=True)
+            return
+
+        cancelled = await db.cancel_team_invite(full_team["id"], player.id)
+        if not cancelled:
+            await interaction.followup.send(
+                f"There is no active pending invite for {player.mention} from **{full_team['team_name']}**.",
+                ephemeral=True,
+            )
+            return
+
+        # Try to edit DM or send a DM to the player
+        if cancelled.get("dm_message_id"):
+            try:
+                dm_channel = player.dm_channel or await player.create_dm()
+                msg = await dm_channel.fetch_message(cancelled["dm_message_id"])
+                if msg:
+                    await msg.edit(
+                        content=f"Your invite to join **{full_team['team_name']}** has been revoked by team leadership.",
+                        view=None,
+                        embed=None,
+                    )
+            except Exception:
+                try:
+                    await player.send(
+                        f"Your invite to join **{full_team['team_name']}** as a **{cancelled['role']}** has been cancelled."
+                    )
+                except Exception:
+                    pass
+        else:
+            try:
+                await player.send(
+                    f"Your invite to join **{full_team['team_name']}** as a **{cancelled['role']}** has been cancelled."
+                )
+            except Exception:
+                pass
+
+        await interaction.followup.send(
+            f"✅ Cancelled pending invite for {player.mention} (Role: **{cancelled['role']}**).",
+            ephemeral=True,
+        )
+
+        await send_log(
+            self.bot,
+            title="Team Invite Cancelled",
+            description=f"Invite to {player.mention} revoked by {interaction.user.mention}",
+            colour=COL_DANGER,
+            fields=[
+                ("Team",         full_team["team_name"],                        True),
+                ("Target",       f"{player} ({player.id})",                     True),
+                ("Role",         cancelled["role"],                             True),
+                ("Cancelled by", f"{interaction.user} ({interaction.user.id})", True),
+            ],
+        )
+
+    @app_commands.command(
+        name="invite_cancel_all",
+        description="Cancel every pending invite sent by your team.",
+    )
+    async def invite_cancel_all(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Cancels every invite sent to any players/managers/coach. Captains/Managers only."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        caller_team = await db.get_team_by_captain(interaction.user.id)
+        caller_membership = await db.get_player_team_membership(interaction.user.id)
+
+        if not caller_team and (
+            not caller_membership or caller_membership.get("role") not in ("Manager",)
+        ):
+            await interaction.followup.send(
+                "You must be the Captain or a Manager of a team to cancel invites.",
+                ephemeral=True,
+            )
+            return
+
+        team_id = caller_team["id"] if caller_team else caller_membership["team_id"]
+        full_team = await db.get_team_by_id(team_id)
+        if not full_team or not full_team["is_active"]:
+            await interaction.followup.send("Your team is not active.", ephemeral=True)
+            return
+
+        cancelled_list = await db.cancel_all_team_invites(full_team["id"])
+        if not cancelled_list:
+            await interaction.followup.send(
+                f"There are no active pending invites for **{full_team['team_name']}**.",
+                ephemeral=True,
+            )
+            return
+
+        # Notify / update DM for all cancelled invitees
+        for inv in cancelled_list:
+            try:
+                target_user = self.bot.get_user(inv["target_discord_id"]) or await self.bot.fetch_user(inv["target_discord_id"])
+                if inv.get("dm_message_id"):
+                    try:
+                        dm_channel = target_user.dm_channel or await target_user.create_dm()
+                        msg = await dm_channel.fetch_message(inv["dm_message_id"])
+                        if msg:
+                            await msg.edit(
+                                content=f"Your invite to join **{full_team['team_name']}** has been revoked.",
+                                view=None,
+                                embed=None,
+                            )
+                            continue
+                    except Exception:
+                        pass
+                await target_user.send(f"Your pending invite to join **{full_team['team_name']}** has been cancelled.")
+            except Exception:
+                pass
+
+        count = len(cancelled_list)
+        await interaction.followup.send(
+            f"✅ Cancelled **{count}** pending invite(s) for **{full_team['team_name']}**.",
+            ephemeral=True,
+        )
+
+        await send_log(
+            self.bot,
+            title="All Team Invites Cancelled",
+            description=f"All pending invites (**{count}**) for **{full_team['team_name']}** were revoked by {interaction.user.mention}",
+            colour=COL_DANGER,
+            fields=[
+                ("Team",         full_team["team_name"],                        True),
+                ("Count",        str(count),                                    True),
+                ("Cancelled by", f"{interaction.user} ({interaction.user.id})", True),
+            ],
+        )
+
+    @app_commands.command(
+        name="invites_pending",
+        description="List all active, unexpired invites sent by your team.",
+    )
+    async def invites_pending(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """List all active, unexpired invites sent by the team. Captains/Managers only."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        caller_team = await db.get_team_by_captain(interaction.user.id)
+        caller_membership = await db.get_player_team_membership(interaction.user.id)
+
+        if not caller_team and (
+            not caller_membership or caller_membership.get("role") not in ("Manager",)
+        ):
+            await interaction.followup.send(
+                "You must be the Captain or a Manager of a team to view pending invites.",
+                ephemeral=True,
+            )
+            return
+
+        team_id = caller_team["id"] if caller_team else caller_membership["team_id"]
+        full_team = await db.get_team_by_id(team_id)
+        if not full_team or not full_team["is_active"]:
+            await interaction.followup.send("Your team is not active.", ephemeral=True)
+            return
+
+        pending = await db.get_pending_invites_for_team(full_team["id"])
+        if not pending:
+            await interaction.followup.send(
+                f"There are currently no active pending invites for **{full_team['team_name']}**.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"Pending Invites — {full_team['team_name']}",
+            description=f"Showing all **{len(pending)}** active invite(s) sent by **{full_team['team_name']}**:",
+            colour=EMBED_COLOUR,
+        )
+
+        for i, inv in enumerate(pending, start=1):
+            created_unix = int(inv["created_at"].timestamp())
+            expires_unix = int(inv["expires_at"].timestamp())
+            ign_str = f" (`{inv['ign']}`)" if inv.get("ign") else ""
+            embed.add_field(
+                name=f"{i}. <@{inv['target_discord_id']}>{ign_str}",
+                value=(
+                    f"• **Role:** {inv['role']}\n"
+                    f"• **Sent by:** <@{inv['inviter_discord_id']}>\n"
+                    f"• **Sent:** <t:{created_unix}:R>\n"
+                    f"• **Expires:** <t:{expires_unix}:R>"
+                ),
+                inline=False,
+            )
+
+        embed.set_footer(text="Use /invite_cancel player:<@user> or /invite_cancel_all to revoke.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
     @app_commands.command(
         name="kick",

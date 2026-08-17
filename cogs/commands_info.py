@@ -89,8 +89,14 @@ def _build_commands_embed() -> discord.Embed:
         name="Team Management",
         value=(
             "`/invite player:<@user>`\n"
-            "Invite a registered player to your active team. Only Captains and Managers can invite players. "
-            "You will be prompted to select their role (Player, Manager, or Coach).\n\n"
+            "Invite a registered player to your active team. Captain/Manager only. "
+            "Prompt selects role (Player, Manager, or Coach).\n\n"
+            "`/invite_cancel player:<@user>`\n"
+            "Revoke a pending team invite before the player accepts. Captain/Manager only.\n\n"
+            "`/invite_cancel_all`\n"
+            "Cancel every active pending invite sent by your team. Captain/Manager only.\n\n"
+            "`/invites_pending`\n"
+            "List all active, unexpired invites sent by your team. Captain/Manager only.\n\n"
             "`/kick player:<@user>`\n"
             "Kick a player from your team. Only Captains and Managers can do this.\n\n"
             "`/leave`\n"
@@ -110,6 +116,7 @@ def _build_commands_embed() -> discord.Embed:
         ),
         inline=False,
     )
+
 
     embed.set_footer(text="Vega Scrims — Do not delete this message.")
     return embed

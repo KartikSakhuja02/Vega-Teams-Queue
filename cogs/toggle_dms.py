@@ -52,10 +52,24 @@ class ToggleDMsCog(commands.Cog, name="ToggleDMs"):
         current: bool = bool(record.get("dms_enabled", True))
 
         # Flip the flag
-        updated = await db.toggle_player_dms(interaction.user.id)
+        try:
+            updated = await db.toggle_player_dms(interaction.user.id)
+        except Exception as exc:
+            log.exception("toggle_player_dms failed for %s: %s", interaction.user.id, exc)
+            updated = None
+
         if not updated:
+            log.error(
+                "toggle_player_dms returned None for discord_id=%s — "
+                "dms_enabled column may not exist yet; run the schema migration.",
+                interaction.user.id,
+            )
             await interaction.followup.send(
-                "Something went wrong. Please try again or contact an admin.",
+                "⚠️ Could not update your DM preference.\n\n"
+                "This usually means the database migration hasn't been applied yet. "
+                "Please ask an admin to run:\n"
+                "```\npsql -U VEGA-QUEUES -d Vega_Queue_System_New -c "
+                "\"ALTER TABLE players ADD COLUMN IF NOT EXISTS dms_enabled BOOLEAN NOT NULL DEFAULT TRUE;\"\n```",
                 ephemeral=True,
             )
             return

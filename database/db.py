@@ -473,6 +473,150 @@ async def remove_team_member(team_id: int, discord_id: int) -> bool:
 
 
 # =============================================================================
+# Team Invite helpers
+# =============================================================================
+
+async def create_team_invite(
+    team_id: int,
+    inviter_discord_id: int,
+    target_discord_id: int,
+    role: str,
+    dm_message_id: Optional[int] = None,
+) -> Optional[dict]:
+    """
+    Create a new pending team invite.
+    First deactivates any existing pending invites from this team to this target.
+    """
+    try:
+        await get_pool().execute(
+            """
+            UPDATE team_invites
+            SET is_active = FALSE
+            WHERE team_id = $1 AND target_discord_id = $2 AND is_active = TRUE
+            """,
+            team_id,
+            target_discord_id,
+        )
+        row = await get_pool().fetchrow(
+            """
+            INSERT INTO team_invites (team_id, inviter_discord_id, target_discord_id, role, dm_message_id, is_active)
+            VALUES ($1, $2, $3, $4::team_role_enum, $5, TRUE)
+            RETURNING *
+            """,
+            team_id,
+            inviter_discord_id,
+            target_discord_id,
+            role,
+            dm_message_id,
+        )
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+async def set_invite_dm_message_id(invite_id: int, dm_message_id: int) -> bool:
+    """Save the DM message ID for an invite so it can be edited/cancelled later."""
+    try:
+        res = await get_pool().execute(
+            """
+            UPDATE team_invites
+            SET dm_message_id = $1
+            WHERE id = $2
+            """,
+            dm_message_id,
+            invite_id,
+        )
+        return res.endswith(" 1")
+    except Exception:
+        return False
+
+
+async def get_pending_invite_by_id(invite_id: int) -> Optional[dict]:
+    """Fetch an active, unexpired invite by primary ID."""
+    row = await get_pool().fetchrow(
+        """
+        SELECT * FROM team_invites
+        WHERE id = $1 AND is_active = TRUE AND expires_at > NOW()
+        """,
+        invite_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_pending_invite_for_target(team_id: int, target_discord_id: int) -> Optional[dict]:
+    """Check if there is an active, unexpired invite from a team to a target player."""
+    row = await get_pool().fetchrow(
+        """
+        SELECT * FROM team_invites
+        WHERE team_id = $1 AND target_discord_id = $2 AND is_active = TRUE AND expires_at > NOW()
+        """,
+        team_id,
+        target_discord_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_pending_invites_for_team(team_id: int) -> list[dict]:
+    """Fetch all active, unexpired invites sent by a team, joined with player info."""
+    rows = await get_pool().fetch(
+        """
+        SELECT ti.*, p.ign, p.discord_username
+        FROM team_invites ti
+        LEFT JOIN players p ON ti.target_discord_id = p.discord_id
+        WHERE ti.team_id = $1 AND ti.is_active = TRUE AND ti.expires_at > NOW()
+        ORDER BY ti.created_at DESC
+        """,
+        team_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def cancel_team_invite(team_id: int, target_discord_id: int) -> Optional[dict]:
+    """Cancel an active invite for a specific target player. Returns the cancelled row."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE team_invites
+        SET is_active = FALSE
+        WHERE team_id = $1 AND target_discord_id = $2 AND is_active = TRUE AND expires_at > NOW()
+        RETURNING *
+        """,
+        team_id,
+        target_discord_id,
+    )
+    return dict(row) if row else None
+
+
+async def cancel_all_team_invites(team_id: int) -> list[dict]:
+    """Cancel all active invites for a team. Returns the list of cancelled rows."""
+    rows = await get_pool().fetch(
+        """
+        UPDATE team_invites
+        SET is_active = FALSE
+        WHERE team_id = $1 AND is_active = TRUE AND expires_at > NOW()
+        RETURNING *
+        """,
+        team_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def complete_team_invite(invite_id: int) -> bool:
+    """Mark an invite as completed/inactive (accepted or declined)."""
+    try:
+        res = await get_pool().execute(
+            """
+            UPDATE team_invites
+            SET is_active = FALSE
+            WHERE id = $1
+            """,
+            invite_id,
+        )
+        return res.endswith(" 1")
+    except Exception:
+        return False
+
+
+# =============================================================================
 # Team helpers
 # =============================================================================
 
