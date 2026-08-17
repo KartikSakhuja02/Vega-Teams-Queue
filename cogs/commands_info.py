@@ -124,7 +124,7 @@ def _build_page_3_embed() -> discord.Embed:
         name="Team Invites",
         value=(
             "`/invite player:<@user>`\n"
-            "Invite a player as Player, Manager, or Coach. Captain/Manager only.\n\n"
+            "Invite a player as Player, Manager, Coach, or Substitute. Captain/Manager only.\n\n"
             "`/invite_cancel player:<@user>`\n"
             "Revoke a pending invite before acceptance. Captain/Manager only.\n\n"
             "`/invite_cancel_all`\n"
@@ -137,6 +137,8 @@ def _build_page_3_embed() -> discord.Embed:
     embed.add_field(
         name="Roster Management",
         value=(
+            "`/team_set_role player:<@user> role:<role>`\n"
+            "Change a team member's role (Player, Manager, Coach, Substitute). Captain/Manager only.\n\n"
             "`/kick player:<@user>`\n"
             "Kick a player from your team. Captain/Manager only.\n\n"
             "`/leave`\n"
@@ -144,6 +146,7 @@ def _build_page_3_embed() -> discord.Embed:
         ),
         inline=False,
     )
+
     embed.set_footer(text="Vega Scrims — Page 3 of 3 • Use buttons below to switch categories")
     return embed
 

@@ -123,6 +123,7 @@ class ProfileCog(commands.Cog, name="Profile"):
         players = [f"<@{m['discord_id']}> : {m['ign']}" for m in members if m['role'] == 'Player']
         managers = [f"<@{m['discord_id']}> : {m['ign']}" for m in members if m['role'] == 'Manager']
         coaches = [f"<@{m['discord_id']}> : {m['ign']}" for m in members if m['role'] == 'Coach']
+        substitutes = [f"<@{m['discord_id']}> : {m['ign']}" for m in members if m['role'] == 'Substitute']
 
         embed = discord.Embed(
             title="Vega Scrims — Team Profile",
@@ -141,8 +142,11 @@ class ProfileCog(commands.Cog, name="Profile"):
             embed.add_field(name="Coaches", value="\n".join(coaches), inline=True)
         if players:
             embed.add_field(name="Players", value="\n".join(players), inline=False)
+        if substitutes:
+            embed.add_field(name="Substitutes", value="\n".join(substitutes), inline=False)
 
         embed.set_footer(text="Vega Scrims Teams")
+
 
         # Attach logo if available
         logo_path = full_team.get("team_logo_path")

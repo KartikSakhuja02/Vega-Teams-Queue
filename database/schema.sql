@@ -28,7 +28,7 @@ BEGIN
         CREATE TYPE region_enum AS ENUM ('India', 'APAC', 'EMEA', 'Americas');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'team_role_enum') THEN
-        CREATE TYPE team_role_enum AS ENUM ('Player', 'Manager', 'Coach');
+        CREATE TYPE team_role_enum AS ENUM ('Player', 'Manager', 'Coach', 'Substitute');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'player_status_enum') THEN
         CREATE TYPE player_status_enum AS ENUM ('IDLE', 'IN_QUEUE', 'IN_MATCH', 'PENALTY_COOLDOWN');
@@ -200,6 +200,9 @@ CREATE TABLE IF NOT EXISTS team_invites (
 CREATE INDEX IF NOT EXISTS idx_team_invites_team_id ON team_invites (team_id);
 CREATE INDEX IF NOT EXISTS idx_team_invites_target  ON team_invites (target_discord_id);
 
+-- Ensure Substitute exists in team_role_enum
+ALTER TYPE team_role_enum ADD VALUE IF NOT EXISTS 'Substitute';
+
 -- Rename logo column from URL to local path (safe to re-run; will no-op if already renamed).
 DO $$
 BEGIN
@@ -211,5 +214,6 @@ BEGIN
     END IF;
 END
 $$;
+
 
 

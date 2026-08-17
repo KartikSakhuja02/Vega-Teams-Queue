@@ -6,7 +6,7 @@ Team management cog — /invite command and interactive DM flows for joining tea
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import Optional, Literal
 
 import discord
 from discord import app_commands
@@ -265,6 +265,10 @@ class RoleSelectView(discord.ui.View):
     @discord.ui.button(label="Coach", style=discord.ButtonStyle.secondary)
     async def coach_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._send_invite(interaction, "Coach")
+
+    @discord.ui.button(label="Substitute", style=discord.ButtonStyle.secondary)
+    async def substitute_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._send_invite(interaction, "Substitute")
 
 
 
@@ -1041,6 +1045,133 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
 
         embed.set_footer(text="Use /invite_cancel player:<@user> or /invite_cancel_all to revoke.")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+    @app_commands.command(
+        name="team_set_role",
+        description="Update an existing roster member's team role. Captain/Manager only.",
+    )
+    @app_commands.describe(
+        player="The team member whose role you want to change.",
+        role="The new role to assign (Player, Manager, Coach, or Substitute).",
+    )
+    async def team_set_role(
+        self,
+        interaction: discord.Interaction,
+        player: discord.User,
+        role: Literal["Player", "Manager", "Coach", "Substitute"],
+    ) -> None:
+        """Update an existing roster member's team role. Captain/Manager only."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # 1. Auth: Captain or Manager
+        caller_team = await db.get_team_by_captain(interaction.user.id)
+        caller_membership = await db.get_player_team_membership(interaction.user.id)
+
+        if not caller_team and (
+            not caller_membership or caller_membership.get("role") not in ("Manager",)
+        ):
+            await interaction.followup.send(
+                "You must be the Captain or a Manager of a team to change member roles.",
+                ephemeral=True,
+            )
+            return
+
+        team_id = caller_team["id"] if caller_team else caller_membership["team_id"]
+        full_team = await db.get_team_by_id(team_id)
+        if not full_team or not full_team["is_active"]:
+            await interaction.followup.send("Your team is not active.", ephemeral=True)
+            return
+
+        # 2. Cannot change Captain's role
+        if player.id == full_team["captain_discord_id"]:
+            await interaction.followup.send(
+                "You cannot change the Captain's role. The Captain is always the team leader.",
+                ephemeral=True,
+            )
+            return
+
+        # 3. Check target membership in this team
+        target_membership = await db.get_player_team_membership(player.id)
+        if not target_membership or target_membership["team_id"] != full_team["id"]:
+            await interaction.followup.send(
+                f"{player.mention} is not a member of **{full_team['team_name']}**.",
+                ephemeral=True,
+            )
+            return
+
+        old_role = target_membership["role"]
+        if old_role == role:
+            await interaction.followup.send(
+                f"{player.mention} already has the **{role}** role in **{full_team['team_name']}**.",
+                ephemeral=True,
+            )
+            return
+
+        # 4. Update role in database
+        updated = await db.update_team_member_role(full_team["id"], player.id, role)
+        if not updated:
+            await interaction.followup.send(
+                "Could not update the role due to a database error. Please try again.",
+                ephemeral=True,
+            )
+            return
+
+        # 5. Update Discord server roles if applicable
+        try:
+            guild = interaction.guild
+            member_obj = guild.get_member(player.id) or await guild.fetch_member(player.id)
+            if member_obj:
+                old_discord_role = discord.utils.get(guild.roles, name=old_role)
+                if old_discord_role:
+                    await member_obj.remove_roles(old_discord_role, reason=f"Role changed in team {full_team['team_name']}")
+                new_discord_role = discord.utils.get(guild.roles, name=role)
+                if new_discord_role:
+                    await member_obj.add_roles(new_discord_role, reason=f"Role changed in team {full_team['team_name']}")
+        except Exception as e:
+            log.warning(f"Could not sync Discord roles for user {player.id}: {e}")
+
+        # 6. Notify the player via DM
+        try:
+            await player.send(
+                f"Your role in **{full_team['team_name']}** has been changed from **{old_role}** to **{role}** by {interaction.user.display_name}."
+            )
+        except Exception:
+            pass
+
+        # 7. Notify leadership
+        await _notify_team_leadership(
+            self.bot,
+            full_team,
+            f"**{player.display_name}**'s role in **{full_team['team_name']}** has been updated from **{old_role}** to **{role}** by **{interaction.user.display_name}**.",
+        )
+
+        # 8. Log the event
+        await send_log(
+            self.bot,
+            title="Team Member Role Updated",
+            description=f"{player.mention}'s role in **{full_team['team_name']}** was updated to **{role}**",
+            colour=COL_SUCCESS,
+            fields=[
+                ("Team",         full_team["team_name"],                        True),
+                ("Player",       f"{player} ({player.id})",                     True),
+                ("Old Role",     old_role,                                      True),
+                ("New Role",     role,                                          True),
+                ("Updated by",   f"{interaction.user} ({interaction.user.id})", False),
+            ],
+        )
+
+        await interaction.followup.send(
+            f"✅ Updated {player.mention}'s role in **{full_team['team_name']}** to **{role}** (was `{old_role}`).",
+            ephemeral=True,
+        )
 
 
     @app_commands.command(

@@ -472,6 +472,28 @@ async def remove_team_member(team_id: int, discord_id: int) -> bool:
     return status.endswith(" 1")
 
 
+async def update_team_member_role(team_id: int, discord_id: int, new_role: str) -> Optional[dict]:
+    """
+    Update an existing team member's role (Player, Manager, Coach, Substitute).
+    Returns the updated row or None.
+    """
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE team_members
+            SET role = $1::team_role_enum
+            WHERE team_id = $2 AND discord_id = $3
+            RETURNING *
+            """,
+            new_role,
+            team_id,
+            discord_id,
+        )
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
 # =============================================================================
 # Team Invite helpers
 # =============================================================================
