@@ -94,10 +94,12 @@ def _build_page_2_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="Team Customization",
+        name="Team Customization & Ownership",
         value=(
             "`/team_rename new_name:<name>`\n"
             "Rename the team. Enforces database-wide uniqueness. Captain/Manager only.\n\n"
+            "`/transfer_captain new_captain:<@user>`\n"
+            "Transfer ownership and captain permissions to a roster member. Captain only.\n\n"
             "`/change_team_tag new_tag:<tag>`\n"
             "Change team tag (2–6 chars). Captain only. DMs all members.\n\n"
             "`/team_change_logo`\n"
@@ -107,6 +109,7 @@ def _build_page_2_embed() -> discord.Embed:
         ),
         inline=False,
     )
+
     embed.set_footer(text="Vega Scrims — Page 2 of 3 • Use buttons below to switch categories")
     return embed
 

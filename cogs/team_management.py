@@ -777,6 +777,98 @@ class _TagChangeConfirmView(discord.ui.View):
             item.disabled = True  # type: ignore[union-attr]
 
 
+class _TransferCaptainConfirmView(discord.ui.View):
+    """Confirmation view for /transfer_captain."""
+
+    def __init__(
+        self,
+        bot: commands.Bot,
+        team: dict,
+        old_captain: discord.Member,
+        new_captain: discord.Member,
+        new_captain_player: dict,
+    ) -> None:
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.team = team
+        self.old_captain = old_captain
+        self.new_captain = new_captain
+        self.new_captain_player = new_captain_player
+
+    async def _disable(self, interaction: discord.Interaction) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        self.stop()
+
+    @discord.ui.button(label="Transfer Captaincy", style=discord.ButtonStyle.danger, emoji="👑")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+
+        # Execute transfer in DB
+        updated_team = await db.transfer_team_captain(
+            team_id=self.team["id"],
+            old_captain_id=self.old_captain.id,
+            new_captain_id=self.new_captain.id,
+            new_captain_username=str(self.new_captain),
+            new_captain_ign=self.new_captain_player["ign"],
+            old_captain_new_role="Player",
+        )
+        if not updated_team:
+            await interaction.followup.send(
+                "Could not transfer captaincy due to an unexpected error. Please contact an admin.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"👑 **Captaincy Transferred!** {self.new_captain.mention} is now the Captain of **{self.team['team_name']}**.\n"
+            f"You have been assigned the **Player** role in the team.",
+            ephemeral=True,
+        )
+
+        # DM the new captain
+        try:
+            await self.new_captain.send(
+                f"👑 You have been made the **Captain** of **{self.team['team_name']}** by {self.old_captain.display_name}!"
+            )
+        except Exception:
+            pass
+
+        # Notify leadership / team members
+        await _notify_team_leadership(
+            self.bot,
+            self.team,
+            f"👑 Team ownership of **{self.team['team_name']}** was transferred to **{self.new_captain.display_name}** by **{self.old_captain.display_name}**.",
+        )
+
+        await send_log(
+            self.bot,
+            title="Team Captain Transferred",
+            description=f"Ownership of **{self.team['team_name']}** transferred from {self.old_captain.mention} to {self.new_captain.mention}",
+            colour=COL_SUCCESS,
+            fields=[
+                ("Team",         self.team["team_name"],                              True),
+                ("Old Captain",  f"{self.old_captain} ({self.old_captain.id})",       True),
+                ("New Captain",  f"{self.new_captain} ({self.new_captain.id})",       True),
+            ],
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._disable(interaction)
+        await interaction.followup.send("Cancelled. Captaincy was not transferred.", ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[union-attr]
+
+
 class TeamManagementCog(commands.Cog, name="TeamManagement"):
     """Handles team management commands like inviting players."""
 
@@ -1386,7 +1478,7 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
             # Check if they are a captain
             captain_team = await db.get_team_by_captain(interaction.user.id)
             if captain_team:
-                await interaction.followup.send("You are the Captain of a team. You cannot leave the team; use `/disband` instead.")
+                await interaction.followup.send("You are the Captain of a team. You cannot leave directly; transfer ownership first with `/transfer_captain` or use `/disband`.")
             else:
                 await interaction.followup.send("You are not currently in an active team.")
             return
@@ -1421,6 +1513,84 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
         )
 
         await interaction.followup.send(f"You have successfully left **{full_team['team_name']}**.")
+
+
+    @app_commands.command(
+        name="transfer_captain",
+        description="Transfer team ownership and captain permissions to another member. Captain only.",
+    )
+    @app_commands.describe(new_captain="The team member to promote to Captain.")
+    async def transfer_captain(
+        self,
+        interaction: discord.Interaction,
+        new_captain: discord.User,
+    ) -> None:
+        """Transfer team ownership to another roster member. Captain only."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # 1. Check caller is Captain of an active team
+        team = await db.get_team_by_captain(interaction.user.id)
+        if not team:
+            await interaction.followup.send(
+                "You must be the Captain of an active team to transfer captaincy.",
+                ephemeral=True,
+            )
+            return
+
+        # 2. Cannot transfer to self
+        if new_captain.id == interaction.user.id:
+            await interaction.followup.send(
+                "You are already the Captain of this team.",
+                ephemeral=True,
+            )
+            return
+
+        # 3. Check target is registered
+        target_player = await db.get_player(new_captain.id)
+        if not target_player or not target_player["is_active"]:
+            await interaction.followup.send(
+                f"{new_captain.mention} is not registered in Vega Scrims.",
+                ephemeral=True,
+            )
+            return
+
+        # 4. Check target is a member of this team
+        target_membership = await db.get_player_team_membership(new_captain.id)
+        if not target_membership or target_membership["team_id"] != team["id"]:
+            await interaction.followup.send(
+                f"{new_captain.mention} is not a member of your team (**{team['team_name']}**).",
+                ephemeral=True,
+            )
+            return
+
+        # 5. Open confirmation view
+        embed = discord.Embed(
+            title="👑 Transfer Team Captaincy",
+            description=(
+                f"Are you sure you want to transfer full ownership and captaincy of "
+                f"**{team['team_name']}** ({team['team_tag']}) to {new_captain.mention}?\n\n"
+                f"⚠️ **This action is irreversible.** You will be demoted to a regular **Player**."
+            ),
+            colour=COL_DANGER,
+        )
+        embed.add_field(name="Current Captain", value=interaction.user.mention, inline=True)
+        embed.add_field(name="New Captain",     value=new_captain.mention,        inline=True)
+
+        view = _TransferCaptainConfirmView(
+            bot=self.bot,
+            team=team,
+            old_captain=interaction.user,
+            new_captain=new_captain,
+            new_captain_player=target_player,
+        )
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
     @app_commands.command(

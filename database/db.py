@@ -798,6 +798,68 @@ async def update_team_logo(team_id: int, new_logo_path: str) -> Optional[dict]:
         return None
 
 
+async def transfer_team_captain(
+    team_id: int,
+    old_captain_id: int,
+    new_captain_id: int,
+    new_captain_username: str,
+    new_captain_ign: str,
+    old_captain_new_role: str = "Player",
+) -> Optional[dict]:
+    """
+    Atomically transfer ownership of a team:
+    1. Remove the new captain from team_members.
+    2. Update the teams row with the new captain details.
+    3. Add the old captain into team_members with old_captain_new_role.
+    Returns the updated team row on success, None on error.
+    """
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                # 1. Remove new captain from team_members
+                await conn.execute(
+                    """
+                    DELETE FROM team_members
+                    WHERE team_id = $1 AND discord_id = $2
+                    """,
+                    team_id,
+                    new_captain_id,
+                )
+                # 2. Update teams row
+                updated_team = await conn.fetchrow(
+                    """
+                    UPDATE teams
+                    SET captain_discord_id = $1,
+                        captain_username   = $2,
+                        captain_ign        = $3
+                    WHERE id = $4 AND is_active = TRUE
+                    RETURNING *
+                    """,
+                    new_captain_id,
+                    new_captain_username,
+                    new_captain_ign,
+                    team_id,
+                )
+                if not updated_team:
+                    return None
+
+                # 3. Add old captain into team_members
+                await conn.execute(
+                    """
+                    INSERT INTO team_members (team_id, discord_id, role)
+                    VALUES ($1, $2, $3::team_role_enum)
+                    """,
+                    team_id,
+                    old_captain_id,
+                    old_captain_new_role,
+                )
+
+                return dict(updated_team)
+    except Exception:
+        return None
+
+
 async def deactivate_team(captain_discord_id: int) -> None:
     """Soft-delete a team — marks is_active=FALSE, keeps all data."""
     await get_pool().execute(
