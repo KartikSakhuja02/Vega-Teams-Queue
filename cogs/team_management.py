@@ -1331,7 +1331,7 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
 
     @app_commands.command(
         name="team_change_region",
-        description="Change your team's region. Changes all team members' individual regions too. Captain only.",
+        description="Change your team's region and all member regions. Captain only.",
     )
     async def team_change_region(
         self,
@@ -1399,7 +1399,7 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
 
     @app_commands.command(
         name="team_change_logo",
-        description="Set or update the team logo. Opens a private thread where you upload the image. Captain/Manager only.",
+        description="Upload a new team logo via a private thread. Captain/Manager only.",
     )
     async def team_change_logo(
         self,
