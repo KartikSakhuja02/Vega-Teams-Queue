@@ -137,15 +137,16 @@ class ProfileCog(commands.Cog, name="Profile"):
         embed.add_field(name="Captain", value=f"<@{full_team['captain_discord_id']}> : {full_team['captain_ign']}", inline=False)
         
         if managers:
-            embed.add_field(name="Managers", value="\n".join(managers), inline=True)
+            embed.add_field(name=f"Managers ({len(managers)}/2)", value="\n".join(managers), inline=True)
         if coaches:
-            embed.add_field(name="Coaches", value="\n".join(coaches), inline=True)
+            embed.add_field(name=f"Coaches ({len(coaches)}/1)", value="\n".join(coaches), inline=True)
         if players:
-            embed.add_field(name="Players", value="\n".join(players), inline=False)
+            embed.add_field(name=f"Players ({len(players)}/4)", value="\n".join(players), inline=False)
         if substitutes:
-            embed.add_field(name="Substitutes", value="\n".join(substitutes), inline=False)
+            embed.add_field(name=f"Substitutes ({len(substitutes)}/2)", value="\n".join(substitutes), inline=False)
 
-        embed.set_footer(text="Vega Scrims Teams")
+        embed.set_footer(text="Vega Scrims Teams • Max: 5 Players (incl. Captain), 2 Subs, 1 Coach, 2 Managers")
+
 
 
         # Attach logo if available

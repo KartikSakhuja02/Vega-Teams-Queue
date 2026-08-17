@@ -20,6 +20,14 @@ log = logging.getLogger(__name__)
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 TEAM_PANEL_CHANNEL_ID: int = int(os.environ.get("TEAM_PANEL_CHANNEL_ID", "0"))
 
+# Team slot limits (Captain is 1 Player, so 4 invited Players + 1 Captain = 5 Players total)
+ROLE_SLOT_LIMITS: dict[str, int] = {
+    "Player": 4,       # 4 Player members + 1 Captain = 5 total starting players
+    "Substitute": 2,   # 2 Substitutes
+    "Coach": 1,        # 1 Coach
+    "Manager": 2,      # 2 Managers
+}
+
 _IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 
 
@@ -104,6 +112,22 @@ class InviteResponseView(discord.ui.View):
             if self.invite_id:
                 await db.complete_team_invite(self.invite_id)
             await interaction.followup.send("This team has been disbanded or is no longer active.")
+            return
+
+        # Check if role slots are full
+        current_counts = await db.get_team_role_counts(self.team['id'])
+        max_limit = ROLE_SLOT_LIMITS.get(self.role, 0)
+        if current_counts.get(self.role, 0) >= max_limit:
+            if self.invite_id:
+                await db.complete_team_invite(self.invite_id)
+            for child in self.children:
+                child.disabled = True
+            await interaction.message.edit(
+                content=f"Cannot join **{self.team['team_name']}**: the team's **{self.role}** slots are already full ({max_limit}/{max_limit}).",
+                view=self,
+                embed=None,
+            )
+            await interaction.followup.send(f"Team **{self.team['team_name']}** has no available slots for **{self.role}**.")
             return
 
         # Add to database
@@ -210,12 +234,51 @@ class InviteResponseView(discord.ui.View):
 class RoleSelectView(discord.ui.View):
     """View sent to the captain/manager to select the role for the invitee."""
     
-    def __init__(self, cog: "TeamManagementCog", team: dict, target: discord.User) -> None:
+    def __init__(
+        self,
+        cog: "TeamManagementCog",
+        team: dict,
+        target: discord.User,
+        role_counts: dict[str, int],
+        pending_counts: dict[str, int],
+    ) -> None:
         super().__init__(timeout=60)
         self.cog = cog
         self.team = team
         self.target = target
+        self.role_counts = role_counts
+        self.pending_counts = pending_counts
         self._done = False
+
+        # Set dynamic labels with slot usage and disable full roles
+        p_cur = role_counts.get("Player", 0)
+        p_pend = pending_counts.get("Player", 0)
+        p_max = ROLE_SLOT_LIMITS["Player"]
+        self.player_button.label = f"Player ({p_cur}/{p_max})"
+        if p_cur + p_pend >= p_max:
+            self.player_button.disabled = True
+            self.player_button.style = discord.ButtonStyle.secondary
+
+        s_cur = role_counts.get("Substitute", 0)
+        s_pend = pending_counts.get("Substitute", 0)
+        s_max = ROLE_SLOT_LIMITS["Substitute"]
+        self.substitute_button.label = f"Substitute ({s_cur}/{s_max})"
+        if s_cur + s_pend >= s_max:
+            self.substitute_button.disabled = True
+
+        c_cur = role_counts.get("Coach", 0)
+        c_pend = pending_counts.get("Coach", 0)
+        c_max = ROLE_SLOT_LIMITS["Coach"]
+        self.coach_button.label = f"Coach ({c_cur}/{c_max})"
+        if c_cur + c_pend >= c_max:
+            self.coach_button.disabled = True
+
+        m_cur = role_counts.get("Manager", 0)
+        m_pend = pending_counts.get("Manager", 0)
+        m_max = ROLE_SLOT_LIMITS["Manager"]
+        self.manager_button.label = f"Manager ({m_cur}/{m_max})"
+        if m_cur + m_pend >= m_max:
+            self.manager_button.disabled = True
 
     async def _send_invite(self, interaction: discord.Interaction, role: str) -> None:
         if self._done:
@@ -224,6 +287,16 @@ class RoleSelectView(discord.ui.View):
         self.stop()
         
         await interaction.response.defer(ephemeral=True)
+
+        # Double check slot limits in DB
+        current_counts = await db.get_team_role_counts(self.team["id"])
+        max_limit = ROLE_SLOT_LIMITS.get(role, 0)
+        if current_counts.get(role, 0) >= max_limit:
+            await interaction.followup.send(
+                f"Cannot send invite: **{self.team['team_name']}** already has the maximum of **{max_limit}** **{role}**(s).",
+                ephemeral=True,
+            )
+            return
 
         # Create pending invite in database
         invite_record = await db.create_team_invite(
@@ -258,17 +331,17 @@ class RoleSelectView(discord.ui.View):
     async def player_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._send_invite(interaction, "Player")
 
-    @discord.ui.button(label="Manager", style=discord.ButtonStyle.secondary)
-    async def manager_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_invite(interaction, "Manager")
+    @discord.ui.button(label="Substitute", style=discord.ButtonStyle.secondary)
+    async def substitute_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._send_invite(interaction, "Substitute")
 
     @discord.ui.button(label="Coach", style=discord.ButtonStyle.secondary)
     async def coach_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._send_invite(interaction, "Coach")
 
-    @discord.ui.button(label="Substitute", style=discord.ButtonStyle.secondary)
-    async def substitute_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._send_invite(interaction, "Substitute")
+    @discord.ui.button(label="Manager", style=discord.ButtonStyle.secondary)
+    async def manager_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._send_invite(interaction, "Manager")
 
 
 
@@ -797,10 +870,26 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
             )
             return
 
-        # 5. Ask for role
-        view = RoleSelectView(self, full_team, player)
+        # 5. Check role slot counts and open role selector
+        role_counts = await db.get_team_role_counts(full_team["id"])
+        pending_counts = await db.get_team_pending_invite_counts(full_team["id"])
+
+        if all(
+            role_counts.get(r, 0) + pending_counts.get(r, 0) >= ROLE_SLOT_LIMITS[r]
+            for r in ROLE_SLOT_LIMITS
+        ):
+            await interaction.response.send_message(
+                f"Your team **{full_team['team_name']}** roster is completely full across all roles "
+                "(5 Players incl. Captain, 2 Substitutes, 1 Coach, 2 Managers).\n"
+                "You cannot send more invites unless a member leaves or a pending invite is cancelled.",
+                ephemeral=True,
+            )
+            return
+
+        view = RoleSelectView(self, full_team, player, role_counts, pending_counts)
         await interaction.response.send_message(
-            f"What role should {player.mention} have in **{full_team['team_name']}**?",
+            f"Select a role for {player.mention} in **{full_team['team_name']}**:\n"
+            f"*(Roster Slots: 5 Players, 2 Substitutes, 1 Coach, 2 Managers)*",
             view=view,
             ephemeral=True
         )
@@ -1115,7 +1204,18 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
             )
             return
 
-        # 4. Update role in database
+        # 4. Check slot limits for the target role
+        current_counts = await db.get_team_role_counts(full_team["id"])
+        max_limit = ROLE_SLOT_LIMITS.get(role, 0)
+        if current_counts.get(role, 0) >= max_limit:
+            await interaction.followup.send(
+                f"Your team already has the maximum of **{max_limit}** **{role}**(s) ({max_limit}/{max_limit} slots filled). "
+                f"Change another member's role first or kick a member.",
+                ephemeral=True,
+            )
+            return
+
+        # 5. Update role in database
         updated = await db.update_team_member_role(full_team["id"], player.id, role)
         if not updated:
             await interaction.followup.send(

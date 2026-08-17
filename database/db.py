@@ -423,6 +423,45 @@ async def get_team_members(team_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_team_role_counts(team_id: int) -> dict[str, int]:
+    """
+    Get the count of active members per role for a given team.
+    Returns e.g. {'Player': 3, 'Manager': 1, 'Coach': 0, 'Substitute': 1}
+    """
+    rows = await get_pool().fetch(
+        """
+        SELECT role, COUNT(*)::INT as count
+        FROM team_members
+        WHERE team_id = $1
+        GROUP BY role
+        """,
+        team_id,
+    )
+    counts = {"Player": 0, "Manager": 0, "Coach": 0, "Substitute": 0}
+    for r in rows:
+        counts[r["role"]] = r["count"]
+    return counts
+
+
+async def get_team_pending_invite_counts(team_id: int) -> dict[str, int]:
+    """
+    Get the count of active, unexpired pending invites per role for a given team.
+    """
+    rows = await get_pool().fetch(
+        """
+        SELECT role, COUNT(*)::INT as count
+        FROM team_invites
+        WHERE team_id = $1 AND is_active = TRUE AND expires_at > NOW()
+        GROUP BY role
+        """,
+        team_id,
+    )
+    counts = {"Player": 0, "Manager": 0, "Coach": 0, "Substitute": 0}
+    for r in rows:
+        counts[r["role"]] = r["count"]
+    return counts
+
+
 async def get_player_team_membership(discord_id: int) -> Optional[dict]:
     """
     Check if a player is currently in any active team.
