@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS players (
     status           player_status_enum NOT NULL DEFAULT 'IDLE',
     status_since     TIMESTAMPTZ,
     penalty_ends_at  TIMESTAMPTZ,
+    dms_enabled      BOOLEAN            NOT NULL DEFAULT TRUE,
     elo              INT          NOT NULL DEFAULT 1000,
     kills            INT          NOT NULL DEFAULT 0,
     deaths           INT          NOT NULL DEFAULT 0,
@@ -160,6 +161,7 @@ $$;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS status          player_status_enum NOT NULL DEFAULT 'IDLE';
 ALTER TABLE players ADD COLUMN IF NOT EXISTS status_since    TIMESTAMPTZ;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS penalty_ends_at TIMESTAMPTZ;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS dms_enabled     BOOLEAN NOT NULL DEFAULT TRUE;
 
 -- Rename logo column from URL to local path (safe to re-run; will no-op if already renamed).
 DO $$

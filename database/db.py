@@ -304,6 +304,44 @@ async def set_player_status(
         return None
 
 
+async def toggle_player_dms(discord_id: int) -> Optional[dict]:
+    """
+    Flip the dms_enabled flag for a player.
+    Returns the updated row (with the new value) or None on failure.
+    """
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE players
+            SET dms_enabled = NOT dms_enabled
+            WHERE discord_id = $1
+            RETURNING *
+            """,
+            discord_id,
+        )
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+async def set_player_dms(discord_id: int, enabled: bool) -> Optional[dict]:
+    """Explicitly set dms_enabled. Returns updated row or None."""
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE players
+            SET dms_enabled = $1
+            WHERE discord_id = $2
+            RETURNING *
+            """,
+            enabled,
+            discord_id,
+        )
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
 async def update_team_region(team_id: int, new_region: str) -> Optional[dict]:
     """Update the region of a team row. Returns updated row or None."""
     try:

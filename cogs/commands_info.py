@@ -56,7 +56,10 @@ def _build_commands_embed() -> discord.Embed:
             "View the team profile and roster for another player's team.\n\n"
             "`/player_status`\n"
             "Check your current system state: IDLE, IN_QUEUE, IN_MATCH, or PENALTY_COOLDOWN. "
-            "Shows how long you have been in that state and, for cooldowns, how long is remaining."
+            "Optionally pass @user to check another player's state.\n\n"
+            "`/toggle_dms`\n"
+            "Enable or disable bot DMs for queue pop alerts and match check-in pings. "
+            "Toggled per-player and remembered across sessions."
         ),
         inline=False,
     )
