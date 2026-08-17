@@ -53,7 +53,10 @@ def _build_commands_embed() -> discord.Embed:
             "`/team-profile`\n"
             "View the profile, region, and roster of your own team.\n\n"
             "`/team-profile player:<@user>`\n"
-            "View the team profile and roster for another player's team."
+            "View the team profile and roster for another player's team.\n\n"
+            "`/player_status`\n"
+            "Check your current system state: IDLE, IN_QUEUE, IN_MATCH, or PENALTY_COOLDOWN. "
+            "Shows how long you have been in that state and, for cooldowns, how long is remaining."
         ),
         inline=False,
     )

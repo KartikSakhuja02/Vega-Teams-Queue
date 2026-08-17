@@ -75,6 +75,8 @@ class VegaBot(commands.Bot):
         log.info("Loaded cog: cogs.team_management")
         await self.load_extension("cogs.help_ticket")
         log.info("Loaded cog: cogs.help_ticket")
+        await self.load_extension("cogs.player_status")
+        log.info("Loaded cog: cogs.player_status")
 
         # 3. Sync slash commands.
         if GUILD:

@@ -271,6 +271,39 @@ async def update_player_region(discord_id: int, new_region: str) -> Optional[dic
         return None
 
 
+async def set_player_status(
+    discord_id: int,
+    new_status: str,
+    penalty_ends_at=None,
+) -> Optional[dict]:
+    """
+    Update a player's status field.
+
+    new_status      — one of 'IDLE', 'IN_QUEUE', 'IN_MATCH', 'PENALTY_COOLDOWN'
+    penalty_ends_at — datetime (UTC) when the penalty expires; only meaningful
+                      when new_status == 'PENALTY_COOLDOWN'. Pass None otherwise.
+
+    Returns the updated row or None.
+    """
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE players
+            SET status          = $1::player_status_enum,
+                status_since    = NOW(),
+                penalty_ends_at = $2
+            WHERE discord_id = $3
+            RETURNING *
+            """,
+            new_status,
+            penalty_ends_at,
+            discord_id,
+        )
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
 async def update_team_region(team_id: int, new_region: str) -> Optional[dict]:
     """Update the region of a team row. Returns updated row or None."""
     try:
