@@ -5,9 +5,11 @@ Async PostgreSQL connection pool and CRUD helpers for the Vega Queue Bot.
 
 import os
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
+
 
 log = logging.getLogger(__name__)
 
