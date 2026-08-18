@@ -108,6 +108,34 @@ class PlayerStatusCog(commands.Cog, name="PlayerStatus"):
             await interaction.followup.send(msg, ephemeral=True)
             return
 
+        # Check ban status
+        is_banned, ban_reason, banned_until, _ = await db.get_player_ban_status(target.id)
+        if is_banned:
+            title_suffix = "" if is_self else f" — {target.display_name}"
+            embed = discord.Embed(
+                title=f"🚫 Banned{title_suffix}",
+                description="This player is currently banned from matchmaking and queues.",
+                colour=discord.Colour.from_str("#E74C3C"),
+            )
+            embed.add_field(name="IGN",    value=record["ign"],    inline=True)
+            embed.add_field(name="Region", value=record["region"], inline=True)
+            embed.add_field(name="Ban Reason", value=ban_reason or "No reason provided.", inline=False)
+            if banned_until:
+                if banned_until.tzinfo is None:
+                    banned_until = banned_until.replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
+                rem = (banned_until - now).total_seconds()
+                embed.add_field(
+                    name="Ban Expires",
+                    value=f"{_fmt_ts(banned_until)} (`{_fmt_duration(max(0, rem))}` remaining)",
+                    inline=True,
+                )
+            else:
+                embed.add_field(name="Ban Duration", value="`Permanent`", inline=True)
+            embed.set_footer(text="Vega Scrims Ban Enforcement")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
         status_key: str = record.get("status", "IDLE") or "IDLE"
         meta = _STATUS_META.get(status_key, _STATUS_META["IDLE"])
 
@@ -121,6 +149,7 @@ class PlayerStatusCog(commands.Cog, name="PlayerStatus"):
         embed.add_field(name="IGN",    value=record["ign"],    inline=True)
         embed.add_field(name="Region", value=record["region"], inline=True)
         embed.add_field(name="\u200b", value="\u200b",         inline=True)  # spacer
+
 
         # Status-since timestamp
         embed.add_field(

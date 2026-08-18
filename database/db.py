@@ -342,6 +342,117 @@ async def set_player_dms(discord_id: int, enabled: bool) -> Optional[dict]:
         return None
 
 
+async def ban_player(
+    discord_id: int,
+    reason: str,
+    banned_by: int,
+    duration_hours: Optional[int] = None,
+) -> Optional[dict]:
+    """
+    Ban a player, storing the reason, admin ID, and optional expiration timestamp.
+    Also resets their status to IDLE and clears any existing penalty timestamp.
+    """
+    try:
+        if duration_hours is not None and duration_hours > 0:
+            row = await get_pool().fetchrow(
+                """
+                UPDATE players
+                SET is_banned       = TRUE,
+                    banned_at       = NOW(),
+                    banned_until    = NOW() + ($1 || ' hours')::INTERVAL,
+                    ban_reason      = $2,
+                    banned_by       = $3,
+                    status          = 'IDLE'::player_status_enum,
+                    status_since    = NOW(),
+                    penalty_ends_at = NULL
+                WHERE discord_id = $4
+                RETURNING *
+                """,
+                str(duration_hours),
+                reason,
+                banned_by,
+                discord_id,
+            )
+        else:
+            row = await get_pool().fetchrow(
+                """
+                UPDATE players
+                SET is_banned       = TRUE,
+                    banned_at       = NOW(),
+                    banned_until    = NULL,
+                    ban_reason      = $1,
+                    banned_by       = $2,
+                    status          = 'IDLE'::player_status_enum,
+                    status_since    = NOW(),
+                    penalty_ends_at = NULL
+                WHERE discord_id = $3
+                RETURNING *
+                """,
+                reason,
+                banned_by,
+                discord_id,
+            )
+        return dict(row) if row else None
+    except Exception as e:
+        log.error("Error banning player %d: %s", discord_id, e)
+        return None
+
+
+async def unban_player(discord_id: int) -> Optional[dict]:
+    """
+    Unban a player, clearing the ban status, reason, timestamps, and cooldown penalties.
+    """
+    try:
+        row = await get_pool().fetchrow(
+            """
+            UPDATE players
+            SET is_banned       = FALSE,
+                banned_at       = NULL,
+                banned_until    = NULL,
+                ban_reason      = NULL,
+                banned_by       = NULL,
+                status          = 'IDLE'::player_status_enum,
+                status_since    = NOW(),
+                penalty_ends_at = NULL
+            WHERE discord_id = $1
+            RETURNING *
+            """,
+            discord_id,
+        )
+        return dict(row) if row else None
+    except Exception as e:
+        log.error("Error unbanning player %d: %s", discord_id, e)
+        return None
+
+
+async def get_player_ban_status(discord_id: int) -> tuple[bool, Optional[str], Optional[datetime], Optional[int]]:
+    """
+    Check if a player is banned. Automatically expires temporary bans whose banned_until has passed.
+    Returns (is_banned, ban_reason, banned_until, banned_by).
+    """
+    try:
+        row = await get_pool().fetchrow(
+            "SELECT is_banned, banned_at, banned_until, ban_reason, banned_by FROM players WHERE discord_id = $1",
+            discord_id,
+        )
+        if not row or not row["is_banned"]:
+            return False, None, None, None
+
+        banned_until = row["banned_until"]
+        if banned_until:
+            if banned_until.tzinfo is None:
+                banned_until = banned_until.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) >= banned_until:
+                # Ban expired — auto unban
+                await unban_player(discord_id)
+                return False, None, None, None
+
+        return True, row["ban_reason"], banned_until, row["banned_by"]
+    except Exception:
+        return False, None, None, None
+
+
+
 async def update_team_region(team_id: int, new_region: str) -> Optional[dict]:
     """Update the region of a team row. Returns updated row or None."""
     try:

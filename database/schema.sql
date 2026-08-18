@@ -65,6 +65,11 @@ CREATE TABLE IF NOT EXISTS players (
     status_since     TIMESTAMPTZ,
     penalty_ends_at  TIMESTAMPTZ,
     dms_enabled      BOOLEAN            NOT NULL DEFAULT TRUE,
+    is_banned        BOOLEAN            NOT NULL DEFAULT FALSE,
+    banned_at        TIMESTAMPTZ,
+    banned_until     TIMESTAMPTZ,
+    ban_reason       TEXT,
+    banned_by        BIGINT,
     elo              INT          NOT NULL DEFAULT 1000,
     kills            INT          NOT NULL DEFAULT 0,
     deaths           INT          NOT NULL DEFAULT 0,
@@ -73,6 +78,7 @@ CREATE TABLE IF NOT EXISTS players (
     wins             INT          NOT NULL DEFAULT 0,
     mvp_count        INT          NOT NULL DEFAULT 0
 );
+
 
 CREATE INDEX IF NOT EXISTS idx_players_discord_id ON players (discord_id);
 CREATE INDEX IF NOT EXISTS idx_players_region      ON players (region);
@@ -203,6 +209,14 @@ CREATE INDEX IF NOT EXISTS idx_team_invites_target  ON team_invites (target_disc
 -- Ensure Substitute exists in team_role_enum
 ALTER TYPE team_role_enum ADD VALUE IF NOT EXISTS 'Substitute';
 
+-- Ban columns migration (safe to re-run)
+ALTER TABLE players ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS banned_at TIMESTAMPTZ;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS banned_until TIMESTAMPTZ;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS ban_reason TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS banned_by BIGINT;
+CREATE INDEX IF NOT EXISTS idx_players_is_banned ON players (is_banned);
+
 -- Rename logo column from URL to local path (safe to re-run; will no-op if already renamed).
 DO $$
 BEGIN
@@ -214,6 +228,7 @@ BEGIN
     END IF;
 END
 $$;
+
 
 
 

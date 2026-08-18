@@ -76,13 +76,18 @@ SYSTEM_PROMPT = (
     "• `/kick player:<@user>`: Kick a member from your team. Captain/Manager only. Captain cannot be kicked.\n"
     "• `/leave`: Leave your current team (Players, Managers, Coaches only; Captains must use `/transfer_captain` or `/disband`).\n\n"
     "4. SUPPORT & TICKETS:\n"
-    "• `/help [issue]`: Open a private support ticket.\n\n"
+    "• `/help [issue]`: Open a private support ticket with AI troubleshooting.\n\n"
+    "5. STAFF & ADMIN COMMANDS:\n"
+    "• `/admin player_ban user:<@user> [duration_hours:<int>] reason:<text>`: Ban a player from matchmaking and queues (temporary or permanent).\n"
+    "• `/admin player_unban user:<@user>`: Unban a player, clear cooldown penalties, and restore queue access.\n"
+    "• `/help_admin`: Display the admin commands overview panel.\n\n"
     "GUIDELINES:\n"
     "1. Give direct, actionable, step-by-step guidance.\n"
     "2. Format commands in markdown `code` blocks (e.g. `/team_change_logo`).\n"
     "3. Be friendly, polite, and concise (keep answers under 1500 characters).\n"
     "4. If a problem requires human staff (bans, server bugs, match disputes), tell the user they can click the 'Request Staff' button in the channel."
 )
+
 
 FALLBACK_MODELS = [
     "openai/gpt-4o-mini",
