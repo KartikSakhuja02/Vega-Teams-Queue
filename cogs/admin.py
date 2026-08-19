@@ -81,6 +81,16 @@ def _build_admin_commands_embed() -> discord.Embed:
     )
 
     embed.add_field(
+        name="🔍 Match Scoreboard OCR Testing",
+        value=(
+            "`/test_ss_ocr image:<attachment>`\n"
+            "Test the high-performance OCR engine on an uploaded match end-screen screenshot.\n"
+            "• Parses match score, map, duration, and all 10 players' ACS, K/D/A, DMG, FB, Plants, Defuses, and MVPs."
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
         name="📋 Help & Staff Tools",
         value=(
             "`/help_admin`\n"
@@ -103,6 +113,7 @@ def _build_admin_commands_embed() -> discord.Embed:
 
     embed.set_footer(text="Vega Scrims Administration • Staff Access Only")
     return embed
+
 
 
 class AdminCog(commands.Cog, name="Admin"):
@@ -383,6 +394,94 @@ class AdminCog(commands.Cog, name="Admin"):
         embed = _build_admin_commands_embed()
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # ── /test_ss_ocr ────────────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="test_ss_ocr",
+        description="Test scoreboard OCR parsing on a match end-screen screenshot.",
+    )
+    @app_commands.describe(
+        image="The match scoreboard screenshot image attachment (PNG/JPG/WEBP)."
+    )
+    async def test_ss_ocr(
+        self,
+        interaction: discord.Interaction,
+        image: discord.Attachment,
+    ) -> None:
+        """Test OCR extraction on an uploaded match screenshot."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("You do not have permission to use admin commands.", ephemeral=True)
+            return
+
+        if not image.content_type or not image.content_type.startswith("image/"):
+            await interaction.response.send_message("Please upload a valid image file (PNG, JPG, or WEBP).", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            image_bytes = await image.read()
+        except Exception as e:
+            await interaction.followup.send(f"Failed to read attached image: {e}", ephemeral=True)
+            return
+
+        from utils.match_ocr import process_match_screenshot, PlayerRowStats
+        result = await process_match_screenshot(image_bytes)
+
+        if not result.success:
+            await interaction.followup.send(
+                f"❌ **OCR Parsing Failed**: {result.error or 'Could not detect scoreboard table.'}\n"
+                f"• Engine: `{result.engine}`\n"
+                f"• Time: `{result.processing_time_ms} ms`",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"🎮 Match Scoreboard OCR Results — {result.map_name}",
+            description=(
+                f"**Score:** 🟢 **{result.team1_score}**  vs  🔴 **{result.team2_score}** ({result.outcome})\n"
+                f"**Duration:** `{result.duration}` • **Date:** `{result.match_date}`\n"
+                f"**Engine:** `{result.engine}` • **Speed:** `{result.processing_time_ms} ms`"
+            ),
+            colour=COL_SUCCESS,
+        )
+
+        def _format_team_table(players: list[PlayerRowStats]) -> str:
+            if not players:
+                return "*No players detected*"
+            lines = ["```", "IGN          ACS   K/D/A    DMG  FB PL DF"]
+            for p in players:
+                mvp_tag = "👑" if p.is_mvp else "  "
+                ign_trimmed = p.ign[:10]
+                lines.append(
+                    f"{ign_trimmed:<10} {p.acs:>4} {p.kda_str:>8} {p.damage:>5} {p.first_bloods:>2} {p.plants:>2} {p.defuses:>2} {mvp_tag}"
+                )
+            lines.append("```")
+            return "\n".join(lines)
+
+        embed.add_field(
+            name=f"🟢 Team 1 (Green) — Score: {result.team1_score}",
+            value=_format_team_table(result.team1_players),
+            inline=False,
+        )
+
+        embed.add_field(
+            name=f"🔴 Team 2 (Red) — Score: {result.team2_score}",
+            value=_format_team_table(result.team2_players),
+            inline=False,
+        )
+
+        embed.set_footer(text=f"Vega Scrims OCR Engine • Processed in {result.processing_time_ms}ms")
+        embed.set_thumbnail(url=image.url)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(AdminCog(bot))
+

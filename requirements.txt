@@ -12,3 +12,9 @@ Pillow>=10.0.0
 
 # Async HTTP client (avatar download)
 aiohttp>=3.9.0
+
+# OpenCV & Computer Vision for match scoreboard OCR
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+pytesseract>=0.3.10
+
