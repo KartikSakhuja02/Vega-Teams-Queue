@@ -10,11 +10,14 @@ asyncpg>=0.29.0
 # Image generation for profile cards
 Pillow>=10.0.0
 
-# Async HTTP client (avatar download)
+# Async HTTP client (avatar download + OpenRouter AI calls)
 aiohttp>=3.9.0
 
-# OpenCV & Computer Vision for match scoreboard OCR
+# OpenCV for match scoreboard OCR (headless — no GUI, works on Linux servers)
 opencv-python-headless>=4.8.0
-numpy>=1.24.0
-pytesseract>=0.3.10
 
+# Numerical processing (required by OpenCV)
+numpy>=1.24.0,<2.0.0
+
+# Tesseract OCR Python wrapper (requires tesseract binary — see railway.toml / nixpacks.toml)
+pytesseract>=0.3.10

@@ -1,0 +1,18 @@
+# nixpacks.toml
+# Tells Railway's Nixpacks builder to install system packages needed for
+# OpenCV + Tesseract OCR before the pip install step.
+
+[phases.setup]
+nixPkgs = [
+    "tesseract",
+    "tesseract-lang",
+    "libglib2.0",
+    "libGL",
+    "stdenv.cc",
+]
+
+[phases.build]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "python main.py"
