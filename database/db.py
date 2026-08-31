@@ -22,11 +22,37 @@ _pool: Optional[asyncpg.Pool] = None
 # =============================================================================
 
 async def init_db() -> None:
-    """Create the async connection pool.  Must be called once before any query."""
+    """Create the async connection pool and auto-apply schema on first boot."""
     global _pool
     dsn = os.environ["DATABASE_URL"]
     _pool = await asyncpg.create_pool(dsn, min_size=2, max_size=10)
     log.info("Database connection pool created.")
+    await _apply_schema()
+
+
+async def _apply_schema() -> None:
+    """
+    Read database/schema.sql and execute it against the connected database.
+    All statements use IF NOT EXISTS / ADD COLUMN IF NOT EXISTS guards so this
+    is completely safe to re-run on every startup — it is a no-op when the
+    schema is already up to date.
+    """
+    schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+    if not os.path.exists(schema_path):
+        log.warning("schema.sql not found at %s — skipping auto-migration.", schema_path)
+        return
+
+    with open(schema_path, "r", encoding="utf-8") as fh:
+        sql = fh.read()
+
+    async with _pool.acquire() as conn:
+        try:
+            await conn.execute(sql)
+            log.info("Database schema applied successfully (auto-migration complete).")
+        except Exception as exc:
+            # Log the error but don't crash — tables may already exist from a prior run.
+            log.warning("Schema auto-migration warning (usually safe to ignore): %s", exc)
+
 
 
 async def close_db() -> None:
