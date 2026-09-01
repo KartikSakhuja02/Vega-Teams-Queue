@@ -451,28 +451,54 @@ class AdminCog(commands.Cog, name="Admin"):
             colour=COL_SUCCESS,
         )
 
-        def _format_team_table(players: list[PlayerRowStats]) -> str:
+        def _fmt_main(players: list[PlayerRowStats]) -> str:
+            """IGN · ACS · K/D/A — fits in 1024 chars for 5 players."""
             if not players:
                 return "*No players detected*"
-            lines = ["```", "IGN          ACS   K/D/A    DMG  FB PL DF"]
+            lines = ["```", f"{'IGN':<13} {'ACS':>4}  {'K/D/A':>9}"]
             for p in players:
-                mvp_tag = "👑" if p.is_mvp else "  "
-                ign_trimmed = p.ign[:10]
+                crown  = "👑 " if p.is_mvp else "   "
+                ign    = (p.ign[:11] + "…") if len(p.ign) > 12 else p.ign[:12]
+                lines.append(f"{crown}{ign:<12} {p.acs:>4}  {p.kda_str:>9}")
+            lines.append("```")
+            out = "\n".join(lines)
+            return out[:1020]   # hard safety cap
+
+        def _fmt_stats(players: list[PlayerRowStats]) -> str:
+            """DMG · FB · Plants · Defuses."""
+            if not players:
+                return "*No players detected*"
+            lines = ["```", f"{'IGN':<12} {'DMG':>5}  {'FB':>2}  {'PL':>2}  {'DF':>2}"]
+            for p in players:
+                ign = (p.ign[:10] + "…") if len(p.ign) > 11 else p.ign[:11]
                 lines.append(
-                    f"{ign_trimmed:<10} {p.acs:>4} {p.kda_str:>8} {p.damage:>5} {p.first_bloods:>2} {p.plants:>2} {p.defuses:>2} {mvp_tag}"
+                    f"{ign:<12} {p.damage:>5}  {p.first_bloods:>2}  {p.plants:>2}  {p.defuses:>2}"
                 )
             lines.append("```")
-            return "\n".join(lines)
+            out = "\n".join(lines)
+            return out[:1020]
+
+        t1_score_str = result.team1_score
+        t2_score_str = result.team2_score
 
         embed.add_field(
-            name=f"🟢 Team 1 (Green) — Score: {result.team1_score}",
-            value=_format_team_table(result.team1_players),
+            name=f"🟢 Team 1 — {t1_score_str} rounds  |  IGN · ACS · K/D/A",
+            value=_fmt_main(result.team1_players),
             inline=False,
         )
-
         embed.add_field(
-            name=f"🔴 Team 2 (Red) — Score: {result.team2_score}",
-            value=_format_team_table(result.team2_players),
+            name=f"🟢 Team 1  |  DMG · FB · Plants · Defuses",
+            value=_fmt_stats(result.team1_players),
+            inline=False,
+        )
+        embed.add_field(
+            name=f"🔴 Team 2 — {t2_score_str} rounds  |  IGN · ACS · K/D/A",
+            value=_fmt_main(result.team2_players),
+            inline=False,
+        )
+        embed.add_field(
+            name=f"🔴 Team 2  |  DMG · FB · Plants · Defuses",
+            value=_fmt_stats(result.team2_players),
             inline=False,
         )
 
