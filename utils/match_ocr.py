@@ -1,51 +1,55 @@
 """
-utils/match_ocr.py
-------------------
-Match end-screen OCR engine for tactical shooter scoreboards.
+utils/match_ocr.py  (v3 — fully local, zero API calls)
+--------------------------------------------------------
+Valorant match end-screen OCR using OpenCV + Tesseract only.
 
-Architecture (revised v2):
-  1. OpenCV preprocessing  — resize, denoise, sharpen, enhance contrast
-  2. Vision AI (PRIMARY)   — OpenRouter multimodal model parses the enhanced image
-  3. Tesseract (FALLBACK)  — Offline grid-based extraction if Vision AI unavailable
+Pipeline:
+  1. Normalise image to 1920px wide  (makes all column positions consistent)
+  2. Preprocess  — denoise, unsharp-mask, CLAHE
+  3. Score extraction   — OCR top-centre region, regex for "N 获胜 M"
+  4. Metadata extraction — map, date, duration from top-left
+  5. Table row segmentation — HSV colour masks find green/red row bands
+  6. Per-row OCR  — proportional column crops + cell-specific Tesseract configs
+  7. Return structured MatchOCRResult (no network calls)
 
-This approach works on ANY screenshot resolution or aspect ratio because Vision AI
-understands layout semantically rather than relying on hardcoded pixel coordinates.
+Requirements (install on Raspberry Pi / Railway):
+  pip install opencv-python-headless pytesseract numpy Pillow
+  sudo apt-get install tesseract-ocr tesseract-ocr-chi-sim
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
-import os
 import re
 import time
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Optional
 
-import aiohttp
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image
 
+log = logging.getLogger(__name__)
+
+# ── Lazy imports (fail gracefully so the bot still boots if libs are missing) ─
 try:
     import cv2
-    _CV2_AVAILABLE = True
+    _CV2_OK = True
 except ImportError:
-    _CV2_AVAILABLE = False
+    _CV2_OK = False
+    log.warning("opencv-python-headless not installed — OCR unavailable.")
 
 try:
     import pytesseract
     pytesseract.get_tesseract_version()
-    _TESSERACT_AVAILABLE = True
+    _TESS_OK = True
 except Exception:
-    _TESSERACT_AVAILABLE = False
+    _TESS_OK = False
+    log.warning("Tesseract binary not found — OCR unavailable. "
+                "Install: sudo apt-get install tesseract-ocr tesseract-ocr-chi-sim")
 
-log = logging.getLogger(__name__)
-
-
-# ── Data Structures ──────────────────────────────────────────────────────────
+# ── Data structures ────────────────────────────────────────────────────────────
 
 @dataclass
 class PlayerRowStats:
@@ -75,7 +79,7 @@ class PlayerRowStats:
 class MatchOCRResult:
     success: bool = False
     error: Optional[str] = None
-    engine: str = "Vision AI"
+    engine: str = "OpenCV+Tesseract"
     processing_time_ms: float = 0.0
 
     map_name: str = "Unknown"
@@ -84,7 +88,7 @@ class MatchOCRResult:
 
     team1_score: int = 0
     team2_score: int = 0
-    outcome: str = "Victory"
+    outcome: str = "Unknown"
 
     team1_players: list[PlayerRowStats] = field(default_factory=list)
     team2_players: list[PlayerRowStats] = field(default_factory=list)
@@ -94,378 +98,413 @@ class MatchOCRResult:
         return self.team1_players + self.team2_players
 
 
-# ── OpenCV Image Preprocessing ───────────────────────────────────────────────
-
-def _preprocess_for_vision(image_bytes: bytes) -> bytes:
-    """
-    Enhance the screenshot with OpenCV before sending to Vision AI.
-    Steps: decode → upscale small images → denoise → sharpen → CLAHE contrast.
-    Returns JPEG bytes of the processed image (≤1280px wide, quality 90).
-    """
-    if _CV2_AVAILABLE:
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        if img is not None:
-            h, w = img.shape[:2]
-
-            # 1. Upscale small screenshots (< 800px wide) for better AI reading
-            if w < 800:
-                scale = 1200 / w
-                img = cv2.resize(img, (int(w * scale), int(h * scale)),
-                                 interpolation=cv2.INTER_CUBIC)
-                h, w = img.shape[:2]
-
-            # 2. Mild denoise (preserve text edges)
-            img = cv2.fastNlMeansDenoisingColored(img, None, 3, 3, 7, 21)
-
-            # 3. Sharpen with an unsharp mask
-            blur = cv2.GaussianBlur(img, (0, 0), 1.5)
-            img = cv2.addWeighted(img, 1.5, blur, -0.5, 0)
-
-            # 4. CLAHE on luminance channel for contrast enhancement
-            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-            l_ch, a_ch, b_ch = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            l_ch = clahe.apply(l_ch)
-            lab = cv2.merge([l_ch, a_ch, b_ch])
-            img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-
-            # 5. Cap at 1280px wide to limit API payload size
-            if w > 1280:
-                scale = 1280 / w
-                img = cv2.resize(img, (1280, int(h * scale)),
-                                 interpolation=cv2.INTER_AREA)
-
-            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            if ok:
-                return buf.tobytes()
-
-    # Pillow fallback if OpenCV unavailable
-    try:
-        pil = Image.open(BytesIO(image_bytes)).convert("RGB")
-        w, h = pil.size
-        if w < 800:
-            pil = pil.resize((1200, int(h * 1200 / w)), Image.LANCZOS)
-            w, h = pil.size
-        if w > 1280:
-            pil = pil.resize((1280, int(h * 1280 / w)), Image.LANCZOS)
-        pil = pil.filter(ImageFilter.SHARPEN)
-        pil = ImageEnhance.Contrast(pil).enhance(1.2)
-        buf = BytesIO()
-        pil.save(buf, format="JPEG", quality=90)
-        return buf.getvalue()
-    except Exception:
-        return image_bytes  # last resort: send original
-
-
-# ── System Prompt ─────────────────────────────────────────────────────────────
-
-VISION_SYSTEM_PROMPT = """\
-You are a specialized esports scoreboard OCR parser for Valorant / VALO-style tactical shooters.
-
-Analyze the match result screenshot carefully and extract ALL data into this EXACT JSON schema.
-Output ONLY the raw JSON object — no markdown, no code fences, no explanation.
-
-JSON Schema:
-{
-  "map_name": "string — map or mode name shown (e.g. '莲华古城', 'Pearl', 'Deep Sea')",
-  "match_date": "string — date/time shown (e.g. '2026/07/25 20:53')",
-  "duration": "string — match duration shown (e.g. '43:11')",
-  "team1_score": <integer — left/top score, the LARGER number in a victory>,
-  "team2_score": <integer — right/bottom score>,
-  "outcome": "Victory or Defeat",
-  "team1_players": [
-    {
-      "ign": "string — exact in-game name as shown (include Chinese/special chars)",
-      "is_mvp": <boolean — true if this player has a 我方-最佳 or 敌方-最佳 or MVP badge>,
-      "mvp_type": "Team MVP or Match MVP or null",
-      "acs": <integer — 平均战斗评分 / average combat score>,
-      "kills": <integer>,
-      "deaths": <integer>,
-      "assists": <integer>,
-      "damage": <integer — 对局总伤害>,
-      "first_bloods": <integer — 率先击败>,
-      "plants": <integer — 部署>,
-      "defuses": <integer — 拆除>
-    }
-  ],
-  "team2_players": [same structure as team1_players]
+# ── Column layout (as % of image width after normalising to 1920px wide) ──────
+#
+# Calibrated from multiple Valorant scoreboard screenshots.
+# Each tuple: (x_start_pct, x_end_pct)
+#
+COLS = {
+    "ign":     (0.145, 0.380),   # in-game name + MVP badge
+    "acs":     (0.440, 0.530),   # average combat score
+    "kda":     (0.510, 0.660),   # kills/deaths/assists
+    "dmg":     (0.625, 0.760),   # total damage
+    "fb":      (0.740, 0.815),   # first bloods
+    "plants":  (0.800, 0.870),   # spike plants
+    "defuses": (0.855, 0.930),   # spike defuses
 }
 
-Critical rules:
-- team1_players = GREEN / TEAL rows (usually top half, winning team)
-- team2_players = RED / MAROON rows (usually bottom half)
-- KDA column format is "K/D/A" — parse ALL three numbers separately (kills, deaths, assists)
-- The match score (e.g. "12 获胜 10") is in the HEADER, NOT in the player rows
-- Include ALL players — there should be exactly 5 per team (10 total)
-- If a player has 我方-最佳 badge → is_mvp=true, mvp_type="Team MVP"
-- If a player has 敌方-最佳 badge → is_mvp=true, mvp_type="Match MVP"
-- Do NOT confuse ACS values with the match score
-"""
-
-# Vision AI model cascade — tries in order until one succeeds
-VISION_MODELS = [
-    "google/gemini-flash-1.5",
-    "openai/gpt-4o-mini",
-    "meta-llama/llama-3.2-11b-vision-instruct:free",
-    "qwen/qwen-2.5-vl-72b-instruct:free",
-]
+# Tesseract page-segmentation configs per column type
+_CFG_DIGITS = "--psm 7 --oem 1 -c tessedit_char_whitelist=0123456789"
+_CFG_KDA    = "--psm 7 --oem 1 -c tessedit_char_whitelist=0123456789/|lI"
+_CFG_TEXT   = "--psm 7 --oem 1"                # Chinese + Latin for IGN
 
 
-# ── Vision AI Parser (PRIMARY) ────────────────────────────────────────────────
+# ── Step 1: Image loading & normalisation ─────────────────────────────────────
 
-async def _parse_with_vision_ai(image_bytes: bytes) -> MatchOCRResult:
-    """Primary engine: preprocess image then send to OpenRouter Vision AI."""
+def _load_and_normalise(image_bytes: bytes) -> Optional[np.ndarray]:
+    """
+    Decode image bytes and resize to exactly 1920px wide (preserving aspect).
+    This ensures all column % positions work regardless of original resolution.
+    """
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+
+    h, w = img.shape[:2]
+    if w == 1920:
+        return img
+
+    interp = cv2.INTER_CUBIC if w < 1920 else cv2.INTER_AREA
+    new_h = int(h * 1920 / w)
+    return cv2.resize(img, (1920, new_h), interpolation=interp)
+
+
+# ── Step 2: Global preprocessing ──────────────────────────────────────────────
+
+def _enhance(img: np.ndarray) -> np.ndarray:
+    """Denoise → unsharp mask → CLAHE on luminance."""
+    # Fast denoise (preserves text edges)
+    img = cv2.fastNlMeansDenoisingColored(img, None, h=4, hColor=4,
+                                          templateWindowSize=7, searchWindowSize=21)
+    # Unsharp mask (sharpens text)
+    blur = cv2.GaussianBlur(img, (0, 0), 1.5)
+    img = cv2.addWeighted(img, 1.4, blur, -0.4, 0)
+
+    # CLAHE on L channel
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l_ch, a_ch, b_ch = cv2.split(lab)
+    l_ch = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l_ch)
+    img = cv2.cvtColor(cv2.merge([l_ch, a_ch, b_ch]), cv2.COLOR_LAB2BGR)
+    return img
+
+
+# ── Step 3: Score + metadata extraction ───────────────────────────────────────
+
+def _extract_score_and_meta(img: np.ndarray) -> tuple[int, int, str, str, str, str]:
+    """
+    Returns (team1_score, team2_score, outcome, map_name, match_date, duration).
+    Looks at the top portion of the image for the big "N 获胜 M" header.
+    """
+    h, w = img.shape[:2]
+
+    # Score region: top 22%, centre 45% of width
+    score_crop = img[0: int(h * 0.22), int(w * 0.28): int(w * 0.72)]
+    score_text = _tess_text(score_crop, _CFG_TEXT, lang="chi_sim+eng")
+
+    t1_score = t2_score = 0
+    outcome = "Unknown"
+
+    # "12 获胜 10" or "8获胜5"
+    m = re.search(r"(\d{1,2})\s*获胜\s*(\d{1,2})", score_text)
+    if m:
+        t1_score, t2_score = int(m.group(1)), int(m.group(2))
+        outcome = "Victory"
+    else:
+        # Try just two numbers separated by whitespace / non-digit
+        nums = re.findall(r"\d{1,2}", score_text)
+        if len(nums) >= 2:
+            t1_score, t2_score = int(nums[0]), int(nums[1])
+            outcome = "Victory" if t1_score >= t2_score else "Defeat"
+
+    # Metadata: top-left, roughly 0-35% width × top 20% height
+    meta_crop = img[int(h * 0.09): int(h * 0.21), int(w * 0.07): int(w * 0.38)]
+    meta_text = _tess_text(meta_crop, _CFG_TEXT, lang="chi_sim+eng")
+
+    map_name = "Unknown"
+    match_date = "Unknown"
+    duration = "Unknown"
+
+    # Map name: text before a newline containing mode keywords
+    mode_m = re.search(r"([^\n\r]*(?:模式|明珠|深海|莲华|古城|Lotus|Pearl|Ascent|Haven|Split|Bind|Breeze|Fracture|Icebox|Sunset|Abyss)[^\n\r]*)", meta_text)
+    if mode_m:
+        map_name = mode_m.group(1).strip()
+    elif meta_text.strip():
+        map_name = meta_text.splitlines()[0].strip()[:40] or "Unknown"
+
+    # Date: YYYY/MM/DD HH:MM
+    date_m = re.search(r"(\d{4}[/\-]\d{2}[/\-]\d{2}(?:\s+\d{2}:\d{2})?)", meta_text)
+    if date_m:
+        match_date = date_m.group(1)
+
+    # Duration: "用时 MM:SS"
+    dur_m = re.search(r"用时\s*(\d{1,2}:\d{2})", meta_text)
+    if not dur_m:
+        dur_m = re.search(r"(\d{2}:\d{2})\s*$", meta_text.strip())
+    if dur_m:
+        duration = dur_m.group(1)
+
+    return t1_score, t2_score, outcome, map_name, match_date, duration
+
+
+# ── Step 4: Row segmentation ───────────────────────────────────────────────────
+
+# HSV ranges for team colours
+# Team 1 — teal/green rows (hue ≈ 75–130)
+_T1_LO = np.array([72,  35, 35], dtype=np.uint8)
+_T1_HI = np.array([138, 255, 210], dtype=np.uint8)
+
+# Team 2 — red/maroon rows (hue wraps around 0/180)
+_T2_LO_A = np.array([0,   35, 25], dtype=np.uint8)
+_T2_HI_A = np.array([18,  255, 165], dtype=np.uint8)
+_T2_LO_B = np.array([158, 35, 25], dtype=np.uint8)
+_T2_HI_B = np.array([180, 255, 165], dtype=np.uint8)
+
+
+def _row_team_labels(img: np.ndarray) -> np.ndarray:
+    """
+    Returns a 1-D int array, one element per image row:
+      0 = not a player row
+      1 = Team 1 (teal)
+      2 = Team 2 (red/maroon)
+    Uses the MIDDLE half of the image width (avoids agent-icon & action-icon noise).
+    """
+    h, w = img.shape[:2]
+    x0, x1 = int(w * 0.30), int(w * 0.75)   # sample columns in data area
+
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    sample = hsv[:, x0:x1]
+
+    t1 = cv2.inRange(sample, _T1_LO, _T1_HI)
+    t2a = cv2.inRange(sample, _T2_LO_A, _T2_HI_A)
+    t2b = cv2.inRange(sample, _T2_LO_B, _T2_HI_B)
+    t2 = cv2.bitwise_or(t2a, t2b)
+
+    row_t1 = np.mean(t1, axis=1) / 255.0   # fraction of sampled pixels matching T1 colour
+    row_t2 = np.mean(t2, axis=1) / 255.0
+
+    labels = np.zeros(h, dtype=np.int8)
+    THRESH = 0.20   # at least 20% coverage to count as a coloured row
+    labels[row_t1 > THRESH] = 1
+    labels[(row_t2 > THRESH) & (row_t1 <= THRESH)] = 2
+    return labels
+
+
+def _find_player_row_bands(labels: np.ndarray) -> list[tuple[int, int, int]]:
+    """
+    Convert per-pixel team labels → contiguous row bands.
+    Returns list of (y_start, y_end, team_id) sorted by y_start.
+    Ignores bands narrower than 10px (noise / divider lines).
+    """
+    bands: list[tuple[int, int, int]] = []
+    h = len(labels)
+    i = 0
+    while i < h:
+        team = labels[i]
+        if team == 0:
+            i += 1
+            continue
+        j = i + 1
+        while j < h and labels[j] == team:
+            j += 1
+        if j - i >= 10:
+            bands.append((i, j, int(team)))
+        i = j
+    return bands
+
+
+# ── Step 5: Cell preprocessing ────────────────────────────────────────────────
+
+def _prep_digit_cell(crop: np.ndarray) -> np.ndarray:
+    """Binarise a numeric cell for Tesseract."""
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
+    # Upscale tiny crops
+    h, w = gray.shape[:2]
+    if h < 30 or w < 40:
+        gray = cv2.resize(gray, (max(w * 2, 80), max(h * 2, 40)),
+                          interpolation=cv2.INTER_CUBIC)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Invert if text is dark on light
+    if cv2.countNonZero(bw) > bw.size * 0.6:
+        bw = cv2.bitwise_not(bw)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
+    # Pad to help Tesseract
+    bw = cv2.copyMakeBorder(bw, 6, 6, 6, 6, cv2.BORDER_CONSTANT, value=255)
+    return bw
+
+
+def _prep_text_cell(crop: np.ndarray) -> np.ndarray:
+    """Enhance a text (IGN) cell with CLAHE."""
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
+    h, w = gray.shape[:2]
+    if h < 30 or w < 60:
+        gray = cv2.resize(gray, (max(w * 2, 120), max(h * 2, 40)),
+                          interpolation=cv2.INTER_CUBIC)
+    gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4)).apply(gray)
+    gray = cv2.copyMakeBorder(gray, 6, 6, 6, 6, cv2.BORDER_CONSTANT, value=0)
+    return gray
+
+
+# ── Step 6: Tesseract helpers ──────────────────────────────────────────────────
+
+def _tess_text(img: np.ndarray, cfg: str, lang: str = "chi_sim+eng") -> str:
+    if not _TESS_OK:
+        return ""
+    try:
+        pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if len(img.shape) == 3 else img)
+        return pytesseract.image_to_string(pil, config=cfg, lang=lang).strip()
+    except Exception as e:
+        log.debug("Tesseract error: %s", e)
+        return ""
+
+
+def _ocr_int(crop: np.ndarray) -> int:
+    """OCR a single integer from a digit cell."""
+    proc = _prep_digit_cell(crop)
+    txt = _tess_text(proc, _CFG_DIGITS, lang="eng")
+    digits = re.sub(r"\D", "", txt)
+    return int(digits) if digits else 0
+
+
+def _ocr_kda(crop: np.ndarray) -> tuple[int, int, int]:
+    """OCR a K/D/A cell and return (kills, deaths, assists)."""
+    proc = _prep_digit_cell(crop)
+    txt = _tess_text(proc, _CFG_KDA, lang="eng")
+
+    # Normalise common Tesseract misreads
+    txt = txt.replace("l", "/").replace("I", "1").replace("O", "0").replace("|", "/")
+
+    m = re.search(r"(\d+)\s*/\s*(\d+)\s*/\s*(\d+)", txt)
+    if m:
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+    nums = re.findall(r"\d+", txt)
+    if len(nums) >= 3:
+        return int(nums[0]), int(nums[1]), int(nums[2])
+    elif len(nums) == 2:
+        return int(nums[0]), int(nums[1]), 0
+    elif len(nums) == 1:
+        return int(nums[0]), 0, 0
+    return 0, 0, 0
+
+
+def _ocr_ign(crop: np.ndarray) -> tuple[str, bool, Optional[str]]:
+    """
+    OCR the IGN + MVP badge cell.
+    Returns (ign_clean, is_mvp, mvp_type).
+    """
+    proc = _prep_text_cell(crop)
+    txt = _tess_text(proc, _CFG_TEXT, lang="chi_sim+eng")
+
+    is_mvp = False
+    mvp_type = None
+
+    if "我方" in txt and "最佳" in txt:
+        is_mvp = True
+        mvp_type = "Team MVP"
+    elif "敌方" in txt and "最佳" in txt:
+        is_mvp = True
+        mvp_type = "Match MVP"
+    elif re.search(r"MVP", txt, re.IGNORECASE):
+        is_mvp = True
+        mvp_type = "Team MVP"
+
+    # Strip badges / noisy suffixes from the IGN
+    clean = re.sub(r"(我方|敌方|最佳|MVP|[\-—_·\s]{2,})", " ", txt, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    # Remove purely non-alphanumeric noise lines (keep Chinese + Latin + digits + common ign chars)
+    clean = re.sub(r"[^\w\u4e00-\u9fff.\-!]", "", clean)
+    clean = clean.strip() or "Unknown"
+
+    return clean, is_mvp, mvp_type
+
+
+# ── Step 7: Row → PlayerRowStats ──────────────────────────────────────────────
+
+def _extract_row(row_img: np.ndarray, team: str) -> PlayerRowStats:
+    """Crop each column from a single player row and OCR it."""
+    h, w = row_img.shape[:2]
+
+    def crop(col_key: str) -> np.ndarray:
+        x0 = int(COLS[col_key][0] * w)
+        x1 = int(COLS[col_key][1] * w)
+        return row_img[:, x0:x1]
+
+    ign, is_mvp, mvp_type = _ocr_ign(crop("ign"))
+    acs                   = _ocr_int(crop("acs"))
+    kills, deaths, assists = _ocr_kda(crop("kda"))
+    dmg                   = _ocr_int(crop("dmg"))
+    fb                    = _ocr_int(crop("fb"))
+    plants                = _ocr_int(crop("plants"))
+    defuses               = _ocr_int(crop("defuses"))
+
+    return PlayerRowStats(
+        ign=ign, team=team,
+        is_mvp=is_mvp, mvp_type=mvp_type,
+        acs=acs, kills=kills, deaths=deaths, assists=assists,
+        damage=dmg, first_bloods=fb, plants=plants, defuses=defuses,
+    )
+
+
+# ── Main synchronous parser ────────────────────────────────────────────────────
+
+def _parse_local(image_bytes: bytes) -> MatchOCRResult:
+    """Full local OCR pipeline. Returns a MatchOCRResult."""
+    if not _CV2_OK:
+        return MatchOCRResult(success=False,
+                              error="opencv-python-headless not installed.")
+    if not _TESS_OK:
+        return MatchOCRResult(success=False,
+                              error="Tesseract not installed. "
+                                    "Run: sudo apt-get install tesseract-ocr tesseract-ocr-chi-sim")
+
     t0 = time.perf_counter()
 
-    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not api_key:
+    # 1. Load + normalise to 1920px wide
+    img = _load_and_normalise(image_bytes)
+    if img is None:
+        return MatchOCRResult(success=False, error="Could not decode image.")
+
+    # 2. Enhance globally
+    img = _enhance(img)
+    h, w = img.shape[:2]
+
+    # 3. Extract score + metadata
+    t1_score, t2_score, outcome, map_name, match_date, duration = (
+        _extract_score_and_meta(img)
+    )
+
+    # 4. Segment rows by colour
+    labels = _row_team_labels(img)
+    bands  = _find_player_row_bands(labels)
+
+    if not bands:
         return MatchOCRResult(
             success=False,
-            error="OPENROUTER_API_KEY not set — Vision AI unavailable.",
+            error="Could not detect scoreboard rows. "
+                  "Make sure the image shows the full match end-screen.",
             processing_time_ms=round((time.perf_counter() - t0) * 1000, 1),
         )
 
-    # Step 1: Preprocess with OpenCV
-    try:
-        enhanced_bytes = await asyncio.get_running_loop().run_in_executor(
-            None, _preprocess_for_vision, image_bytes
-        )
-    except Exception as e:
-        log.warning("Preprocessing failed, using raw image: %s", e)
-        enhanced_bytes = image_bytes
-
-    # Step 2: Encode to base64
-    b64_data = base64.b64encode(enhanced_bytes).decode("utf-8")
-    data_url = f"data:image/jpeg;base64,{b64_data}"
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "HTTP-Referer": "https://github.com/KartikSakhuja02/Vega-Teams-Queue",
-        "X-Title": "Vega Scrims Bot",
-        "Content-Type": "application/json",
-    }
-
-    messages = [
-        {"role": "system", "content": VISION_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        "Parse this Valorant match scoreboard screenshot. "
-                        "Extract the match score from the HEADER (large numbers), "
-                        "then extract every player's stats from the table rows. "
-                        "Return only the JSON."
-                    ),
-                },
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        },
-    ]
-
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        for model in VISION_MODELS:
-            payload = {
-                "model": model,
-                "messages": messages,
-                "temperature": 0.0,  # deterministic for parsing
-            }
-            # Only add JSON response format for models that support it
-            if "gemini" not in model and "llama" not in model and "qwen" not in model:
-                payload["response_format"] = {"type": "json_object"}
-
-            try:
-                async with session.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                ) as resp:
-                    raw_text = await resp.text()
-
-                    if resp.status != 200:
-                        log.warning("Vision model %s → HTTP %d: %s", model, resp.status, raw_text[:200])
-                        continue
-
-                    data = json.loads(raw_text)
-                    choices = data.get("choices", [])
-                    if not choices:
-                        log.warning("Vision model %s → no choices returned.", model)
-                        continue
-
-                    content = choices[0].get("message", {}).get("content", "").strip()
-                    if not content:
-                        continue
-
-                    # Strip markdown fences if model added them
-                    clean = re.sub(r"^```(?:json)?\s*", "", content)
-                    clean = re.sub(r"\s*```$", "", clean).strip()
-
-                    try:
-                        parsed = json.loads(clean)
-                    except json.JSONDecodeError:
-                        # Try to extract JSON object from within the content
-                        match = re.search(r"\{.*\}", clean, re.DOTALL)
-                        if match:
-                            parsed = json.loads(match.group())
-                        else:
-                            log.warning("Vision model %s → JSON parse failed: %s", model, clean[:200])
-                            continue
-
-                    res = MatchOCRResult(
-                        success=True,
-                        engine=f"Vision AI ({model.split('/')[-1]})",
-                        map_name=parsed.get("map_name", "Unknown"),
-                        match_date=parsed.get("match_date", "Unknown"),
-                        duration=parsed.get("duration", "Unknown"),
-                        team1_score=int(parsed.get("team1_score", 0)),
-                        team2_score=int(parsed.get("team2_score", 0)),
-                        outcome=parsed.get("outcome", "Victory"),
-                        processing_time_ms=round((time.perf_counter() - t0) * 1000, 1),
-                    )
-
-                    for p in parsed.get("team1_players", []):
-                        res.team1_players.append(_parse_player_json(p, "Team 1 (Green)"))
-
-                    for p in parsed.get("team2_players", []):
-                        res.team2_players.append(_parse_player_json(p, "Team 2 (Red)"))
-
-                    if res.all_players:
-                        log.info(
-                            "OCR success via %s — %d players in %.0fms",
-                            model, len(res.all_players), res.processing_time_ms,
-                        )
-                        return res
-
-            except Exception as e:
-                log.warning("Vision model %s → exception: %s", model, e)
-                continue
-
-    return MatchOCRResult(
-        success=False,
-        error="All Vision AI models failed. Check OPENROUTER_API_KEY and credits.",
-        processing_time_ms=round((time.perf_counter() - t0) * 1000, 1),
+    # 5. OCR each row
+    result = MatchOCRResult(
+        success=True,
+        engine="OpenCV+Tesseract (local)",
+        map_name=map_name,
+        match_date=match_date,
+        duration=duration,
+        team1_score=t1_score,
+        team2_score=t2_score,
+        outcome=outcome,
+        processing_time_ms=0.0,
     )
 
+    log.info("Found %d row bands in %dpx image.", len(bands), w)
 
-def _parse_player_json(p: dict, team: str) -> PlayerRowStats:
-    """Convert a raw player dict from Vision AI JSON into a PlayerRowStats object."""
-    def _int(key: str, default: int = 0) -> int:
-        try:
-            return int(p.get(key, default) or default)
-        except (ValueError, TypeError):
-            return default
+    for y_start, y_end, team_id in bands:
+        row_crop = img[y_start:y_end, :]
+        # The row image is full-width (1920px) so COLS % positions apply directly
+        team_label = "Team 1 (Green)" if team_id == 1 else "Team 2 (Red)"
+        stats = _extract_row(row_crop, team_label)
 
-    return PlayerRowStats(
-        ign=str(p.get("ign", "Unknown")).strip() or "Unknown",
-        team=team,
-        is_mvp=bool(p.get("is_mvp", False)),
-        mvp_type=p.get("mvp_type") or None,
-        acs=_int("acs"),
-        kills=_int("kills"),
-        deaths=_int("deaths"),
-        assists=_int("assists"),
-        damage=_int("damage"),
-        first_bloods=_int("first_bloods"),
-        plants=_int("plants"),
-        defuses=_int("defuses"),
+        if team_id == 1:
+            result.team1_players.append(stats)
+        else:
+            result.team2_players.append(stats)
+
+    result.processing_time_ms = round((time.perf_counter() - t0) * 1000, 1)
+    log.info(
+        "Local OCR complete: %d T1 players, %d T2 players, %.0fms",
+        len(result.team1_players), len(result.team2_players), result.processing_time_ms,
     )
 
+    result.success = len(result.all_players) > 0
+    if not result.success:
+        result.error = "No players detected. Check that the screenshot shows the full scoreboard."
 
-# ── Tesseract Fallback (OFFLINE / NO API KEY) ─────────────────────────────────
-
-def _parse_with_tesseract_fallback(image_bytes: bytes) -> Optional[MatchOCRResult]:
-    """
-    Last-resort offline parser using Tesseract full-image OCR + regex extraction.
-    Much less accurate than Vision AI but works without internet/API key.
-    """
-    if not _TESSERACT_AVAILABLE or not _CV2_AVAILABLE:
-        return None
-
-    t0 = time.perf_counter()
-
-    try:
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img is None:
-            return None
-
-        # Upscale for better Tesseract accuracy
-        h, w = img.shape[:2]
-        if w < 1200:
-            scale = 1920 / w
-            img = cv2.resize(img, (int(w * scale), int(h * scale)),
-                             interpolation=cv2.INTER_CUBIC)
-
-        # Tesseract with Chinese + English
-        pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        raw_text = pytesseract.image_to_string(
-            pil_img,
-            lang="chi_sim+eng",
-            config="--psm 6 --oem 1",
-        )
-
-        if not raw_text.strip():
-            return None
-
-        result = MatchOCRResult(engine="Tesseract (offline)")
-
-        # Extract match score — look for "N 获胜 M" or just two big numbers
-        score_match = re.search(r"(\d{1,2})\s*获胜\s*(\d{1,2})", raw_text)
-        if score_match:
-            result.team1_score = int(score_match.group(1))
-            result.team2_score = int(score_match.group(2))
-            result.outcome = "Victory"
-
-        # Extract duration
-        dur = re.search(r"用时\s*(\d{1,2}:\d{2})", raw_text)
-        if dur:
-            result.duration = dur.group(1)
-
-        # Extract date
-        date = re.search(r"(\d{4}[/\-]\d{2}[/\-]\d{2}(?:\s+\d{2}:\d{2})?)", raw_text)
-        if date:
-            result.match_date = date.group(1)
-
-        # Map name from mode line
-        map_match = re.search(r"赛事模式[·\-\s]*([^\s\n]+)", raw_text)
-        if map_match:
-            result.map_name = map_match.group(1)
-
-        result.success = result.team1_score > 0 or result.team2_score > 0
-        result.processing_time_ms = round((time.perf_counter() - t0) * 1000, 1)
-        return result if result.success else None
-
-    except Exception as e:
-        log.warning("Tesseract fallback failed: %s", e)
-        return None
+    return result
 
 
-# ── Main Entrypoint ───────────────────────────────────────────────────────────
+# ── Public async entrypoint ────────────────────────────────────────────────────
 
 async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
     """
-    Process a match end-screen screenshot and extract all scoreboard data.
-
-    Priority:
-      1. Vision AI (OpenRouter) — primary, most accurate, resolution-independent
-      2. Tesseract offline       — fallback if no API key or no internet
+    Async wrapper: runs the blocking OpenCV + Tesseract pipeline in a thread
+    so the Discord event loop is never blocked.
     """
-    # Primary: Vision AI
-    result = await _parse_with_vision_ai(image_bytes)
-    if result.success and result.all_players:
-        return result
-
-    # Fallback: Tesseract offline
-    log.info("Vision AI failed or returned no players, trying Tesseract fallback...")
-    tesseract_result = await asyncio.get_running_loop().run_in_executor(
-        None, _parse_with_tesseract_fallback, image_bytes
-    )
-    if tesseract_result and tesseract_result.success:
-        return tesseract_result
-
-    # Return Vision AI result even if empty (has error message)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _parse_local, image_bytes)
     return result
