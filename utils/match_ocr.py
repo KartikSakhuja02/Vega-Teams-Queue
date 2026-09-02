@@ -1,19 +1,18 @@
 """
-utils/match_ocr.py  (v5 — fast & accurate local OCR)
-------------------------------------------------------
-Valorant match scoreboard OCR — OpenCV + Tesseract only, zero API calls.
+utils/match_ocr.py  (v6 — per-cell OCR, optimised preprocessing)
+-----------------------------------------------------------------
+Valorant match scoreboard OCR — fully local, zero API calls.
 
-Speed improvements over v4:
-  ✓  fastNlMeansDenoisingColored removed (was 30–60 s on RPi!) → fast GaussianBlur
-  ✓  Batch numeric OCR: stack all 5 rows per column → 1 Tesseract call instead of 5
-  ✓  Total Tesseract calls: ~14 per image (was 70+)
-  ✓  Target: < 8 s on Raspberry Pi 4
-
-Accuracy improvements:
-  ✓  Row detection: equal division only — no gradient noise (was splitting into 20+ rows)
-  ✓  Skip top 28 % of image when looking for colored rows (avoids header area)
-  ✓  Only accept team blocks ≥ 20 % of image height (ignores noise blobs)
-  ✓  Digit cell threshold tuned for white text on teal/red backgrounds
+Implementation follows the guide:
+  1. Normalise to fixed canvas (1920 × 1080 → 16:9 standard)
+  2. Crop each cell individually by fixed relative coordinates
+  3. Per-cell preprocessing:
+       • Grayscale → 2× upscale (INTER_CUBIC) → THRESH_BINARY_INV at 180
+       (inverts so text = black, background = white — Tesseract's sweet spot)
+  4. PSM / whitelist per column type:
+       • IGN text   : --psm 7  --oem 3  (chi_sim+eng)
+       • Numbers    : --psm 8  --oem 3  -c whitelist=0123456789
+       • K/D/A      : --psm 7  --oem 3  -c whitelist=0123456789/
 
 Install:
   pip install opencv-python-headless pytesseract numpy Pillow
@@ -27,7 +26,6 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from io import BytesIO
 from typing import Optional
 
 import numpy as np
@@ -97,86 +95,150 @@ class MatchOCRResult:
         return self.team1_players + self.team2_players
 
 
-# ── Column layout — percentage of 1920 px normalised image width ──────────────
-# Calibrated from real Valorant scoreboard screenshots.
-# Overlapping ranges are intentional (avoids clipping chars at boundaries).
+# ── Fixed canvas & column layout ──────────────────────────────────────────────
+#
+# All screenshots are normalised to a 1920 × 1080 canvas before anything else.
+# Column bounds are expressed as (x_start_pct, x_end_pct) of 1920.
+# Row bounds as (y_start_pct, y_end_pct) of 1080.
+#
+# Calibrated from multiple Valorant (and Valorant-Mobile) scoreboard screenshots.
+
+TARGET_W = 1920
+TARGET_H = 1080
+
+# Column x-ranges (percentage of TARGET_W)
 COLS = {
-    "ign":     (0.23, 0.44),
-    "acs":     (0.43, 0.52),
-    "kda":     (0.49, 0.63),
-    "dmg":     (0.61, 0.75),
-    "fb":      (0.72, 0.80),
-    "plants":  (0.78, 0.86),
-    "defuses": (0.84, 0.92),
+    "ign":     (0.155, 0.440),   # agent icon + player name
+    "acs":     (0.435, 0.520),
+    "kda":     (0.490, 0.635),
+    "dmg":     (0.610, 0.745),
+    "fb":      (0.725, 0.800),
+    "plants":  (0.785, 0.858),
+    "defuses": (0.843, 0.915),
 }
 
-_N = 5  # players per team (standard Valorant)
+# Row y-ranges (percentage of TARGET_H) — Team 1 first, then Team 2
+# These assume the header (队伍排名, 平均战斗评分…) occupies ~24–32 % from top.
+# Each player row is ~7 % of TARGET_H tall.
+# Rows are defined as half-open intervals [y0, y1).
+_ROW_Y: list[tuple[float, float]] = [
+    # Team 1 (rows 0–4)
+    (0.295, 0.375),
+    (0.375, 0.455),
+    (0.455, 0.535),
+    (0.535, 0.610),
+    (0.610, 0.685),
+    # Team 2 (rows 5–9)
+    (0.685, 0.760),
+    (0.760, 0.835),
+    (0.835, 0.905),
+    (0.905, 0.960),
+    (0.960, 1.000),
+]
 
-_CFG_DIGITS = "--psm 6 --oem 1 -c tessedit_char_whitelist=0123456789"
-_CFG_KDA    = "--psm 6 --oem 1 -c tessedit_char_whitelist=0123456789/|lI"
-_CFG_IGN    = "--psm 7 --oem 1"
+_N_PER_TEAM = 5
+
+# Tesseract configs
+_PSM7_TEXT    = "--oem 3 --psm 7"                                          # single text line
+_PSM8_DIGITS  = "--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789"   # single word / number
+_PSM7_KDA     = "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789/"  # K/D/A with slash
 
 
-# ── 1. Load & normalise to 1920 px wide ───────────────────────────────────────
+# ── Step 1 — Normalise to fixed 16:9 canvas ───────────────────────────────────
 
-def _load(image_bytes: bytes) -> Optional[np.ndarray]:
+def _normalise(image_bytes: bytes) -> Optional[np.ndarray]:
+    """
+    Decode and resize to exactly 1920 × 1080.
+    Handles any input resolution or aspect ratio by fitting to width first,
+    then center-cropping / letterboxing vertically if needed.
+    """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
         return None
+
     h, w = img.shape[:2]
-    if w == 1920:
+    if w == TARGET_W and h == TARGET_H:
         return img
-    interp = cv2.INTER_CUBIC if w < 1920 else cv2.INTER_AREA
-    return cv2.resize(img, (1920, int(h * 1920 / w)), interpolation=interp)
+
+    # Scale to width
+    scale = TARGET_W / w
+    new_h = int(h * scale)
+    img = cv2.resize(img, (TARGET_W, new_h),
+                     interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
+
+    # Pad or crop vertically to reach TARGET_H
+    cur_h = img.shape[0]
+    if cur_h < TARGET_H:
+        pad = TARGET_H - cur_h
+        img = cv2.copyMakeBorder(img, 0, pad, 0, 0, cv2.BORDER_CONSTANT, value=0)
+    elif cur_h > TARGET_H:
+        img = img[:TARGET_H, :]
+
+    return img
 
 
-# ── 2. Fast global preprocessing (NO denoising — too slow on RPi) ─────────────
+# ── Step 2 — Per-cell preprocessing ───────────────────────────────────────────
 
-def _sharpen(img: np.ndarray) -> np.ndarray:
-    """Mild unsharp mask only — takes < 200 ms even on Raspberry Pi."""
-    blur = cv2.GaussianBlur(img, (0, 0), 1.2)
-    return cv2.addWeighted(img, 1.35, blur, -0.35, 0)
+def preprocess_cell(img_crop: np.ndarray, is_number_only: bool = False) -> np.ndarray:
+    """
+    Prepare a single cell crop for Tesseract:
+      1. Grayscale
+      2. 2× upscale (INTER_CUBIC) — Tesseract performs best with ~30–40 px text height
+      3. THRESH_BINARY_INV at 180 → text becomes BLACK, background WHITE
+      4. White border padding (Tesseract needs breathing room)
+    """
+    # Grayscale
+    gray = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY) if len(img_crop.shape) == 3 else img_crop
+
+    # 2× upscale
+    gray = cv2.resize(gray, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+
+    # For pure number cells a slight blur reduces noise before threshold
+    if is_number_only:
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    # BINARY_INV at 180: bright text → black, dark background → white
+    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+
+    # Check result quality: if almost entirely black (over-thresholded), try Otsu
+    white_frac = cv2.countNonZero(thresh) / thresh.size
+    if white_frac < 0.02 or white_frac > 0.95:
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Padding — helps Tesseract not clip edge characters
+    return cv2.copyMakeBorder(thresh, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=255)
 
 
-# ── 3. Score & metadata ────────────────────────────────────────────────────────
+# ── Step 3 — Score & metadata ──────────────────────────────────────────────────
 
 def _ocr_score(img: np.ndarray) -> tuple[int, int, str]:
-    """Extract team scores from the top-centre header."""
+    """Extract the 'N 获胜 M' header score from the top-centre region."""
     h, w = img.shape[:2]
-    crop = img[0:int(h * 0.23), int(w * 0.27):int(w * 0.73)]
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, (gray.shape[1] * 2, gray.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
-    # The score numbers are bright — binary threshold gives cleaner OCR
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    bw = cv2.copyMakeBorder(bw, 6, 6, 6, 6, cv2.BORDER_CONSTANT, value=255)
+    crop = img[0:int(h * 0.24), int(w * 0.28):int(w * 0.72)]
+    proc = preprocess_cell(crop, is_number_only=False)
+    pil  = Image.fromarray(proc)
 
     for lang in ("chi_sim+eng", "eng"):
-        txt = pytesseract.image_to_string(Image.fromarray(bw), config="--psm 6 --oem 1", lang=lang)
+        txt = pytesseract.image_to_string(pil, config="--oem 3 --psm 6", lang=lang)
         m = re.search(r"(\d{1,2})\s*获胜\s*(\d{1,2})", txt)
         if m:
             return int(m.group(1)), int(m.group(2)), "Victory"
-        # Fallback: two standalone 1-2 digit numbers
         nums = re.findall(r"\b(\d{1,2})\b", txt)
         if len(nums) >= 2:
             a, b = int(nums[0]), int(nums[1])
             return a, b, ("Victory" if a >= b else "Defeat")
-
     return 0, 0, "Unknown"
 
 
 def _ocr_meta(img: np.ndarray) -> tuple[str, str, str]:
-    """Extract map name, date, duration from top-left."""
+    """Extract map name, date, duration from top-left metadata block."""
     h, w = img.shape[:2]
-    crop = img[int(h * 0.07):int(h * 0.23), int(w * 0.07):int(w * 0.38)]
-    txt = pytesseract.image_to_string(
-        Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)),
-        config="--psm 6 --oem 1", lang="chi_sim+eng",
-    )
+    crop = img[int(h * 0.07):int(h * 0.24), int(w * 0.07):int(w * 0.38)]
+    pil  = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+    txt  = pytesseract.image_to_string(pil, config="--oem 3 --psm 6", lang="chi_sim+eng")
 
-    map_name   = "Unknown"
-    match_date = "Unknown"
-    duration   = "Unknown"
+    map_name = match_date = duration = "Unknown"
 
     keywords = r"模式|明珠|深海|莲华|古城|Lotus|Pearl|Ascent|Haven|Split|Bind|Breeze|Fracture|Icebox|Sunset|Abyss"
     m = re.search(rf"([^\n\r]*(?:{keywords})[^\n\r]*)", txt)
@@ -189,14 +251,14 @@ def _ocr_meta(img: np.ndarray) -> tuple[str, str, str]:
     if dm:
         match_date = dm.group(1)
 
-    dr = re.search(r"用时\s*(\d{1,2}:\d{2})", txt) or re.search(r"\b(\d{1,2}:\d{2})\s*$", txt.strip())
+    dr = re.search(r"用时\s*(\d{1,2}:\d{2})", txt) or re.search(r"\b(\d{1,2}:\d{2})\b", txt)
     if dr:
         duration = dr.group(1)
 
     return map_name, match_date, duration
 
 
-# ── 4. Row detection ───────────────────────────────────────────────────────────
+# ── Step 4 — Row auto-detection (fallback if fixed rows don't align) ───────────
 
 _T1_LO = np.array([72,  25, 25], dtype=np.uint8)
 _T1_HI = np.array([142, 255, 225], dtype=np.uint8)
@@ -204,267 +266,124 @@ _T2_LO_A = np.array([0,   25, 18], dtype=np.uint8)
 _T2_HI_A = np.array([18,  255, 175], dtype=np.uint8)
 _T2_LO_B = np.array([158, 25, 18], dtype=np.uint8)
 _T2_HI_B = np.array([180, 255, 175], dtype=np.uint8)
-_THRESH   = 0.18   # min fraction of sampled pixels to count as a coloured row
 
 
-def _label_rows(img: np.ndarray) -> np.ndarray:
-    """Return per-row team labels: 0=none, 1=team1, 2=team2."""
+def _detect_row_offsets(img: np.ndarray) -> Optional[dict[str, float]]:
+    """
+    Dynamically find where Team 1 rows begin and where Team 2 ends.
+    Returns {'t1_start': float, 't2_end': float} as Y fractions of image height,
+    or None if detection fails (caller falls back to fixed _ROW_Y).
+    """
     h, w = img.shape[:2]
-    x0, x1 = int(w * 0.32), int(w * 0.72)
-    hsv  = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    samp = hsv[:, x0:x1]
+    x0, x1 = int(w * 0.35), int(w * 0.70)
+    skip_y = int(h * 0.25)    # ignore the header zone
 
-    t1  = cv2.inRange(samp, _T1_LO, _T1_HI)
-    t2  = cv2.bitwise_or(
-        cv2.inRange(samp, _T2_LO_A, _T2_HI_A),
-        cv2.inRange(samp, _T2_LO_B, _T2_HI_B),
-    )
+    hsv  = cv2.cvtColor(img[skip_y:, x0:x1], cv2.COLOR_BGR2HSV)
+    t1   = cv2.inRange(hsv, _T1_LO, _T1_HI)
+    t2   = cv2.bitwise_or(cv2.inRange(hsv, _T2_LO_A, _T2_HI_A),
+                          cv2.inRange(hsv, _T2_LO_B, _T2_HI_B))
 
     cov1 = np.mean(t1, axis=1) / 255.0
     cov2 = np.mean(t2, axis=1) / 255.0
 
-    labels = np.zeros(h, dtype=np.int8)
-    labels[cov1 > _THRESH] = 1
-    labels[(cov2 > _THRESH) & (cov1 <= _THRESH)] = 2
-    return labels
+    rows_t1 = np.where(cov1 > 0.18)[0]
+    rows_t2 = np.where(cov2 > 0.18)[0]
+
+    if len(rows_t1) < 10 or len(rows_t2) < 10:
+        return None  # not enough colour coverage → use fixed rows
+
+    t1_start = (rows_t1[0] + skip_y) / h
+    t2_end   = (rows_t2[-1] + skip_y) / h
+    t1_end   = (rows_t1[-1] + skip_y) / h
+    t2_start = (rows_t2[0]  + skip_y) / h
+
+    return {
+        "t1_start": t1_start,
+        "t1_end":   t1_end,
+        "t2_start": t2_start,
+        "t2_end":   t2_end,
+    }
 
 
-def _team_rows(img: np.ndarray) -> list[tuple[int, int, int]]:
+def _build_row_y(img: np.ndarray) -> list[tuple[float, float]]:
     """
-    Find the two main coloured blocks (team1=teal, team2=red), then split
-    each into exactly _N equal sub-rows.
-
-    Rules that prevent false positives:
-      • Skip the top 28 % (score + header text area).
-      • Only accept a block whose height ≥ 18 % of the image height
-        (5 player rows are always at least that large).
-      • Take the SINGLE largest block for each team colour.
+    Return 10 (y0, y1) pairs as fractions of image height.
+    Tries dynamic detection first; falls back to the calibrated fixed layout.
     """
+    offsets = _detect_row_offsets(img)
+    if offsets:
+        t1_h = offsets["t1_end"] - offsets["t1_start"]
+        t2_h = offsets["t2_end"] - offsets["t2_start"]
+        rh1  = t1_h / _N_PER_TEAM
+        rh2  = t2_h / _N_PER_TEAM
+
+        rows = []
+        for i in range(_N_PER_TEAM):
+            y0 = offsets["t1_start"] + i * rh1
+            rows.append((y0, y0 + rh1))
+        for i in range(_N_PER_TEAM):
+            y0 = offsets["t2_start"] + i * rh2
+            rows.append((y0, y0 + rh2))
+        return rows
+
+    log.debug("Dynamic row detection failed — using fixed _ROW_Y layout.")
+    return _ROW_Y
+
+
+# ── Step 5 — Per-cell OCR helpers ─────────────────────────────────────────────
+
+def _cell(img: np.ndarray, row_idx: int, col_key: str) -> np.ndarray:
+    """Crop a single cell from the full 1920×1080 image."""
+    row_y = _build_row_y(img)      # cached implicitly by caller
+    y0f, y1f = row_y[row_idx]
+    x0f, x1f = COLS[col_key]
     h, w = img.shape[:2]
-    skip_top = int(h * 0.28)         # ignore header area
-    min_h    = int(h * 0.18)         # minimum valid team block height
-
-    labels = _label_rows(img)
-    labels[:skip_top] = 0            # mask out the header region
-
-    # Find all contiguous coloured runs
-    raw: list[tuple[int, int, int]] = []
-    i = skip_top
-    while i < h:
-        t = int(labels[i])
-        if t == 0:
-            i += 1
-            continue
-        j = i + 1
-        while j < h and labels[j] == t:
-            j += 1
-        if j - i >= min_h:
-            raw.append((i, j, t))
-        i = j
-
-    if not raw:
-        return []
-
-    # Pick the largest block per team
-    def _best(team_id: int) -> Optional[tuple[int, int, int]]:
-        blocks = [b for b in raw if b[2] == team_id]
-        return max(blocks, key=lambda b: b[1] - b[0]) if blocks else None
-
-    result: list[tuple[int, int, int]] = []
-    for team_id in (1, 2):
-        block = _best(team_id)
-        if block is None:
-            continue
-        y0, y1, tid = block
-        bh = y1 - y0
-        step = bh / _N
-        for i in range(_N):
-            ry0 = y0 + int(i * step)
-            ry1 = y0 + int((i + 1) * step)
-            result.append((ry0, ry1, tid))
-
-    return sorted(result, key=lambda r: r[0])
+    return img[int(y0f * h): int(y1f * h), int(x0f * w): int(x1f * w)]
 
 
-# ── 5. Cell preprocessing ──────────────────────────────────────────────────────
-
-def _binarise_digit(crop: np.ndarray) -> np.ndarray:
-    """
-    Isolate bright white numbers from a teal/red background.
-    Valorant scoreboard digits are white — simple high-threshold extracts them cleanly.
-    """
-    h, w = crop.shape[:2]
-    # Upscale small crops so Tesseract has enough pixels
-    if h < 60 or w < 40:
-        s = max(60 / h, 40 / w, 1.0)
-        crop = cv2.resize(crop, (int(w * s), int(h * s)), interpolation=cv2.INTER_CUBIC)
-
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-
-    # Try a bright threshold first (white text)
-    _, bw = cv2.threshold(gray, 160, 255, cv2.THRESH_BINARY)
-    white_frac = cv2.countNonZero(bw) / bw.size
-
-    if white_frac > 0.6:
-        # Too much white → invert (dark text on light background)
-        bw = cv2.bitwise_not(bw)
-    elif white_frac < 0.02:
-        # Almost nothing white → Otsu fallback
-        _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        if cv2.countNonZero(bw) > bw.size * 0.6:
-            bw = cv2.bitwise_not(bw)
-
-    return cv2.copyMakeBorder(bw, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=255)
+def _read_int(cell_crop: np.ndarray) -> int:
+    """OCR a single integer from a number cell. PSM 8 = single word."""
+    proc = preprocess_cell(cell_crop, is_number_only=True)
+    txt  = pytesseract.image_to_string(Image.fromarray(proc), config=_PSM8_DIGITS, lang="eng").strip()
+    dig  = re.sub(r"\D", "", txt)
+    return int(dig) if dig else 0
 
 
-def _prep_ign(crop: np.ndarray) -> np.ndarray:
-    """Enhance IGN cell — keep colour info, boost contrast."""
-    h, w = crop.shape[:2]
-    if h < 60:
-        s = 60 / h
-        crop = cv2.resize(crop, (int(w * s), 60), interpolation=cv2.INTER_CUBIC)
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4)).apply(gray)
-    _, bw = cv2.threshold(gray, 145, 255, cv2.THRESH_BINARY)
-    if cv2.countNonZero(bw) > bw.size * 0.6:
-        bw = cv2.bitwise_not(bw)
-    return cv2.copyMakeBorder(bw, 6, 6, 6, 6, cv2.BORDER_CONSTANT, value=255)
+def _read_kda(cell_crop: np.ndarray) -> tuple[int, int, int]:
+    """OCR a K/D/A cell. PSM 7 = single text line."""
+    proc = preprocess_cell(cell_crop, is_number_only=False)
+    txt  = pytesseract.image_to_string(Image.fromarray(proc), config=_PSM7_KDA, lang="eng").strip()
+    txt  = txt.replace("l", "/").replace("I", "1").replace("O", "0").replace("|", "/").replace(" ", "")
+    m    = re.search(r"(\d+)/(\d+)/(\d+)", txt)
+    if m:
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    nums = re.findall(r"\d+", txt)
+    if len(nums) >= 3:
+        return int(nums[0]), int(nums[1]), int(nums[2])
+    return 0, 0, 0
 
 
-# ── 6. Batch numeric OCR ───────────────────────────────────────────────────────
+def _read_ign(cell_crop: np.ndarray) -> tuple[str, bool, Optional[str]]:
+    """OCR the player IGN + MVP badge. PSM 7 = single text line, chi_sim+eng."""
+    proc = preprocess_cell(cell_crop, is_number_only=False)
+    txt  = pytesseract.image_to_string(Image.fromarray(proc), config=_PSM7_TEXT, lang="chi_sim+eng").strip()
 
-def _batch_int(row_crops: list[np.ndarray], col_key: str) -> list[int]:
-    """
-    Stack column crops from all rows into one tall image → single Tesseract call.
-    Returns one int per row.
-    """
-    w_total = 1920
-    x0 = int(COLS[col_key][0] * w_total)
-    x1 = int(COLS[col_key][1] * w_total)
+    is_mvp   = False
+    mvp_type = None
+    if "我方" in txt and "最佳" in txt:
+        is_mvp, mvp_type = True, "Team MVP"
+    elif "敌方" in txt and "最佳" in txt:
+        is_mvp, mvp_type = True, "Match MVP"
+    elif re.search(r"MVP", txt, re.I):
+        is_mvp, mvp_type = True, "Team MVP"
 
-    cells = []
-    for crop in row_crops:
-        cell = crop[:, x0:x1]
-        cells.append(_binarise_digit(cell))
-
-    # Normalise widths before stacking
-    target_w = max(c.shape[1] for c in cells)
-    normalised = [
-        cv2.copyMakeBorder(c, 0, 0, 0, max(0, target_w - c.shape[1]), cv2.BORDER_CONSTANT, value=255)
-        for c in cells
-    ]
-    stacked = np.vstack(normalised)
-    pil = Image.fromarray(stacked)
-    txt = pytesseract.image_to_string(pil, config=_CFG_DIGITS, lang="eng")
-    vals = re.findall(r"\d+", txt)
-    # Pad / trim to match number of rows
-    result = []
-    for v in vals:
-        result.append(int(v))
-    while len(result) < len(row_crops):
-        result.append(0)
-    return result[:len(row_crops)]
+    clean = re.sub(r"(我方|敌方|最佳|MVP)", " ", txt, flags=re.I)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    clean = re.sub(r"[^\w\u4e00-\u9fff.\-!^~]", "", clean).strip()
+    return (clean or "Unknown"), is_mvp, mvp_type
 
 
-def _batch_kda(row_crops: list[np.ndarray]) -> list[tuple[int, int, int]]:
-    """Batch OCR for K/D/A column — returns (k, d, a) per row."""
-    w_total = 1920
-    x0 = int(COLS["kda"][0] * w_total)
-    x1 = int(COLS["kda"][1] * w_total)
-
-    cells = []
-    for crop in row_crops:
-        cell = crop[:, x0:x1]
-        cells.append(_binarise_digit(cell))
-
-    target_w = max(c.shape[1] for c in cells)
-    normalised = [
-        cv2.copyMakeBorder(c, 0, 0, 0, max(0, target_w - c.shape[1]), cv2.BORDER_CONSTANT, value=255)
-        for c in cells
-    ]
-    stacked = np.vstack(normalised)
-    pil = Image.fromarray(stacked)
-    txt = pytesseract.image_to_string(pil, config=_CFG_KDA, lang="eng")
-
-    # Normalise and parse
-    txt = txt.replace("l", "/").replace("I", "1").replace("O", "0").replace("|", "/")
-    kdas: list[tuple[int, int, int]] = []
-    for line in txt.splitlines():
-        line = line.strip()
-        m = re.search(r"(\d+)\s*/\s*(\d+)\s*/\s*(\d+)", line)
-        if m:
-            kdas.append((int(m.group(1)), int(m.group(2)), int(m.group(3))))
-        else:
-            nums = re.findall(r"\d+", line)
-            if len(nums) >= 3:
-                kdas.append((int(nums[0]), int(nums[1]), int(nums[2])))
-            elif line and re.search(r"\d", line):
-                nums = re.findall(r"\d+", line)
-                kdas.append((int(nums[0]) if nums else 0, 0, 0))
-
-    while len(kdas) < len(row_crops):
-        kdas.append((0, 0, 0))
-    return kdas[:len(row_crops)]
-
-
-def _ocr_igns(row_crops: list[np.ndarray]) -> list[tuple[str, bool, Optional[str]]]:
-    """OCR IGN for each row individually (text is harder to batch reliably)."""
-    w_total = 1920
-    x0 = int(COLS["ign"][0] * w_total)
-    x1 = int(COLS["ign"][1] * w_total)
-    results = []
-    for crop in row_crops:
-        cell  = crop[:, x0:x1]
-        proc  = _prep_ign(cell)
-        pil   = Image.fromarray(proc)
-        txt   = pytesseract.image_to_string(pil, config=_CFG_IGN, lang="chi_sim+eng").strip()
-
-        is_mvp   = False
-        mvp_type = None
-        if "我方" in txt and "最佳" in txt:
-            is_mvp, mvp_type = True, "Team MVP"
-        elif "敌方" in txt and "最佳" in txt:
-            is_mvp, mvp_type = True, "Match MVP"
-        elif re.search(r"MVP", txt, re.I):
-            is_mvp, mvp_type = True, "Team MVP"
-
-        clean = re.sub(r"(我方|敌方|最佳|MVP)", " ", txt, flags=re.I)
-        clean = re.sub(r"\s+", " ", clean).strip()
-        clean = re.sub(r"[^\w\u4e00-\u9fff.\-!^~]", "", clean).strip()
-        results.append((clean or "Unknown", is_mvp, mvp_type))
-    return results
-
-
-# ── 7. Assemble player rows ────────────────────────────────────────────────────
-
-def _build_players(
-    row_crops: list[np.ndarray],
-    team_label: str,
-) -> list[PlayerRowStats]:
-    if not row_crops:
-        return []
-
-    igns    = _ocr_igns(row_crops)
-    acs     = _batch_int(row_crops, "acs")
-    kdas    = _batch_kda(row_crops)
-    dmg     = _batch_int(row_crops, "dmg")
-    fb      = _batch_int(row_crops, "fb")
-    plants  = _batch_int(row_crops, "plants")
-    defuses = _batch_int(row_crops, "defuses")
-
-    players = []
-    for i in range(len(row_crops)):
-        ign, is_mvp, mvp_type = igns[i]
-        k, d, a = kdas[i]
-        players.append(PlayerRowStats(
-            ign=ign, team=team_label, is_mvp=is_mvp, mvp_type=mvp_type,
-            acs=acs[i], kills=k, deaths=d, assists=a,
-            damage=dmg[i], first_bloods=fb[i], plants=plants[i], defuses=defuses[i],
-        ))
-    return players
-
-
-# ── 8. Main pipeline ───────────────────────────────────────────────────────────
+# ── Step 6 — Full pipeline ────────────────────────────────────────────────────
 
 def _parse_local(image_bytes: bytes) -> MatchOCRResult:
     if not _CV2_OK:
@@ -477,45 +396,58 @@ def _parse_local(image_bytes: bytes) -> MatchOCRResult:
 
     t0 = time.perf_counter()
 
-    img = _load(image_bytes)
+    # 1. Normalise to 1920 × 1080
+    img = _normalise(image_bytes)
     if img is None:
         return MatchOCRResult(success=False, error="Could not decode image.")
 
-    img = _sharpen(img)  # fast — no denoising
-    h, w = img.shape[:2]
-
-    # Score + metadata
+    # 2. Score + metadata
     t1_score, t2_score, outcome = _ocr_score(img)
     map_name, match_date, duration = _ocr_meta(img)
 
-    # Row detection
-    row_bands = _team_rows(img)
-    if not row_bands:
-        return MatchOCRResult(
-            success=False,
-            error="Could not detect scoreboard rows. "
-                  "Ensure the full match end-screen is visible and well-lit.",
-            processing_time_ms=round((time.perf_counter() - t0) * 1000, 1),
+    # 3. Build row Y positions (dynamic or fixed)
+    row_y = _build_row_y(img)
+    h, w  = img.shape[:2]
+
+    # 4. OCR every cell  (loop over 10 rows × 7 columns = 70 calls max)
+    t1_players: list[PlayerRowStats] = []
+    t2_players: list[PlayerRowStats] = []
+
+    for row_idx in range(len(row_y)):
+        y0f, y1f = row_y[row_idx]
+        row_crop  = img[int(y0f * h): int(y1f * h), :]
+        is_team1  = row_idx < _N_PER_TEAM
+        team_label = "Team 1 (Green)" if is_team1 else "Team 2 (Red)"
+
+        def _crop(key: str) -> np.ndarray:
+            x0f2, x1f2 = COLS[key]
+            return row_crop[:, int(x0f2 * w): int(x1f2 * w)]
+
+        ign, is_mvp, mvp_type  = _read_ign(_crop("ign"))
+        acs                    = _read_int(_crop("acs"))
+        kills, deaths, assists = _read_kda(_crop("kda"))
+        dmg                    = _read_int(_crop("dmg"))
+        fb                     = _read_int(_crop("fb"))
+        plants                 = _read_int(_crop("plants"))
+        defuses                = _read_int(_crop("defuses"))
+
+        stats = PlayerRowStats(
+            ign=ign, team=team_label, is_mvp=is_mvp, mvp_type=mvp_type,
+            acs=acs, kills=kills, deaths=deaths, assists=assists,
+            damage=dmg, first_bloods=fb, plants=plants, defuses=defuses,
         )
 
-    t1_crops = [img[y0:y1, :] for y0, y1, tid in row_bands if tid == 1]
-    t2_crops = [img[y0:y1, :] for y0, y1, tid in row_bands if tid == 2]
-
-    log.info(
-        "Row detection: %d T1 rows, %d T2 rows detected (image %dx%d, %.0f ms so far)",
-        len(t1_crops), len(t2_crops), w, h,
-        (time.perf_counter() - t0) * 1000,
-    )
-
-    t1_players = _build_players(t1_crops, "Team 1 (Green)")
-    t2_players = _build_players(t2_crops, "Team 2 (Red)")
+        if is_team1:
+            t1_players.append(stats)
+        else:
+            t2_players.append(stats)
 
     ms = round((time.perf_counter() - t0) * 1000, 1)
-    log.info("OCR complete: %d + %d players in %.0f ms", len(t1_players), len(t2_players), ms)
+    log.info("OCR complete: %d T1 + %d T2 players in %.0f ms", len(t1_players), len(t2_players), ms)
 
-    result = MatchOCRResult(
+    return MatchOCRResult(
         success=bool(t1_players or t2_players),
-        engine="OpenCV+Tesseract (local)",
+        engine="OpenCV+Tesseract (local, per-cell)",
         processing_time_ms=ms,
         map_name=map_name,
         match_date=match_date,
@@ -525,10 +457,8 @@ def _parse_local(image_bytes: bytes) -> MatchOCRResult:
         outcome=outcome,
         team1_players=t1_players,
         team2_players=t2_players,
+        error=None if (t1_players or t2_players) else "No players detected.",
     )
-    if not result.success:
-        result.error = "No players detected. Check that the full scoreboard is visible."
-    return result
 
 
 # ── Public async entry point ───────────────────────────────────────────────────
