@@ -56,23 +56,25 @@ log = logging.getLogger(__name__)
 # If overall confidence is below this, flag for human review
 AUTO_COMMIT_THRESHOLD = 0.55
 
-# ── Fallback row positions (% of image height) if detection fails ──────────────
-# Calibrated from 5 real Valorant Mobile screenshots.
-# These match screenshots where the table occupies ~17–99% of image height.
+# ── Fallback row positions (% of image height) ─────────────────────────────
+# Calibrated from 6 real Valorant Mobile screenshots with different layouts.
+# The wider range (0.27–0.32 start) handles both compact and padded UIs.
+# Team 1 rows come first (0–4), Team 2 rows second (5–9).
 _FALLBACK_ROWS_PCT: list[tuple[float, float]] = [
-    (0.215, 0.290), (0.290, 0.365), (0.365, 0.440), (0.440, 0.515), (0.515, 0.590),  # T1
-    (0.598, 0.672), (0.672, 0.746), (0.746, 0.820), (0.820, 0.894), (0.894, 0.968),  # T2
+    (0.272, 0.352), (0.352, 0.432), (0.432, 0.508), (0.508, 0.584), (0.584, 0.660),  # T1
+    (0.665, 0.740), (0.740, 0.815), (0.815, 0.888), (0.888, 0.956), (0.956, 1.000),  # T2
 ]
 
-# Fallback column positions (% of IMAGE width) if detection fails
+# Fallback column positions (% of IMAGE width)
+# Slightly wider crops than table-relative to compensate for unknown table x0.
 _FALLBACK_COLS: dict[str, tuple[float, float]] = {
-    "ign":     (0.145, 0.305),
-    "acs":     (0.295, 0.405),
-    "kda":     (0.390, 0.545),
-    "dmg":     (0.530, 0.685),
-    "fb":      (0.670, 0.762),
-    "plants":  (0.750, 0.845),
-    "defuses": (0.833, 0.928),
+    "ign":     (0.155, 0.340),
+    "acs":     (0.330, 0.428),
+    "kda":     (0.414, 0.565),
+    "dmg":     (0.550, 0.705),
+    "fb":      (0.695, 0.782),
+    "plants":  (0.770, 0.855),
+    "defuses": (0.842, 0.925),
 }
 
 
@@ -88,12 +90,15 @@ def _load(image_bytes: bytes) -> Optional[np.ndarray]:
 
 
 def _parse_score(txt: str) -> tuple[int, int, str]:
+    # First look for the explicit "N 获胜 M" pattern
     m = re.search(r"(\d{1,2})\s*获胜\s*(\d{1,2})", txt)
     if m:
         return int(m.group(1)), int(m.group(2)), "Victory"
+    # Fallback: two standalone 1-2 digit numbers (cap at 20 to avoid e.g. "27"→"2"+"7")
     nums = re.findall(r"\b(\d{1,2})\b", txt)
-    if len(nums) >= 2:
-        a, b = int(nums[0]), int(nums[1])
+    valid = [int(n) for n in nums if 0 <= int(n) <= 20]
+    if len(valid) >= 2:
+        a, b = valid[0], valid[1]
         return a, b, ("Victory" if a >= b else "Defeat")
     return 0, 0, "Unknown"
 
@@ -132,8 +137,13 @@ def _crop_fallback(img: np.ndarray, row_idx: int, col_key: str) -> np.ndarray:
 
 
 def _extra_variants(col_key: str) -> list:
-    """Extra preprocessing variants to use during targeted re-OCR."""
-    return [variant_a, variant_b, variant_d, variant_e]
+    """Variants to add during targeted re-OCR (different from initial variant_d)."""
+    return [variant_a, variant_c]   # 2 extras; total with initial = 3-way consensus
+
+
+# Only re-OCR these fields (the most impactful for match stats; fb/plants/defuses
+# are low-value enough that one pass is sufficient)
+_REOCR_FIELDS = {"acs", "kda", "dmg", "ign"}
 
 
 def _ocr_player_row(
@@ -170,38 +180,38 @@ def _ocr_player_row(
 
     # ── ACS ──────────────────────────────────────────────────────────────────
     acs_crop = crop("acs")
-    acs_raws = ocr_int_consensus(acs_crop, DIGIT_VARIANTS)
+    acs_raws = ocr_int_consensus(acs_crop, [variant_d])   # 1 variant initially
     acs, acs_conf = consensus_int(acs_raws, "acs")
-    if acs_conf < RETRIGGER_THRESHOLD:
+    if acs_conf < RETRIGGER_THRESHOLD and "acs" in _REOCR_FIELDS:
         extra_raws = ocr_int_consensus(acs_crop, _extra_variants("acs"))
         acs, acs_conf = consensus_int(acs_raws + extra_raws, "acs")
 
     # ── K/D/A ─────────────────────────────────────────────────────────────────
     kda_crop = crop("kda")
-    kda_raws = ocr_kda_consensus(kda_crop, KDA_VARIANTS)
+    kda_raws = ocr_kda_consensus(kda_crop, [variant_d])
     kills, deaths, assists, kda_conf = consensus_kda(kda_raws)
-    if kda_conf < RETRIGGER_THRESHOLD:
+    if kda_conf < RETRIGGER_THRESHOLD and "kda" in _REOCR_FIELDS:
         extra_kda = ocr_kda_consensus(kda_crop, _extra_variants("kda"))
         kills, deaths, assists, kda_conf = consensus_kda(kda_raws + extra_kda)
 
     # ── DMG ───────────────────────────────────────────────────────────────────
     dmg_crop = crop("dmg")
-    dmg_raws = ocr_int_consensus(dmg_crop, DIGIT_VARIANTS)
+    dmg_raws = ocr_int_consensus(dmg_crop, [variant_d])
     dmg, dmg_conf = consensus_int(dmg_raws, "dmg")
-    if dmg_conf < RETRIGGER_THRESHOLD:
+    if dmg_conf < RETRIGGER_THRESHOLD and "dmg" in _REOCR_FIELDS:
         extra_dmg = ocr_int_consensus(dmg_crop, _extra_variants("dmg"))
         dmg, dmg_conf = consensus_int(dmg_raws + extra_dmg, "dmg")
 
-    # ── FB ────────────────────────────────────────────────────────────────────
-    fb_raws = ocr_int_consensus(crop("fb"), DIGIT_VARIANTS)
+    # ── FB (single pass — low-impact stat) ───────────────────────────────────
+    fb_raws = ocr_int_consensus(crop("fb"), [variant_d])
     fb, fb_conf = consensus_int(fb_raws, "fb")
 
-    # ── Plants ────────────────────────────────────────────────────────────────
-    pl_raws = ocr_int_consensus(crop("plants"), DIGIT_VARIANTS)
+    # ── Plants (single pass) ─────────────────────────────────────────────────
+    pl_raws = ocr_int_consensus(crop("plants"), [variant_d])
     pl, pl_conf = consensus_int(pl_raws, "plants")
 
-    # ── Defuses ───────────────────────────────────────────────────────────────
-    df_raws = ocr_int_consensus(crop("defuses"), DIGIT_VARIANTS)
+    # ── Defuses (single pass) ────────────────────────────────────────────────
+    df_raws = ocr_int_consensus(crop("defuses"), [variant_d])
     df, df_conf = consensus_int(df_raws, "defuses")
 
     # ── Debug ─────────────────────────────────────────────────────────────────

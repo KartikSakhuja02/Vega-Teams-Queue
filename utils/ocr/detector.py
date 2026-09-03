@@ -1,19 +1,20 @@
 """
 utils/ocr/detector.py
 ---------------------
-Scoreboard table + row detection using multiple signals:
-  1. Primary: HSV color segmentation (Team 1 = teal, Team 2 = maroon)
-  2. Secondary: horizontal edge projection for row boundaries
-  3. Column positions: calibrated TABLE-relative proportions derived from
-     real screenshots (not full-image proportions — avoids sidebar noise)
+Scoreboard table + row detection using TWO independent methods:
 
-Detection sequence:
-  detect_table_geometry()
-    → find_team_blocks()          HSV color masks → contiguous bands
-    → split_into_rows()           equal division with gradient refinement
-    → find_horizontal_bounds()    leftmost/rightmost colored pixel
-    → detect_columns_from_header() (optional, expensive)
-  → returns TableGeometry or None
+  Method 1 — HSV colour segmentation
+    Team 1 = teal (H 60–115), Team 2 = maroon (H 0–20 or 155–180)
+
+  Method 2 — RGB channel ratio (more robust to compression/colour-shift)
+    Team 1: G channel > R channel  (teal rows)
+    Team 2: R channel > G channel  (maroon rows)
+
+Both methods look at per-row colour coverage across columns 15–85 % of
+image width (avoids agent icons on the left and score icons on the right).
+
+If either method detects valid blocks, it is used.
+If both fail, the pipeline falls back to calibrated percentage coordinates.
 """
 from __future__ import annotations
 
@@ -48,25 +49,29 @@ TABLE_COLS: dict[str, tuple[float, float]] = {
 
 N_PLAYERS_PER_TEAM = 5
 
-# ── HSV color ranges for team backgrounds ─────────────────────────────────────
-# Calibrated for Valorant Mobile (Tencent CN version) UI colors.
-# Uses OpenCV HSV convention: H ∈ [0, 180], S,V ∈ [0, 255].
+# ── HSV colour ranges (wide tolerances for compressed/colour-shifted screenshots) ─
+# OpenCV HSV: H ∈ [0,180], S,V ∈ [0,255]
 
-# Team 1 — teal/green rows
-_T1_LO = np.array([68, 28, 28], dtype=np.uint8)
-_T1_HI = np.array([102, 205, 205], dtype=np.uint8)
+# Team 1 — teal/green rows (wide range catches both lighter and darker rows)
+_T1_LO = np.array([60, 18, 18], dtype=np.uint8)
+_T1_HI = np.array([118, 230, 230], dtype=np.uint8)
 
-# Team 2 — maroon/red rows (hue wraps at 0/180)
-_T2_LO_A = np.array([0,   48, 22], dtype=np.uint8)
-_T2_HI_A = np.array([16,  230, 165], dtype=np.uint8)
-_T2_LO_B = np.array([162, 48, 22], dtype=np.uint8)
-_T2_HI_B = np.array([180, 230, 165], dtype=np.uint8)
+# Team 2 — maroon/red rows (hue wraps around 0°)
+_T2_LO_A = np.array([0,   28, 15], dtype=np.uint8)
+_T2_HI_A = np.array([20,  240, 180], dtype=np.uint8)
+_T2_LO_B = np.array([155, 28, 15], dtype=np.uint8)
+_T2_HI_B = np.array([180, 240, 180], dtype=np.uint8)
 
-# A row needs at least this fraction of sampled pixels to count as coloured
-_COV_THRESHOLD = 0.22
+# Minimum fraction of sampled pixels to count a row as team-coloured
+# Kept low — some rows have lighter/darker alternating shades
+_COV_THRESHOLD = 0.10
 
-# Minimum height for a valid team block (fraction of image height)
-_MIN_BLOCK_FRAC = 0.17
+# Minimum continuous block height (fraction of image height)
+_MIN_BLOCK_FRAC = 0.15
+
+# Sample x range — inner 70 % of image width avoids sidebars
+_X_SAMPLE_LO = 0.15
+_X_SAMPLE_HI = 0.85
 
 
 @dataclass
@@ -104,16 +109,35 @@ class TableGeometry:
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
-def _row_coverage(hsv: np.ndarray, x0: int, x1: int) -> tuple[np.ndarray, np.ndarray]:
-    """Per-row fraction of Team 1 / Team 2 coloured pixels in column range."""
+def _row_coverage_hsv(hsv: np.ndarray, x0: int, x1: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-row fraction of Team 1 / Team 2 coloured pixels using HSV masks."""
     samp = hsv[:, x0:x1]
     t1  = cv2.inRange(samp, _T1_LO, _T1_HI)
     t2  = cv2.bitwise_or(
         cv2.inRange(samp, _T2_LO_A, _T2_HI_A),
         cv2.inRange(samp, _T2_LO_B, _T2_HI_B),
     )
-    cov1 = np.mean(t1, axis=1) / 255.0
-    cov2 = np.mean(t2, axis=1) / 255.0
+    return np.mean(t1, axis=1) / 255.0, np.mean(t2, axis=1) / 255.0
+
+
+def _row_coverage_rgb(img: np.ndarray, x0: int, x1: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Alternative detection using raw BGR channel ratios.
+    More robust when JPEG compression shifts HSV values.
+      Team 1 (teal): G channel significantly > R channel
+      Team 2 (maroon): R channel significantly > G channel
+    """
+    region = img[:, x0:x1].astype(np.float32)
+    b, g, r = region[:, :, 0], region[:, :, 1], region[:, :, 2]  # OpenCV BGR
+    mr, mg = np.mean(r, axis=1), np.mean(g, axis=1)
+    brightness = np.mean(b + g + r, axis=1) / 3.0
+    # Only look at moderate-brightness rows (skip white headers, pure black)
+    valid = (brightness > 20) & (brightness < 200)
+    diff = mg - mr
+    # Team 1: G clearly > R (teal)
+    cov1 = np.where(valid & (diff > 6), diff / 60.0, 0.0).clip(0, 1)
+    # Team 2: R clearly > G (maroon)
+    cov2 = np.where(valid & (-diff > 6), (-diff) / 60.0, 0.0).clip(0, 1)
     return cov1, cov2
 
 
@@ -165,53 +189,39 @@ def _find_horizontal_bounds(
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def detect_table_geometry(img: np.ndarray) -> Optional[TableGeometry]:
-    """
-    Detect the scoreboard table in a BGR image.
-    Returns TableGeometry (valid=True) or None on failure.
-    """
-    if not _CV2:
-        return None
-
-    h, w = img.shape[:2]
-    min_block_h = int(h * _MIN_BLOCK_FRAC)
-
-    # Sample columns — use the inner 50% of width to ignore sidebars
-    x_lo = int(w * 0.25)
-    x_hi = int(w * 0.75)
-
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    cov1, cov2 = _row_coverage(hsv, x_lo, x_hi)
-
-    # Skip top 15 % — score + metadata header, not the data table
-    skip = int(h * 0.15)
-    cov1[:skip] = 0.0
-    cov2[:skip] = 0.0
-
+def _try_detect(
+    img: np.ndarray,
+    cov1: np.ndarray,
+    cov2: np.ndarray,
+    hsv: Optional[np.ndarray],
+    min_block_h: int,
+    method: str,
+) -> Optional[TableGeometry]:
+    """Shared logic: given per-row coverage arrays, find blocks and build geometry."""
     t1_block = _largest_block(cov1 > _COV_THRESHOLD, min_block_h)
     t2_block = _largest_block(cov2 > _COV_THRESHOLD, min_block_h)
 
     if t1_block is None or t2_block is None:
-        log.debug("detect_table_geometry: could not find team color blocks")
         return None
 
     t1_y0, t1_y1 = t1_block
     t2_y0, t2_y1 = t2_block
 
-    # Sanity check: Team 1 must be above Team 2
     if t1_y0 >= t2_y0:
-        log.debug("detect_table_geometry: team1 block not above team2 block")
+        log.debug("[%s] team1 block not above team2 block", method)
         return None
 
-    # Build full masks for horizontal extent detection
-    t1_full = cv2.inRange(hsv, _T1_LO, _T1_HI)
-    t2_full = cv2.bitwise_or(
-        cv2.inRange(hsv, _T2_LO_A, _T2_HI_A),
-        cv2.inRange(hsv, _T2_LO_B, _T2_HI_B),
-    )
-    x0, x1 = _find_horizontal_bounds(t1_full, t2_full, t1_y0, t2_y1)
+    # Horizontal extent
+    if hsv is not None:
+        t1_full = cv2.inRange(hsv, _T1_LO, _T1_HI)
+        t2_full = cv2.bitwise_or(
+            cv2.inRange(hsv, _T2_LO_A, _T2_HI_A),
+            cv2.inRange(hsv, _T2_LO_B, _T2_HI_B),
+        )
+        x0, x1 = _find_horizontal_bounds(t1_full, t2_full, t1_y0, t2_y1)
+    else:
+        x0, x1 = 0, img.shape[1]
 
-    # Split into individual player rows
     rows: list[tuple[int, int]] = (
         _split_block(t1_y0, t1_y1, N_PLAYERS_PER_TEAM)
         + _split_block(t2_y0, t2_y1, N_PLAYERS_PER_TEAM)
@@ -223,13 +233,74 @@ def detect_table_geometry(img: np.ndarray) -> Optional[TableGeometry]:
         x0=x0, x1=x1,
         rows=rows,
     )
-
     if not geom.valid:
-        log.debug("detect_table_geometry: geometry failed validity check: %s", geom)
+        log.debug("[%s] geometry failed validity check", method)
+        return None
+    return geom
+
+
+def detect_table_geometry(img: np.ndarray) -> Optional[TableGeometry]:
+    """
+    Detect the scoreboard table in a BGR image.
+
+    Tries two independent methods:
+      1. HSV colour masks  (precise, fast)
+      2. RGB channel ratio (robust to JPEG compression / colour shift)
+
+    Returns TableGeometry or None if both fail.
+    """
+    if not _CV2:
         return None
 
-    log.info(
-        "Table detected: t1=[%d,%d] t2=[%d,%d] x=[%d,%d] tw=%d",
-        t1_y0, t1_y1, t2_y0, t2_y1, x0, x1, geom.table_width,
-    )
-    return geom
+    h, w = img.shape[:2]
+    min_block_h = int(h * _MIN_BLOCK_FRAC)
+    x_lo = int(w * _X_SAMPLE_LO)
+    x_hi = int(w * _X_SAMPLE_HI)
+    skip = int(h * 0.15)   # ignore score/metadata header at top
+
+    # ── Method 1: HSV ─────────────────────────────────────────────────────────
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    cov1, cov2 = _row_coverage_hsv(hsv, x_lo, x_hi)
+    cov1[:skip] = 0.0
+    cov2[:skip] = 0.0
+
+    geom = _try_detect(img, cov1, cov2, hsv, min_block_h, "HSV")
+    if geom is not None:
+        log.info(
+            "Table detected [HSV]: t1=[%d,%d] t2=[%d,%d] x=[%d,%d] tw=%d",
+            geom.t1_y0, geom.t1_y1, geom.t2_y0, geom.t2_y1,
+            geom.x0, geom.x1, geom.table_width,
+        )
+        return geom
+
+    log.debug("HSV detection failed — trying RGB channel ratio")
+
+    # ── Method 2: RGB channel ratio ───────────────────────────────────────────
+    cov1_r, cov2_r = _row_coverage_rgb(img, x_lo, x_hi)
+    cov1_r[:skip] = 0.0
+    cov2_r[:skip] = 0.0
+
+    geom = _try_detect(img, cov1_r, cov2_r, None, min_block_h, "RGB")
+    if geom is not None:
+        # Refine horizontal bounds with HSV masks
+        t1_full = cv2.inRange(hsv, _T1_LO, _T1_HI)
+        t2_full = cv2.bitwise_or(
+            cv2.inRange(hsv, _T2_LO_A, _T2_HI_A),
+            cv2.inRange(hsv, _T2_LO_B, _T2_HI_B),
+        )
+        x0, x1 = _find_horizontal_bounds(t1_full, t2_full, geom.t1_y0, geom.t2_y1)
+        if x1 > x0 + 80:
+            geom.x0, geom.x1 = x0, x1
+            geom.rows = (
+                _split_block(geom.t1_y0, geom.t1_y1, N_PLAYERS_PER_TEAM)
+                + _split_block(geom.t2_y0, geom.t2_y1, N_PLAYERS_PER_TEAM)
+            )
+        log.info(
+            "Table detected [RGB]: t1=[%d,%d] t2=[%d,%d] x=[%d,%d] tw=%d",
+            geom.t1_y0, geom.t1_y1, geom.t2_y0, geom.t2_y1,
+            geom.x0, geom.x1, geom.table_width,
+        )
+        return geom
+
+    log.warning("Both detection methods failed — caller will use fallback coords")
+    return None
