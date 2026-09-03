@@ -441,14 +441,18 @@ class AdminCog(commands.Cog, name="Admin"):
             )
             return
 
+        review_flag = "⚠️ **LOW CONFIDENCE — review before committing to DB**\n" if getattr(result, "needs_review", False) else ""
+        conf_pct    = f"{getattr(result, 'confidence', 0) * 100:.0f}%"
+        embed_colour = discord.Colour.orange() if getattr(result, "needs_review", False) else COL_SUCCESS
         embed = discord.Embed(
-            title=f"🎮 Match Scoreboard OCR Results — {result.map_name}",
+            title=f"🎮 Match Scoreboard OCR — {result.map_name}",
             description=(
+                f"{review_flag}"
                 f"**Score:** 🟢 **{result.team1_score}**  vs  🔴 **{result.team2_score}** ({result.outcome})\n"
                 f"**Duration:** `{result.duration}` • **Date:** `{result.match_date}`\n"
-                f"**Engine:** `{result.engine}` • **Speed:** `{result.processing_time_ms} ms`"
+                f"**Engine:** `{result.engine}` • **Speed:** `{result.processing_time_ms} ms` • **Confidence:** `{conf_pct}`"
             ),
-            colour=COL_SUCCESS,
+            colour=embed_colour,
         )
 
         def _fmt_main(players: list[PlayerRowStats]) -> str:
