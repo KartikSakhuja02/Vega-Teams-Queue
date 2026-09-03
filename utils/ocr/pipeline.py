@@ -32,7 +32,7 @@ import numpy as np
 
 from utils.ocr.models import FieldResult, MatchOCRResult, PlayerRowStats
 from utils.ocr.detector import TABLE_COLS, N_PLAYERS_PER_TEAM, TableGeometry, detect_table_geometry
-from utils.ocr.preprocessor import DIGIT_VARIANTS, KDA_VARIANTS, TEXT_VARIANTS, variant_a, variant_b, variant_d, variant_e
+from utils.ocr.preprocessor import DIGIT_VARIANTS, KDA_VARIANTS, TEXT_VARIANTS, variant_a, variant_b, variant_c, variant_d, variant_e
 from utils.ocr.validator import (
     RETRIGGER_THRESHOLD,
     consensus_int,
