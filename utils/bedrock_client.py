@@ -37,7 +37,15 @@ _TEMPERATURE = float(os.getenv("BEDROCK_TEMPERATURE", "0.05"))
 
 
 def is_configured() -> bool:
-    return bool(_BEARER)
+    """
+    True when any Bedrock credential is available:
+      - AWS_BEARER_TOKEN_BEDROCK  (long-term Bedrock API key)
+      - AWS_ACCESS_KEY_ID         (IAM credentials — recommended)
+    """
+    return bool(
+        os.getenv("AWS_BEARER_TOKEN_BEDROCK")
+        or os.getenv("AWS_ACCESS_KEY_ID")
+    )
 
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
