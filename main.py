@@ -81,6 +81,8 @@ class VegaBot(commands.Bot):
         log.info("Loaded cog: cogs.toggle_dms")
         await self.load_extension("cogs.admin")
         log.info("Loaded cog: cogs.admin")
+        await self.load_extension("cogs.vision")
+        log.info("Loaded cog: cogs.vision")
 
 
         # 3. Sync slash commands.
