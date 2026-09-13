@@ -258,21 +258,43 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
 
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
+    # Log the full raw response so we can diagnose issues
+    log.debug("OpenRouter raw response: %s", json.dumps(result)[:800])
+
     # Extract text from OpenAI-format response
     choices = result.get("choices") or []
     if not choices:
-        raise RuntimeError(f"OpenRouter returned no choices: {result}")
+        raise RuntimeError(f"OpenRouter returned no choices: {json.dumps(result)[:400]}")
 
-    raw_text = choices[0].get("message", {}).get("content", "")
-    if not raw_text:
-        raise RuntimeError("OpenRouter returned empty content")
+    choice      = choices[0]
+    finish      = choice.get("finish_reason", "unknown")
+    message     = choice.get("message") or {}
+    raw_content = message.get("content")
+
+    # Some models return content as a list of {type, text} objects
+    if isinstance(raw_content, list):
+        texts = [c.get("text", "") for c in raw_content if c.get("type") == "text"]
+        raw_content = "\n".join(texts)
+
+    if not raw_content:
+        # Log enough to diagnose without flooding
+        log.warning(
+            "OpenRouter empty content — finish_reason=%s usage=%s error=%s",
+            finish,
+            result.get("usage"),
+            result.get("error"),
+        )
+        raise RuntimeError(
+            f"OpenRouter returned empty content (finish_reason={finish!r})"
+        )
 
     log.info(
-        "OpenRouter %s responded in %.0f ms (tokens: %s)",
+        "OpenRouter %s responded in %.0f ms (tokens: %s, finish: %s)",
         _MODEL, elapsed_ms,
         result.get("usage", {}).get("completion_tokens", "?"),
+        finish,
     )
-    log.debug("Raw response (first 400 chars): %s", raw_text[:400])
+    log.debug("Raw response (first 500 chars): %s", raw_content[:500])
 
-    parsed = _extract_json(raw_text)
+    parsed = _extract_json(raw_content)
     return _to_result(parsed, elapsed_ms)
