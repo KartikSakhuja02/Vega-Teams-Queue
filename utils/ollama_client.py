@@ -38,7 +38,6 @@ _TIMEOUT    = int(os.getenv("OLLAMA_TIMEOUT",    "120"))
 _MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "1024"))
 
 # GPU concurrency guard: RTX 2050 / 4 GB VRAM → 1 vision inference at a time.
-# If you move Ollama to a beefier machine, raise this to 2 or 3.
 inference_semaphore = asyncio.Semaphore(1)
 
 # Supported MIME types
@@ -50,6 +49,14 @@ DEFAULT_PROMPT = (
     "Describe what you see and identify important text, errors, warnings, "
     "UI elements, or other relevant information."
 )
+
+# Headers sent with every request — required to pass Cloudflare's browser
+# integrity check when using a Cloudflare Tunnel URL.
+_HEADERS = {
+    "User-Agent": "ollama-discord-bot/1.0",
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+}
 
 
 def is_configured() -> bool:
@@ -64,7 +71,7 @@ async def check_connection() -> tuple[bool, str]:
     """
     try:
         timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, headers=_HEADERS) as session:
             async with session.get(f"{_BASE_URL}/api/tags") as resp:
                 if resp.status != 200:
                     return False, f"Ollama returned HTTP {resp.status}"
@@ -121,7 +128,7 @@ async def analyze_image(image_bytes: bytes, prompt: str = DEFAULT_PROMPT) -> str
     timeout = aiohttp.ClientTimeout(total=_TIMEOUT)
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, headers=_HEADERS) as session:
             async with session.post(
                 f"{_BASE_URL}/api/chat",
                 json=payload,
