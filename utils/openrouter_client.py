@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 _API_KEY  = os.getenv("OPENROUTER_API_KEY_2", "")
 _MODEL    = os.getenv("OPENROUTER_MODEL", "inclusionai/ling-3.0-flash-vl:free")
-_TIMEOUT  = int(os.getenv("OPENROUTER_TIMEOUT", "60"))
+_TIMEOUT  = int(os.getenv("OPENROUTER_TIMEOUT", "120"))
 _BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
@@ -244,17 +244,33 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
         "X-Title": "Vega Esports Scrims Bot",
     }
 
-    t0 = time.monotonic()
+    t0      = time.monotonic()
     timeout = aiohttp.ClientTimeout(total=_TIMEOUT)
+    result  = None
+    MAX_RETRIES = 3
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(_BASE_URL, json=payload, headers=headers) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(
-                    f"OpenRouter HTTP {resp.status}: {body[:300]}"
-                )
-            result = await resp.json()
+        for attempt in range(1, MAX_RETRIES + 1):
+            async with session.post(_BASE_URL, json=payload, headers=headers) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    break
+                elif resp.status == 429:
+                    body = await resp.text()
+                    wait = 3 * (2 ** (attempt - 1))   # 3s, 6s, 12s
+                    if attempt < MAX_RETRIES:
+                        log.warning(
+                            "OpenRouter 429 rate-limit (attempt %d/%d) — retrying in %ds",
+                            attempt, MAX_RETRIES, wait,
+                        )
+                        await asyncio.sleep(wait)
+                    else:
+                        raise RuntimeError(
+                            f"OpenRouter rate-limited after {MAX_RETRIES} attempts: {body[:200]}"
+                        )
+                else:
+                    body = await resp.text()
+                    raise RuntimeError(f"OpenRouter HTTP {resp.status}: {body[:300]}")
 
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
