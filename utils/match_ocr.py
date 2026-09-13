@@ -36,8 +36,8 @@ def _openrouter_available() -> bool:
             _openrouter_ok = is_configured()
             log.info(
                 "OpenRouter OCR: %s",
-                "ACTIVE (OPENROUTER_API_KEY found)" if _openrouter_ok
-                else "inactive (OPENROUTER_API_KEY not set)",
+                "ACTIVE (OPENROUTER_API_KEY_2 found)" if _openrouter_ok
+                else "inactive (OPENROUTER_API_KEY_2 not set)",
             )
         except ImportError:
             _openrouter_ok = False

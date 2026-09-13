@@ -7,7 +7,7 @@ Uses the OpenAI-compatible chat completions API with base64 image input.
 Already uses aiohttp which is in requirements.txt — no new dependencies.
 
 Required Railway env var:
-  OPENROUTER_API_KEY = sk-or-v1-...
+  OPENROUTER_API_KEY_2 = sk-or-v1-...
 
 Optional:
   OPENROUTER_MODEL   = inclusionai/ling-3.0-flash-vl:free  (default)
@@ -31,7 +31,7 @@ from utils.ocr.models import MatchOCRResult, PlayerRowStats
 log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_API_KEY  = os.getenv("OPENROUTER_API_KEY", "")
+_API_KEY  = os.getenv("OPENROUTER_API_KEY_2", "")
 _MODEL    = os.getenv("OPENROUTER_MODEL", "inclusionai/ling-3.0-flash-vl:free")
 _TIMEOUT  = int(os.getenv("OPENROUTER_TIMEOUT", "60"))
 _BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
