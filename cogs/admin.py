@@ -455,58 +455,42 @@ class AdminCog(commands.Cog, name="Admin"):
             colour=embed_colour,
         )
 
-        def _fmt_main(players: list[PlayerRowStats]) -> str:
-            """IGN · ACS · K/D/A — fits in 1024 chars for 5 players."""
+        def _find_mvp(players: list[PlayerRowStats]) -> int:
+            """Index of the player with the highest kills in this team."""
             if not players:
-                return "*No players detected*"
-            lines = ["```", f"{'IGN':<13} {'ACS':>4}  {'K/D/A':>9}"]
-            for p in players:
-                crown  = "👑 " if p.is_mvp else "   "
-                ign    = (p.ign[:11] + "…") if len(p.ign) > 12 else p.ign[:12]
-                lines.append(f"{crown}{ign:<12} {p.acs:>4}  {p.kda_str:>9}")
-            lines.append("```")
-            out = "\n".join(lines)
-            return out[:1020]   # hard safety cap
+                return -1
+            return max(range(len(players)), key=lambda i: players[i].kills)
 
-        def _fmt_stats(players: list[PlayerRowStats]) -> str:
-            """DMG · FB · Plants · Defuses."""
+        def _fmt_team(players: list[PlayerRowStats]) -> str:
+            """All 5 players — ACS · K/D/A · DMG · FB · PL · DF in one field."""
             if not players:
                 return "*No players detected*"
-            lines = ["```", f"{'IGN':<12} {'DMG':>5}  {'FB':>2}  {'PL':>2}  {'DF':>2}"]
-            for p in players:
-                ign = (p.ign[:10] + "…") if len(p.ign) > 11 else p.ign[:11]
+            mvp_idx = _find_mvp(players)
+            header  = f"{'':2}{'IGN':<14} {'ACS':>4}  {'K/D/A':^9}  {'DMG':>5}  {'FB':>2} {'PL':>2} {'DF':>2}"
+            sep     = "─" * len(header)
+            lines   = ["```", header, sep]
+            for i, p in enumerate(players):
+                crown = "👑" if i == mvp_idx else "  "
+                ign   = (p.ign[:13] + "…") if len(p.ign) > 14 else p.ign[:14]
+                kda   = p.kda_str if hasattr(p, "kda_str") else f"{p.kills}/{p.deaths}/{p.assists}"
                 lines.append(
-                    f"{ign:<12} {p.damage:>5}  {p.first_bloods:>2}  {p.plants:>2}  {p.defuses:>2}"
+                    f"{crown}{ign:<14} {p.acs:>4}  {kda:^9}  {p.damage:>5}  {p.first_bloods:>2} {p.plants:>2} {p.defuses:>2}"
                 )
             lines.append("```")
-            out = "\n".join(lines)
-            return out[:1020]
-
-        t1_score_str = result.team1_score
-        t2_score_str = result.team2_score
+            return "\n".join(lines)[:1020]
 
         embed.add_field(
-            name=f"🟢 Team 1 — {t1_score_str} rounds  |  IGN · ACS · K/D/A",
-            value=_fmt_main(result.team1_players),
+            name=f"🟢 Team 1 — {result.team1_score} rounds",
+            value=_fmt_team(result.team1_players),
             inline=False,
         )
         embed.add_field(
-            name=f"🟢 Team 1  |  DMG · FB · Plants · Defuses",
-            value=_fmt_stats(result.team1_players),
-            inline=False,
-        )
-        embed.add_field(
-            name=f"🔴 Team 2 — {t2_score_str} rounds  |  IGN · ACS · K/D/A",
-            value=_fmt_main(result.team2_players),
-            inline=False,
-        )
-        embed.add_field(
-            name=f"🔴 Team 2  |  DMG · FB · Plants · Defuses",
-            value=_fmt_stats(result.team2_players),
+            name=f"🔴 Team 2 — {result.team2_score} rounds",
+            value=_fmt_team(result.team2_players),
             inline=False,
         )
 
-        embed.set_footer(text=f"Vega Scrims OCR Engine • Processed in {result.processing_time_ms}ms")
+        embed.set_footer(text=f"Vega Scrims OCR Engine • {result.engine} • {result.processing_time_ms:.0f}ms • 👑 = highest kills")
         embed.set_thumbnail(url=image.url)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
