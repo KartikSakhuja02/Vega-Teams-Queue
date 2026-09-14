@@ -4,12 +4,11 @@ utils/match_ocr.py
 Public entry point for the Discord bot.
 
 Priority chain (first available engine wins):
-  1. OpenRouter VLM  — if OPENROUTER_API_KEY is set
-  2. Amazon Bedrock  — if AWS_ACCESS_KEY_ID or AWS_BEARER_TOKEN_BEDROCK is set
-  3. Local Tesseract — always available as last resort
+  1. Local Ollama (gemma3:4b) — if OLLAMA_BASE_URL is set and reachable
+  2. OpenRouter VLM           — if OPENROUTER_API_KEY_2 is set
+  3. Local Tesseract          — always available as last resort
 
 The cogs only call process_match_screenshot() and get back a MatchOCRResult.
-They never need to know which engine ran.
 
 Re-exported for cog imports (unchanged API):
     PlayerRowStats, MatchOCRResult, FieldResult
@@ -24,8 +23,23 @@ from utils.ocr.pipeline import run_pipeline
 
 log = logging.getLogger(__name__)
 
+_ollama_ok:     bool | None = None
 _openrouter_ok: bool | None = None
-_bedrock_ok:    bool | None = None
+
+
+def _ollama_available() -> bool:
+    global _ollama_ok
+    if _ollama_ok is None:
+        try:
+            from utils.ollama_client import is_configured
+            _ollama_ok = is_configured()
+            log.info(
+                "Ollama OCR: %s",
+                "ACTIVE" if _ollama_ok else "inactive (OLLAMA_BASE_URL / OLLAMA_MODEL not set)",
+            )
+        except ImportError:
+            _ollama_ok = False
+    return _ollama_ok
 
 
 def _openrouter_available() -> bool:
@@ -44,21 +58,6 @@ def _openrouter_available() -> bool:
     return _openrouter_ok
 
 
-def _bedrock_available() -> bool:
-    global _bedrock_ok
-    if _bedrock_ok is None:
-        try:
-            from utils.bedrock_client import is_configured
-            _bedrock_ok = is_configured()
-            log.info(
-                "Bedrock OCR: %s",
-                "ACTIVE" if _bedrock_ok else "inactive (no AWS credentials)",
-            )
-        except ImportError:
-            _bedrock_ok = False
-    return _bedrock_ok
-
-
 async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
     """
     Process a Valorant match scoreboard screenshot.
@@ -68,12 +67,27 @@ async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
     """
     loop = asyncio.get_running_loop()
 
-    # ── 1. OpenRouter (free VLM, fully async) ─────────────────────────────────
+    # ── 1. Local Ollama (gemma3:4b — free, no rate limits) ───────────────────
+    if _ollama_available():
+        try:
+            from utils.ollama_client import extract_scoreboard as ollama_extract
+            log.info("Running Ollama OCR…")
+            result = await ollama_extract(image_bytes)
+            log.info(
+                "Ollama: conf=%.2f needs_review=%s engine=%s %.0fms",
+                result.confidence, result.needs_review,
+                result.engine, result.processing_time_ms,
+            )
+            return result
+        except Exception as exc:
+            log.warning("Ollama OCR failed (%s) — trying next engine", exc)
+
+    # ── 2. OpenRouter (cloud fallback — works when local Ollama is off) ──────
     if _openrouter_available():
         try:
-            from utils.openrouter_client import extract_scoreboard
+            from utils.openrouter_client import extract_scoreboard as openrouter_extract
             log.info("Running OpenRouter OCR…")
-            result = await extract_scoreboard(image_bytes)
+            result = await openrouter_extract(image_bytes)
             log.info(
                 "OpenRouter: conf=%.2f needs_review=%s engine=%s %.0fms",
                 result.confidence, result.needs_review,
@@ -81,22 +95,7 @@ async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
             )
             return result
         except Exception as exc:
-            log.warning("OpenRouter OCR failed (%s) — trying next engine", exc)
-
-    # ── 2. Amazon Bedrock ─────────────────────────────────────────────────────
-    if _bedrock_available():
-        try:
-            from utils.bedrock_client import extract_scoreboard as bedrock_extract
-            log.info("Running Bedrock OCR…")
-            result = await bedrock_extract(image_bytes)
-            log.info(
-                "Bedrock: conf=%.2f needs_review=%s engine=%s %.0fms",
-                result.confidence, result.needs_review,
-                result.engine, result.processing_time_ms,
-            )
-            return result
-        except Exception as exc:
-            log.warning("Bedrock OCR failed (%s) — falling back to local Tesseract", exc)
+            log.warning("OpenRouter OCR failed (%s) — falling back to Tesseract", exc)
 
     # ── 3. Local Tesseract (always available) ─────────────────────────────────
     log.info("Running local OpenCV+Tesseract pipeline…")
