@@ -441,27 +441,6 @@ class AdminCog(commands.Cog, name="Admin"):
             )
             return
 
-        review_flag = "⚠️ **LOW CONFIDENCE — review before committing to DB**\n" if getattr(result, "needs_review", False) else ""
-        conf_pct = f"{getattr(result, 'confidence', 0) * 100:.0f}%"
-        t1_score = result.team1_score or 0
-        t2_score = result.team2_score or 0
-
-        # Outcome & Theme color
-        if t1_score > t2_score:
-            outcome_text = "🟢 **Team 1 Victory**"
-            embed_colour = discord.Colour.brand_green()
-        elif t2_score > t1_score:
-            outcome_text = "🔴 **Team 2 Victory**"
-            embed_colour = discord.Colour.red()
-        else:
-            outcome_text = "🤝 **Match Draw**"
-            embed_colour = discord.Colour.gold()
-
-        if getattr(result, "needs_review", False):
-            embed_colour = discord.Colour.orange()
-
-        review_flag = "⚠️ **Review Recommended (low confidence)**\n" if getattr(result, "needs_review", False) else ""
-
         # Map name lookup
         MAP_TRANSLATIONS = {
             "源工重镇": "Bind",
@@ -484,92 +463,65 @@ class AdminCog(commands.Cog, name="Admin"):
             "深渊": "Abyss",
         }
         raw_map = result.map_name or "Unknown"
-        en_map = MAP_TRANSLATIONS.get(raw_map, "")
-        map_display = f"{en_map} ({raw_map})" if en_map and en_map != raw_map else raw_map
+        map_name = MAP_TRANSLATIONS.get(raw_map, raw_map)
 
-        duration_display = result.duration if result.duration and result.duration != "Unknown" else "N/A"
-        date_display = result.match_date if result.match_date and result.match_date != "Unknown" else "N/A"
+        t1_score = result.team1_score or 0
+        t2_score = result.team2_score or 0
 
+        # Sleek Valorant-style embed matching reference
         embed = discord.Embed(
-            title=f"🎮 Match Scoreboard Results — {map_display}",
+            title=f"Match Results — {map_name}",
             description=(
-                f"{review_flag}"
-                f"### ⚔️ Final Score: 🟢 **{t1_score}**  —  🔴 **{t2_score}**\n"
-                f"**Outcome:** {outcome_text}  •  **Duration:** `{duration_display}`  •  **Date:** `{date_display}`\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                f"**Score**\n"
+                f"Team 1 [{t1_score}]\n"
+                f"Team 2 [{t2_score}]"
             ),
-            colour=embed_colour,
+            colour=discord.Colour.from_rgb(235, 66, 85),
         )
 
         def _fmt_player_list(players: list[PlayerRowStats]) -> str:
             if not players:
-                return "*No player data detected*"
-            
+                return "*No players detected*"
+
             lines = []
             for p in players:
-                # MVP Badge
-                badge = "👤"
-                mvp_tag = ""
-                if p.mvp_type == "Match MVP" or (p.is_mvp and "match" in str(p.mvp_type).lower()):
-                    badge = "👑"
-                    mvp_tag = " `Match MVP`"
-                elif p.mvp_type == "Team MVP" or p.is_mvp:
-                    badge = "⭐"
-                    mvp_tag = " `Team MVP`"
+                ign = p.ign or "Unknown"
+                crown = "👑 " if p.is_mvp else ""
+                lines.append(f"{crown}{ign}")
 
-                ign_display = p.ign or "Unknown"
-                kda = f"{p.kills}/{p.deaths}/{p.assists}"
-                
-                # Player header
-                lines.append(f"{badge} **{ign_display}**{mvp_tag}")
-                
-                # Detailed stats branch
-                stat_parts = [
-                    f"🎯 **{kda}** KDA",
-                    f"💥 **{p.acs}** ACS",
-                ]
-                if p.damage > 0:
-                    stat_parts.append(f"⚔️ **{p.damage:,}** DMG")
+                # Format stat pill matching reference: [K/D/A]  ACS  FB  DMG
+                parts = [f"[{p.kills}/{p.deaths}/{p.assists}]"]
+                if p.acs > 0:
+                    parts.append(f"{p.acs} ACS")
                 if p.first_bloods > 0:
-                    stat_parts.append(f"🩸 **{p.first_bloods}** FB")
+                    parts.append(f"{p.first_bloods} FB")
+                if p.damage > 0:
+                    parts.append(f"{p.damage:,} DMG")
                 if p.plants > 0:
-                    stat_parts.append(f"💣 **{p.plants}** Plant{'s' if p.plants > 1 else ''}")
+                    parts.append(f"{p.plants} PL")
                 if p.defuses > 0:
-                    stat_parts.append(f"🛡️ **{p.defuses}** Defuse{'s' if p.defuses > 1 else ''}")
-                    
-                lines.append(f"   └ {' • '.join(stat_parts)}")
+                    parts.append(f"{p.defuses} DF")
+
+                pill = "  ".join(parts)
+                lines.append(f"└ `{pill}`")
             return "\n".join(lines)[:1024]
 
-        t1_title = f"🟢 Team 1 {'🏆 (WINNER)' if t1_score > t2_score else ''} — {t1_score} Rounds"
         embed.add_field(
-            name=t1_title,
+            name="Team 1",
             value=_fmt_player_list(result.team1_players),
             inline=False,
         )
 
-        t2_title = f"🔴 Team 2 {'🏆 (WINNER)' if t2_score > t1_score else ''} — {t2_score} Rounds"
         embed.add_field(
-            name=t2_title,
+            name="Team 2",
             value=_fmt_player_list(result.team2_players),
             inline=False,
         )
 
-        embed.add_field(
-            name="📖 Stat Guide (What do these numbers mean?)",
-            value=(
-                "• **ACS:** Average Combat Score (Overall match impact)\n"
-                "• **KDA:** Kills / Deaths / Assists\n"
-                "• **DMG:** Total damage dealt to enemies\n"
-                "• **FB:** First Bloods (Opening elimination of the round)\n"
-                "• **Plants / Defuses:** Spike objectives completed\n"
-                "• 👑 **Match MVP** • ⭐ **Team MVP**"
-            ),
-            inline=False,
-        )
-
-        embed.set_footer(
-            text=f"Vega OCR Engine ({result.engine}) • Confidence: {conf_pct} • Speed: {result.processing_time_ms:.0f}ms"
-        )
+        footer_parts = ["Vega Scrims", map_name]
+        if result.duration and result.duration != "Unknown":
+            footer_parts.append(result.duration)
+        embed.set_footer(text=" • ".join(footer_parts))
         embed.set_thumbnail(url=image.url)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
