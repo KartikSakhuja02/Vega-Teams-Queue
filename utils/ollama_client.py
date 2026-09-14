@@ -76,11 +76,16 @@ Layout:
 - TOP CENTER: "N 获胜 M" → team1_score=N, team2_score=M
 - TOP LEFT: map name after "赛事模式-" (e.g. 莲华古城, 深海明珠, 源工重镇, 亚海悬城, 微风岛屿)
 - TOP LEFT: date "YYYY/MM/DD HH:MM" and duration "用时 MM:SS"
-- TABLE: 10 player rows:
-    First 5 = GREEN/TEAL background = team 1
-    Last  5 = RED/MAROON background = team 2
-  Columns: 队伍排名(name) | 平均战斗评分(ACS) | 击败/敌阵/助攻(K/D/A) | 对局总伤害(damage) | 率先击败(first_bloods) | 部署(plants) | 拆除(defuses)
-  MVP badges: "我方-最佳" = Team MVP, "敌方-最佳" = Match MVP
+- TABLE: 10 player rows total.
+  IMPORTANT - TEAM ASSIGNMENT:
+  The table may be sorted by individual score ("个人排名"), so green and red rows are INTERLEAVED.
+  Every match is 5v5 — there must be EXACTLY 5 players on team 1 and EXACTLY 5 players on team 2.
+  Determine team for each row by background color:
+  • GREEN / TEAL row = team 1 (Friendly / 我方)
+  • RED / MAROON row = team 2 (Enemy / 敌方)
+  • GOLD / YELLOW row = the viewer's highlighted row. Assign this player to whichever team needs to reach 5 players.
+  • "我方-最佳" (Team MVP) is on Team 1. "敌方-最佳" (Enemy MVP) is on Team 2.
+  Columns: 排名/头像/IGN | 平均战斗评分(ACS) | 击败/败阵/助攻(K/D/A) | 对局总伤害(damage) | 率先击败(first_bloods) | 部署(plants) | 拆除(defuses)
 
 Return exactly this JSON (no extra keys):
 {
@@ -110,10 +115,11 @@ Return exactly this JSON (no extra keys):
 }
 
 Rules:
-1. players must have exactly 10 entries. Index 0-4 = team=1, index 5-9 = team=2.
-2. Use null for any field you cannot read confidently. Never guess.
+1. players must contain all 10 players from the table.
+2. EXACTLY 5 players must have team=1, and EXACTLY 5 players must have team=2.
 3. K/D/A format is kills/deaths/assists separated by "/".
-4. Return ONLY the JSON. Nothing before or after it.
+4. Use null for any number you cannot read confidently. Never guess.
+5. Return ONLY the JSON object. Nothing before or after.
 """
 
 
@@ -274,10 +280,104 @@ def _confidence(players: list[dict]) -> float:
     return round(min(1.0, (1.0 - null_ratio) * player_ok), 3)
 
 
-def _to_result(data: dict, elapsed_ms: float) -> MatchOCRResult:
+def _detect_row_teams(image_bytes: bytes) -> list[int]:
+    """
+    Sample row background colors to detect whether each of the 10 rows belongs
+    to Team 1 (Teal/Green) or Team 2 (Red/Maroon).
+    Handles yellow/gold active player highlight row.
+    Returns list of 10 ints (1 or 2), or [] if not detectable.
+    """
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGB")
+            w, h = img.size
+            y_start = int(0.28 * h)
+            y_end = int(0.92 * h)
+            row_h = (y_end - y_start) / 10
+
+            row_types = []
+            for i in range(10):
+                cy = int(y_start + (i + 0.5) * row_h)
+                votes_teal = 0
+                votes_red = 0
+                for frac_x in (0.25, 0.35, 0.45, 0.55):
+                    sx = int(frac_x * w)
+                    pixels = [
+                        img.getpixel((min(w - 1, max(0, sx + dx)), min(h - 1, max(0, cy + dy))))
+                        for dx in (-3, 0, 3) for dy in (-3, 0, 3)
+                    ]
+                    r = sum(p[0] for p in pixels) / len(pixels)
+                    g = sum(p[1] for p in pixels) / len(pixels)
+                    b = sum(p[2] for p in pixels) / len(pixels)
+
+                    if g > r + 15 and b > r + 10:
+                        votes_teal += 1
+                    elif r > g + 15:
+                        votes_red += 1
+
+                if votes_teal > votes_red and votes_teal >= 2:
+                    row_types.append(1)
+                elif votes_red > votes_teal and votes_red >= 2:
+                    row_types.append(2)
+                else:
+                    row_types.append(0)  # Gold highlight or ambiguous
+
+            c1 = row_types.count(1)
+            c2 = row_types.count(2)
+            if (c1 + c2) >= 7:
+                teams = []
+                for t in row_types:
+                    if t == 1:
+                        teams.append(1)
+                    elif t == 2:
+                        teams.append(2)
+                    else:
+                        if c1 < 5:
+                            teams.append(1)
+                            c1 += 1
+                        else:
+                            teams.append(2)
+                            c2 += 1
+                if teams.count(1) == 5 and teams.count(2) == 5:
+                    return teams
+    except Exception as exc:
+        log.debug("Row color detection exception: %s", exc)
+    return []
+
+
+def _to_result(data: dict, elapsed_ms: float, image_bytes: Optional[bytes] = None) -> MatchOCRResult:
     players_raw = data.get("players") or []
+
+    # 1. Ground-truth color-assisted team detection
+    if image_bytes and len(players_raw) == 10:
+        detected_teams = _detect_row_teams(image_bytes)
+        if detected_teams and len(detected_teams) == 10:
+            log.info("Applying color-detected row teams: %s", detected_teams)
+            for p, team_id in zip(players_raw, detected_teams):
+                p["team"] = team_id
+
+    # 2. Strict 5v5 validation and auto-balancer safeguard
     t1 = [p for p in players_raw if p.get("team") == 1]
     t2 = [p for p in players_raw if p.get("team") == 2]
+
+    if len(players_raw) == 10 and (len(t1) != 5 or len(t2) != 5):
+        log.warning("Unbalanced teams detected (%d vs %d), enforcing 5v5 balance", len(t1), len(t2))
+        if len(t1) < 5:
+            needed = 5 - len(t1)
+            for p in reversed(t2):
+                if needed <= 0:
+                    break
+                p["team"] = 1
+                needed -= 1
+        elif len(t2) < 5:
+            needed = 5 - len(t2)
+            for p in reversed(t1):
+                if needed <= 0:
+                    break
+                p["team"] = 2
+                needed -= 1
+        t1 = [p for p in players_raw if p.get("team") == 1]
+        t2 = [p for p in players_raw if p.get("team") == 2]
 
     def _make(p: dict, team_label: str) -> PlayerRowStats:
         kills = deaths = assists = 0
@@ -342,4 +442,4 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
 
     log.debug("Ollama scoreboard raw (first 400): %s", raw_text[:400])
     parsed = _extract_json(raw_text)
-    return _to_result(parsed, elapsed_ms)
+    return _to_result(parsed, elapsed_ms, image_bytes=image_bytes)
