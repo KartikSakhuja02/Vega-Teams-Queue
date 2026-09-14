@@ -442,55 +442,134 @@ class AdminCog(commands.Cog, name="Admin"):
             return
 
         review_flag = "⚠️ **LOW CONFIDENCE — review before committing to DB**\n" if getattr(result, "needs_review", False) else ""
-        conf_pct    = f"{getattr(result, 'confidence', 0) * 100:.0f}%"
-        embed_colour = discord.Colour.orange() if getattr(result, "needs_review", False) else COL_SUCCESS
+        conf_pct = f"{getattr(result, 'confidence', 0) * 100:.0f}%"
+        t1_score = result.team1_score or 0
+        t2_score = result.team2_score or 0
+
+        # Outcome & Theme color
+        if t1_score > t2_score:
+            outcome_text = "🟢 **Team 1 Victory**"
+            embed_colour = discord.Colour.brand_green()
+        elif t2_score > t1_score:
+            outcome_text = "🔴 **Team 2 Victory**"
+            embed_colour = discord.Colour.red()
+        else:
+            outcome_text = "🤝 **Match Draw**"
+            embed_colour = discord.Colour.gold()
+
+        if getattr(result, "needs_review", False):
+            embed_colour = discord.Colour.orange()
+
+        review_flag = "⚠️ **Review Recommended (low confidence)**\n" if getattr(result, "needs_review", False) else ""
+
+        # Map name lookup
+        MAP_TRANSLATIONS = {
+            "源工重镇": "Bind",
+            "亚海悬城": "Ascent",
+            "莲华古城": "Lotus",
+            "深海明珠": "Pearl",
+            "微风岛屿": "Breeze",
+            "隐世修所": "Haven",
+            "天堂": "Haven",
+            "霓虹町": "Split",
+            "分裂": "Split",
+            "森寒冬港": "Icebox",
+            "极地寒港": "Icebox",
+            "冰箱": "Icebox",
+            "裂变峡谷": "Fracture",
+            "碎片": "Fracture",
+            "日落之城": "Sunset",
+            "日落": "Sunset",
+            "幽邃地窟": "Abyss",
+            "深渊": "Abyss",
+        }
+        raw_map = result.map_name or "Unknown"
+        en_map = MAP_TRANSLATIONS.get(raw_map, "")
+        map_display = f"{en_map} ({raw_map})" if en_map and en_map != raw_map else raw_map
+
+        duration_display = result.duration if result.duration and result.duration != "Unknown" else "N/A"
+        date_display = result.match_date if result.match_date and result.match_date != "Unknown" else "N/A"
+
         embed = discord.Embed(
-            title=f"🎮 Match Scoreboard OCR — {result.map_name}",
+            title=f"🎮 Match Scoreboard Results — {map_display}",
             description=(
                 f"{review_flag}"
-                f"**Score:** 🟢 **{result.team1_score}**  vs  🔴 **{result.team2_score}** ({result.outcome})\n"
-                f"**Duration:** `{result.duration}` • **Date:** `{result.match_date}`\n"
-                f"**Engine:** `{result.engine}` • **Speed:** `{result.processing_time_ms} ms` • **Confidence:** `{conf_pct}`"
+                f"### ⚔️ Final Score: 🟢 **{t1_score}**  —  🔴 **{t2_score}**\n"
+                f"**Outcome:** {outcome_text}  •  **Duration:** `{duration_display}`  •  **Date:** `{date_display}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             ),
             colour=embed_colour,
         )
 
-        def _find_mvp(players: list[PlayerRowStats]) -> int:
-            """Index of the player with the highest kills in this team."""
+        def _fmt_player_list(players: list[PlayerRowStats]) -> str:
             if not players:
-                return -1
-            return max(range(len(players)), key=lambda i: players[i].kills)
+                return "*No player data detected*"
+            
+            lines = []
+            for p in players:
+                # MVP Badge
+                badge = "👤"
+                mvp_tag = ""
+                if p.mvp_type == "Match MVP" or (p.is_mvp and "match" in str(p.mvp_type).lower()):
+                    badge = "👑"
+                    mvp_tag = " `Match MVP`"
+                elif p.mvp_type == "Team MVP" or p.is_mvp:
+                    badge = "⭐"
+                    mvp_tag = " `Team MVP`"
 
-        def _fmt_team(players: list[PlayerRowStats]) -> str:
-            """All 5 players — ACS · K/D/A · DMG · FB · PL · DF in one field."""
-            if not players:
-                return "*No players detected*"
-            mvp_idx = _find_mvp(players)
-            header  = f"{'':2}{'IGN':<14} {'ACS':>4}  {'K/D/A':^9}  {'DMG':>5}  {'FB':>2} {'PL':>2} {'DF':>2}"
-            sep     = "─" * len(header)
-            lines   = ["```", header, sep]
-            for i, p in enumerate(players):
-                crown = "👑" if i == mvp_idx else "  "
-                ign   = (p.ign[:13] + "…") if len(p.ign) > 14 else p.ign[:14]
-                kda   = p.kda_str if hasattr(p, "kda_str") else f"{p.kills}/{p.deaths}/{p.assists}"
-                lines.append(
-                    f"{crown}{ign:<14} {p.acs:>4}  {kda:^9}  {p.damage:>5}  {p.first_bloods:>2} {p.plants:>2} {p.defuses:>2}"
-                )
-            lines.append("```")
-            return "\n".join(lines)[:1020]
+                ign_display = p.ign or "Unknown"
+                kda = f"{p.kills}/{p.deaths}/{p.assists}"
+                
+                # Player header
+                lines.append(f"{badge} **{ign_display}**{mvp_tag}")
+                
+                # Detailed stats branch
+                stat_parts = [
+                    f"🎯 **{kda}** KDA",
+                    f"💥 **{p.acs}** ACS",
+                ]
+                if p.damage > 0:
+                    stat_parts.append(f"⚔️ **{p.damage:,}** DMG")
+                if p.first_bloods > 0:
+                    stat_parts.append(f"🩸 **{p.first_bloods}** FB")
+                if p.plants > 0:
+                    stat_parts.append(f"💣 **{p.plants}** Plant{'s' if p.plants > 1 else ''}")
+                if p.defuses > 0:
+                    stat_parts.append(f"🛡️ **{p.defuses}** Defuse{'s' if p.defuses > 1 else ''}")
+                    
+                lines.append(f"   └ {' • '.join(stat_parts)}")
+            return "\n".join(lines)[:1024]
 
+        t1_title = f"🟢 Team 1 {'🏆 (WINNER)' if t1_score > t2_score else ''} — {t1_score} Rounds"
         embed.add_field(
-            name=f"🟢 Team 1 — {result.team1_score} rounds",
-            value=_fmt_team(result.team1_players),
+            name=t1_title,
+            value=_fmt_player_list(result.team1_players),
             inline=False,
         )
+
+        t2_title = f"🔴 Team 2 {'🏆 (WINNER)' if t2_score > t1_score else ''} — {t2_score} Rounds"
         embed.add_field(
-            name=f"🔴 Team 2 — {result.team2_score} rounds",
-            value=_fmt_team(result.team2_players),
+            name=t2_title,
+            value=_fmt_player_list(result.team2_players),
             inline=False,
         )
 
-        embed.set_footer(text=f"Vega Scrims OCR Engine • {result.engine} • {result.processing_time_ms:.0f}ms • 👑 = highest kills")
+        embed.add_field(
+            name="📖 Stat Guide (What do these numbers mean?)",
+            value=(
+                "• **ACS:** Average Combat Score (Overall match impact)\n"
+                "• **KDA:** Kills / Deaths / Assists\n"
+                "• **DMG:** Total damage dealt to enemies\n"
+                "• **FB:** First Bloods (Opening elimination of the round)\n"
+                "• **Plants / Defuses:** Spike objectives completed\n"
+                "• 👑 **Match MVP** • ⭐ **Team MVP**"
+            ),
+            inline=False,
+        )
+
+        embed.set_footer(
+            text=f"Vega OCR Engine ({result.engine}) • Confidence: {conf_pct} • Speed: {result.processing_time_ms:.0f}ms"
+        )
         embed.set_thumbnail(url=image.url)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
