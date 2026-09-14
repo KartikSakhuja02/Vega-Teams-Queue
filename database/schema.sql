@@ -241,11 +241,27 @@ CREATE TABLE IF NOT EXISTS team_queue (
     region               region_enum  NOT NULL,
     captain_discord_id   BIGINT       NOT NULL,
     joined_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_team_queue_team UNIQUE (team_id)
+    CONSTRAINT uq_team_queue_team_type UNIQUE (team_id, queue_type)
 );
 
 CREATE INDEX IF NOT EXISTS idx_team_queue_type_region ON team_queue (queue_type, region);
 CREATE INDEX IF NOT EXISTS idx_team_queue_joined ON team_queue (joined_at ASC);
+
+-- Migration for existing databases: allow team in both regional and global queues
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uq_team_queue_team'
+    ) THEN
+        ALTER TABLE team_queue DROP CONSTRAINT uq_team_queue_team;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uq_team_queue_team_type'
+    ) THEN
+        ALTER TABLE team_queue ADD CONSTRAINT uq_team_queue_team_type UNIQUE (team_id, queue_type);
+    END IF;
+END
+$$;
 
 
 

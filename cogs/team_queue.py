@@ -5,7 +5,8 @@ Matchmaking queue cog for teams.
 Features:
 - Persistent embed sent to the designated Discord channel on startup.
 - Live view of teams in Regional and Global queues stored in PostgreSQL.
-- Minimalistic design with strictly NO emojis in titles, descriptions, buttons, or footers.
+- Teams can join BOTH Regional and Global queues simultaneously.
+- Elevated, minimalistic design with strictly NO emojis in titles, descriptions, buttons, or footers.
 - 3 interactive buttons: Join Regional Queue, Join Global Queue, Leave Queue.
 - Restricted to active team captains.
 """
@@ -29,18 +30,26 @@ TEAM_QUEUE_CHANNEL_ID: int = int(os.environ.get("TEAM_QUEUE_CHANNEL_ID", "0"))
 TEAM_QUEUE_MESSAGE_CONFIG_KEY: str = "team_queue_message_id"
 
 REGIONS: list[str] = ["India", "APAC", "EMEA", "Americas"]
-EMBED_COLOUR = discord.Colour(0x2B2D31)
+EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 
 
 def build_team_queue_embed(regional_teams: list[dict], global_teams: list[dict]) -> discord.Embed:
     """
-    Construct the minimalistic, zero-emoji team queue embed.
+    Construct an elevated, beautiful, zero-emoji team queue embed.
     """
+    # Identify teams in both queues
+    reg_team_ids = {t["team_id"] for t in regional_teams}
+    glob_team_ids = {t["team_id"] for t in global_teams}
+    dual_team_ids = reg_team_ids.intersection(glob_team_ids)
+    all_team_ids = reg_team_ids.union(glob_team_ids)
+
     embed = discord.Embed(
-        title="Team Matchmaking Queue",
+        title="VEGA SCRIMS — TEAM MATCHMAKING",
         description=(
-            "Matchmaking queue for active teams.\n"
-            "Only team captains can manage queue status for their team."
+            "> **Matchmaking Lobby**\n"
+            "> Teams can enter **Regional Queue**, **Global Queue**, or **Both** at the same time.\n"
+            "> Only active team captains can manage queue participation.\n\n"
+            f"> **Live Queue Overview:** Regional: `{len(regional_teams)}` • Global: `{len(global_teams)}` • Unique: `{len(all_team_ids)}`"
         ),
         colour=EMBED_COLOUR,
     )
@@ -49,14 +58,17 @@ def build_team_queue_embed(regional_teams: list[dict], global_teams: list[dict])
     regional_blocks: list[str] = []
     for reg in REGIONS:
         teams_in_reg = [t for t in regional_teams if t.get("region") == reg]
-        lines = [f"**{reg}** ({len(teams_in_reg)})"]
         if teams_in_reg:
+            lines = [f"**{reg.upper()}** `[ {len(teams_in_reg)} Queued ]`"]
             for idx, t in enumerate(teams_in_reg, 1):
-                tag_str = f" [{t['team_tag']}]" if t.get("team_tag") else ""
+                tag_str = f" `[{t['team_tag']}]`" if t.get("team_tag") else ""
                 captain_name = t.get("captain_ign") or t.get("captain_username") or "Captain"
-                lines.append(f"{idx}. {t['team_name']}{tag_str} - Captain: {captain_name}")
+                ts = int(t["joined_at"].timestamp()) if t.get("joined_at") else 0
+                time_str = f" • <t:{ts}:R>" if ts else ""
+                dual_str = " `[Dual]`" if t["team_id"] in dual_team_ids else ""
+                lines.append(f"> `{idx}.` **{t['team_name']}**{tag_str} • Captain: **{captain_name}**{time_str}{dual_str}")
         else:
-            lines.append("No teams queued")
+            lines = [f"**{reg.upper()}** `[ Empty ]`", "> *No teams waiting in queue*"]
         regional_blocks.append("\n".join(lines))
 
     regional_text = "\n\n".join(regional_blocks)
@@ -64,7 +76,7 @@ def build_team_queue_embed(regional_teams: list[dict], global_teams: list[dict])
         regional_text = regional_text[:1020] + "..."
 
     embed.add_field(
-        name="Regional Queue",
+        name="Regional Matchmaking",
         value=regional_text,
         inline=False,
     )
@@ -73,27 +85,103 @@ def build_team_queue_embed(regional_teams: list[dict], global_teams: list[dict])
     if global_teams:
         global_lines: list[str] = []
         for idx, t in enumerate(global_teams, 1):
-            tag_str = f" [{t['team_tag']}]" if t.get("team_tag") else ""
-            reg_str = f" ({t.get('region')})" if t.get("region") else ""
+            tag_str = f" `[{t['team_tag']}]`" if t.get("team_tag") else ""
+            reg_str = f" `{t.get('region', 'Global')}`"
             captain_name = t.get("captain_ign") or t.get("captain_username") or "Captain"
-            global_lines.append(f"{idx}. {t['team_name']}{tag_str}{reg_str} - Captain: {captain_name}")
+            ts = int(t["joined_at"].timestamp()) if t.get("joined_at") else 0
+            time_str = f" • <t:{ts}:R>" if ts else ""
+            dual_str = " `[Dual]`" if t["team_id"] in dual_team_ids else ""
+            global_lines.append(f"> `{idx}.` **{t['team_name']}**{tag_str} • {reg_str} • Captain: **{captain_name}**{time_str}{dual_str}")
         global_text = "\n".join(global_lines)
     else:
-        global_text = "No teams queued"
+        global_text = "> *No teams waiting in global queue*"
 
     if len(global_text) > 1024:
         global_text = global_text[:1020] + "..."
 
     embed.add_field(
-        name=f"Global Queue ({len(global_teams)})",
+        name=f"Global Matchmaking `[ {len(global_teams)} Queued ]`",
         value=global_text,
         inline=False,
     )
 
-    total_queued = len(regional_teams) + len(global_teams)
-    embed.set_footer(text=f"Vega Matchmaking | Total Teams Queued: {total_queued}")
-
+    embed.set_footer(text="Vega Matchmaking System • Click buttons below to queue")
     return embed
+
+
+class LeaveQueueOptionsView(discord.ui.View):
+    """
+    Ephemeral view shown when a captain whose team is in BOTH queues clicks Leave Queue.
+    Allows choosing which queue to leave (or both).
+    """
+
+    def __init__(self, cog: TeamQueueCog, team: dict) -> None:
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.team = team
+
+    @discord.ui.button(
+        label="Leave Regional Queue",
+        style=discord.ButtonStyle.secondary,
+        custom_id="leave_choice:regional",
+    )
+    async def leave_regional(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await db.remove_team_from_queue(self.team["id"], "REGIONAL")
+        await self.cog.refresh_queue_message()
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        await interaction.edit_original_response(
+            content=f"Your team **{self.team['team_name']}** has left the **Regional Queue**. Your team remains in the **Global Queue**.",
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="Leave Global Queue",
+        style=discord.ButtonStyle.secondary,
+        custom_id="leave_choice:global",
+    )
+    async def leave_global(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await db.remove_team_from_queue(self.team["id"], "GLOBAL")
+        await self.cog.refresh_queue_message()
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        await interaction.edit_original_response(
+            content=f"Your team **{self.team['team_name']}** has left the **Global Queue**. Your team remains in the **Regional Queue**.",
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="Leave Both Queues",
+        style=discord.ButtonStyle.danger,
+        custom_id="leave_choice:both",
+    )
+    async def leave_both(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await db.remove_team_from_queue(self.team["id"])
+        await self.cog.refresh_queue_message()
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        await interaction.edit_original_response(
+            content=f"Your team **{self.team['team_name']}** has left **Both Queues**.",
+            view=self,
+        )
 
 
 class TeamQueueView(discord.ui.View):
@@ -250,6 +338,7 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
     async def handle_join_queue(self, interaction: discord.Interaction, queue_type: str) -> None:
         """
         Handle a captain requesting to join either REGIONAL or GLOBAL queue.
+        Teams can join both queues simultaneously.
         """
         await interaction.response.defer(ephemeral=True)
 
@@ -262,22 +351,14 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
             )
             return
 
-        existing = await db.get_queued_team(team["id"])
+        # Check if already in this specific queue
+        existing = await db.get_queued_team(team["id"], queue_type)
         if existing:
-            current_type = existing["queue_type"]
-            if current_type == queue_type:
-                await interaction.followup.send(
-                    f"Your team '{team['team_name']}' is already in the {queue_type.capitalize()} Queue.",
-                    ephemeral=True,
-                )
-                return
-            else:
-                await interaction.followup.send(
-                    f"Your team '{team['team_name']}' is currently in the {current_type.capitalize()} Queue. "
-                    "Please leave your current queue before joining a different one.",
-                    ephemeral=True,
-                )
-                return
+            await interaction.followup.send(
+                f"Your team **{team['team_name']}** is already in the **{queue_type.capitalize()} Queue**.",
+                ephemeral=True,
+            )
+            return
 
         success = await db.add_team_to_queue(
             team_id=team["id"],
@@ -295,16 +376,28 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
 
         await self.refresh_queue_message()
 
-        if queue_type == "REGIONAL":
+        other_type = "GLOBAL" if queue_type == "REGIONAL" else "REGIONAL"
+        is_also_in_other = await db.get_queued_team(team["id"], other_type)
+
+        if is_also_in_other:
             await interaction.followup.send(
-                f"Your team '{team['team_name']}' has joined the Regional ({team['region']}) Queue.",
+                f"Your team **{team['team_name']}** has joined the **{queue_type.capitalize()} Queue**.\n"
+                "Your team is now actively waiting in **Both Regional & Global** queues.",
                 ephemeral=True,
             )
         else:
-            await interaction.followup.send(
-                f"Your team '{team['team_name']}' has joined the Global Queue.",
-                ephemeral=True,
-            )
+            if queue_type == "REGIONAL":
+                await interaction.followup.send(
+                    f"Your team **{team['team_name']}** has joined the **Regional ({team['region']}) Queue**.\n"
+                    "Tip: You can also join the Global Queue simultaneously by clicking **Join Global Queue**.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    f"Your team **{team['team_name']}** has joined the **Global Queue**.\n"
+                    f"Tip: You can also join your Regional ({team['region']}) Queue simultaneously by clicking **Join Regional Queue**.",
+                    ephemeral=True,
+                )
 
         log.info(
             "Team %s (ID: %d, Region: %s) joined %s queue by captain %s (%d)",
@@ -318,7 +411,9 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
 
     async def handle_leave_queue(self, interaction: discord.Interaction) -> None:
         """
-        Handle a captain requesting to leave whatever queue their team is currently in.
+        Handle a captain requesting to leave the queue.
+        If in only one queue, leaves directly.
+        If in both queues, prompts with options to leave either or both.
         """
         await interaction.response.defer(ephemeral=True)
 
@@ -331,29 +426,39 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
             )
             return
 
-        existing = await db.get_queued_team(team["id"])
-        if not existing:
+        active_queues = await db.get_team_queues(team["id"])
+        if not active_queues:
             await interaction.followup.send(
-                f"Your team '{team['team_name']}' is not currently in any queue.",
+                f"Your team **{team['team_name']}** is not currently in any queue.",
                 ephemeral=True,
             )
             return
 
-        await db.remove_team_from_queue(team["id"])
-        await self.refresh_queue_message()
+        if len(active_queues) == 1:
+            q_type = active_queues[0]["queue_type"]
+            await db.remove_team_from_queue(team["id"], q_type)
+            await self.refresh_queue_message()
+            await interaction.followup.send(
+                f"Your team **{team['team_name']}** has left the **{q_type.capitalize()} Queue**.",
+                ephemeral=True,
+            )
+            log.info(
+                "Team %s (ID: %d) left %s queue by captain %s (%d)",
+                team["team_name"],
+                team["id"],
+                q_type,
+                interaction.user.name,
+                captain_id,
+            )
+            return
 
+        # Team is in both queues — prompt captain with choices
+        options_view = LeaveQueueOptionsView(self, team)
         await interaction.followup.send(
-            f"Your team '{team['team_name']}' has left the {existing['queue_type'].capitalize()} Queue.",
+            f"Your team **{team['team_name']}** is currently waiting in **Both Regional & Global** queues.\n"
+            "Select an option below:",
+            view=options_view,
             ephemeral=True,
-        )
-
-        log.info(
-            "Team %s (ID: %d) left %s queue by captain %s (%d)",
-            team["team_name"],
-            team["id"],
-            existing["queue_type"],
-            interaction.user.name,
-            captain_id,
         )
 
     @app_commands.command(

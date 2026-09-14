@@ -186,8 +186,8 @@ Stores active teams in the matchmaking queue (Regional or Global).
 | Column | Type | Notes |
 |---|---|---|
 | `id` | BIGSERIAL PK | |
-| `team_id` | BIGINT FK UNIQUE | References teams(id) ON DELETE CASCADE |
-| `queue_type` | TEXT | 'REGIONAL' or 'GLOBAL' |
+| `team_id` | BIGINT FK | References teams(id) ON DELETE CASCADE |
+| `queue_type` | TEXT | 'REGIONAL' or 'GLOBAL' (UNIQUE with team_id) |
 | `region` | region_enum | Matchmaking region |
 | `captain_discord_id` | BIGINT | Captain snowflake |
 | `joined_at` | TIMESTAMPTZ | Queue entry timestamp |
@@ -260,10 +260,12 @@ delete_team_setup_session(thread_id)
 ### Team Queue
 ```
 add_team_to_queue(team_id, queue_type, region, captain_discord_id)
-                                          — enter or update team in queue
-remove_team_from_queue(team_id)           — leave matchmaking queue
+                                          — enter or update team in queue (supports dual queues)
+remove_team_from_queue(team_id, queue_type=None)
+                                          — leave a specific queue or all queues
 get_team_queue(queue_type=None)           — fetch all queued teams (or filtered by type)
-get_queued_team(team_id)                  — check if a team is in queue
+get_queued_team(team_id, queue_type=None) — check if a team is in a queue
+get_team_queues(team_id)                  — fetch all active queue rows for a team
 ```
 
 ### Bot Config
