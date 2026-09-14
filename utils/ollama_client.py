@@ -56,6 +56,7 @@ _HEADERS = {
     "User-Agent": "ollama-discord-bot/1.0",
     "Accept": "application/json",
     "Content-Type": "application/json",
+    "ngrok-skip-browser-warning": "true",   # bypass ngrok free-tier interstitial
 }
 
 
