@@ -994,17 +994,31 @@ async def transfer_team_captain(
                     old_captain_new_role,
                 )
 
+                # 4. Update captain in team_queue if team is queued
+                await conn.execute(
+                    "UPDATE team_queue SET captain_discord_id = $1 WHERE team_id = $2",
+                    new_captain_id,
+                    team_id,
+                )
+
                 return dict(updated_team)
     except Exception:
         return None
 
 
 async def deactivate_team(captain_discord_id: int) -> None:
-    """Soft-delete a team — marks is_active=FALSE, keeps all data."""
-    await get_pool().execute(
-        "UPDATE teams SET is_active = FALSE WHERE captain_discord_id = $1",
-        captain_discord_id,
-    )
+    """Soft-delete a team — marks is_active=FALSE, keeps all data, and removes from queue."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE teams SET is_active = FALSE WHERE captain_discord_id = $1",
+                captain_discord_id,
+            )
+            await conn.execute(
+                "DELETE FROM team_queue WHERE captain_discord_id = $1",
+                captain_discord_id,
+            )
 
 
 async def get_inactive_team_by_captain(captain_discord_id: int) -> Optional[dict]:
@@ -1198,3 +1212,108 @@ async def delete_team_setup_session(thread_id: int) -> None:
         "DELETE FROM team_setup_sessions WHERE thread_id = $1",
         thread_id,
     )
+
+
+# =============================================================================
+# Team Queue helpers
+# =============================================================================
+
+async def add_team_to_queue(
+    team_id: int,
+    queue_type: str,
+    region: str,
+    captain_discord_id: int,
+) -> bool:
+    """
+    Add or update a team in the team queue.
+    queue_type should be 'REGIONAL' or 'GLOBAL'.
+    Returns True if successfully queued.
+    """
+    query = """
+        INSERT INTO team_queue (team_id, queue_type, region, captain_discord_id, joined_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (team_id) DO UPDATE
+            SET queue_type = EXCLUDED.queue_type,
+                region = EXCLUDED.region,
+                captain_discord_id = EXCLUDED.captain_discord_id,
+                joined_at = NOW()
+    """
+    await get_pool().execute(query, team_id, queue_type, region, captain_discord_id)
+    return True
+
+
+async def remove_team_from_queue(team_id: int) -> bool:
+    """
+    Remove a team from the queue by team ID.
+    Returns True if a team was removed, False if not found.
+    """
+    res = await get_pool().execute(
+        "DELETE FROM team_queue WHERE team_id = $1",
+        team_id,
+    )
+    return res.endswith("1")
+
+
+async def get_team_queue(queue_type: Optional[str] = None) -> list[dict]:
+    """
+    Fetch all teams currently in the queue, joined with team details.
+    Optionally filter by queue_type ('REGIONAL' or 'GLOBAL').
+    Ordered by joined_at ASC (first in, first out).
+    """
+    if queue_type:
+        query = """
+            SELECT
+                tq.id as queue_id,
+                tq.team_id,
+                tq.queue_type,
+                tq.region,
+                tq.captain_discord_id,
+                tq.joined_at,
+                t.team_name,
+                t.team_tag,
+                t.captain_ign,
+                t.captain_username
+            FROM team_queue tq
+            JOIN teams t ON tq.team_id = t.id
+            WHERE tq.queue_type = $1 AND t.is_active = TRUE
+            ORDER BY tq.joined_at ASC
+        """
+        rows = await get_pool().fetch(query, queue_type)
+    else:
+        query = """
+            SELECT
+                tq.id as queue_id,
+                tq.team_id,
+                tq.queue_type,
+                tq.region,
+                tq.captain_discord_id,
+                tq.joined_at,
+                t.team_name,
+                t.team_tag,
+                t.captain_ign,
+                t.captain_username
+            FROM team_queue tq
+            JOIN teams t ON tq.team_id = t.id
+            WHERE t.is_active = TRUE
+            ORDER BY tq.joined_at ASC
+        """
+        rows = await get_pool().fetch(query)
+    return [dict(r) for r in rows]
+
+
+async def get_queued_team(team_id: int) -> Optional[dict]:
+    """Check if a specific team is currently in the queue."""
+    row = await get_pool().fetchrow(
+        """
+        SELECT
+            tq.*,
+            t.team_name,
+            t.team_tag,
+            t.captain_ign
+        FROM team_queue tq
+        JOIN teams t ON tq.team_id = t.id
+        WHERE tq.team_id = $1
+        """,
+        team_id,
+    )
+    return dict(row) if row else None

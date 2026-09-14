@@ -180,6 +180,18 @@ Temporary state while a team setup thread is in progress. Deleted when the team 
 | `region` | region_enum | |
 | `created_at` | TIMESTAMPTZ | |
 
+#### `team_queue`
+Stores active teams in the matchmaking queue (Regional or Global).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | BIGSERIAL PK | |
+| `team_id` | BIGINT FK UNIQUE | References teams(id) ON DELETE CASCADE |
+| `queue_type` | TEXT | 'REGIONAL' or 'GLOBAL' |
+| `region` | region_enum | Matchmaking region |
+| `captain_discord_id` | BIGINT | Captain snowflake |
+| `joined_at` | TIMESTAMPTZ | Queue entry timestamp |
+
 #### `bot_config`
 Key-value store for persistent message IDs (so embeds are edited instead of re-posted).
 
@@ -243,6 +255,15 @@ create_team_setup_session(thread_id, captain_discord_id, captain_username,
 get_team_setup_session_by_thread_id(thread_id)
 get_team_setup_session_by_captain(captain_discord_id)
 delete_team_setup_session(thread_id)
+```
+
+### Team Queue
+```
+add_team_to_queue(team_id, queue_type, region, captain_discord_id)
+                                          — enter or update team in queue
+remove_team_from_queue(team_id)           — leave matchmaking queue
+get_team_queue(queue_type=None)           — fetch all queued teams (or filtered by type)
+get_queued_team(team_id)                  — check if a team is in queue
 ```
 
 ### Bot Config

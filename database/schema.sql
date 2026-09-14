@@ -229,6 +229,24 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- team_queue
+-- ---------------------------------------------------------------------------
+-- Stores teams actively waiting in the regional or global queue.
+
+CREATE TABLE IF NOT EXISTS team_queue (
+    id                   BIGSERIAL    PRIMARY KEY,
+    team_id              BIGINT       NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
+    queue_type           TEXT         NOT NULL, -- 'REGIONAL' or 'GLOBAL'
+    region               region_enum  NOT NULL,
+    captain_discord_id   BIGINT       NOT NULL,
+    joined_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_team_queue_team UNIQUE (team_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_queue_type_region ON team_queue (queue_type, region);
+CREATE INDEX IF NOT EXISTS idx_team_queue_joined ON team_queue (joined_at ASC);
+
 
 
 
