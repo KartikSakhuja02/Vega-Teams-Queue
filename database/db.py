@@ -1361,3 +1361,237 @@ async def get_team_queues(team_id: int) -> list[dict]:
         team_id,
     )
     return [dict(r) for r in rows]
+
+
+# =============================================================================
+# Admin Management Helpers
+# =============================================================================
+
+async def search_teams(query: str, limit: int = 25) -> list[dict]:
+    """
+    Search teams for autocomplete by name, tag, or numeric ID.
+    Returns matching team records up to limit.
+    """
+    cleaned = query.strip()
+    if not cleaned:
+        rows = await get_pool().fetch(
+            "SELECT id, team_name, team_tag, region, is_active FROM teams ORDER BY is_active DESC, team_name ASC LIMIT $1",
+            limit,
+        )
+    else:
+        like_term = f"%{cleaned}%"
+        rows = await get_pool().fetch(
+            """
+            SELECT id, team_name, team_tag, region, is_active
+            FROM teams
+            WHERE team_name ILIKE $1 OR team_tag ILIKE $1 OR id::TEXT = $2
+            ORDER BY is_active DESC, team_name ASC
+            LIMIT $3
+            """,
+            like_term,
+            cleaned,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_team_by_identifier(identifier: str) -> Optional[dict]:
+    """
+    Resolve a team by numeric ID, team name, or team tag (case-insensitive).
+    """
+    cleaned = identifier.strip()
+    if not cleaned:
+        return None
+
+    if cleaned.isdigit():
+        row = await get_pool().fetchrow("SELECT * FROM teams WHERE id = $1", int(cleaned))
+        if row:
+            return dict(row)
+
+    row = await get_pool().fetchrow(
+        """
+        SELECT * FROM teams
+        WHERE LOWER(team_name) = LOWER($1)
+           OR LOWER(team_tag) = LOWER($1)
+           OR team_name_key = LOWER($1)
+           OR team_tag_key = LOWER($1)
+        LIMIT 1
+        """,
+        cleaned,
+    )
+    return dict(row) if row else None
+
+
+async def admin_update_player_ign(discord_id: int, new_ign: str) -> Optional[dict]:
+    """
+    Update a player's IGN and update teams.captain_ign if they are a captain.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            player_row = await conn.fetchrow(
+                """
+                UPDATE players
+                SET ign = $1
+                WHERE discord_id = $2
+                RETURNING *
+                """,
+                new_ign,
+                discord_id,
+            )
+            if not player_row:
+                return None
+
+            # Synchronize captain_ign if player is captain of an active team
+            await conn.execute(
+                """
+                UPDATE teams
+                SET captain_ign = $1
+                WHERE captain_discord_id = $2
+                """,
+                new_ign,
+                discord_id,
+            )
+            return dict(player_row)
+
+
+async def admin_update_player_elo(discord_id: int, new_elo: int) -> Optional[dict]:
+    """
+    Directly update a player's ELO rating.
+    """
+    row = await get_pool().fetchrow(
+        """
+        UPDATE players
+        SET elo = $1
+        WHERE discord_id = $2
+        RETURNING *
+        """,
+        new_elo,
+        discord_id,
+    )
+    return dict(row) if row else None
+
+
+async def admin_reset_player_stats(discord_id: int, reset_elo: bool = False) -> Optional[dict]:
+    """
+    Reset combat statistics for a player, optionally resetting ELO back to 1000.
+    """
+    if reset_elo:
+        query = """
+            UPDATE players
+            SET kills = 0,
+                deaths = 0,
+                assists = 0,
+                matches_played = 0,
+                wins = 0,
+                mvp_count = 0,
+                elo = 1000
+            WHERE discord_id = $1
+            RETURNING *
+        """
+    else:
+        query = """
+            UPDATE players
+            SET kills = 0,
+                deaths = 0,
+                assists = 0,
+                matches_played = 0,
+                wins = 0,
+                mvp_count = 0
+            WHERE discord_id = $1
+            RETURNING *
+        """
+    row = await get_pool().fetchrow(query, discord_id)
+    return dict(row) if row else None
+
+
+async def admin_reset_player_status(discord_id: int) -> Optional[dict]:
+    """
+    Clear active queue/match status or cooldown penalty for a player.
+    """
+    row = await get_pool().fetchrow(
+        """
+        UPDATE players
+        SET status = 'IDLE'::player_status_enum,
+            status_since = NOW(),
+            penalty_ends_at = NULL
+        WHERE discord_id = $1
+        RETURNING *
+        """,
+        discord_id,
+    )
+    return dict(row) if row else None
+
+
+async def admin_delete_player(discord_id: int) -> tuple[bool, str]:
+    """
+    Delete a player record from the system.
+    Safely checks if the player is captain of an active team first.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Check if active team captain
+            active_team = await conn.fetchrow(
+                "SELECT team_name FROM teams WHERE captain_discord_id = $1 AND is_active = TRUE",
+                discord_id,
+            )
+            if active_team:
+                return False, f"Player is captain of active team '{active_team['team_name']}'. Transfer captaincy or disband team first."
+
+            # Delete from team_members and invites
+            await conn.execute("DELETE FROM team_members WHERE discord_id = $1", discord_id)
+            await conn.execute("DELETE FROM team_invites WHERE target_discord_id = $1 OR inviter_discord_id = $1", discord_id)
+            # Delete from players
+            res = await conn.execute("DELETE FROM players WHERE discord_id = $1", discord_id)
+            if res.endswith(" 0"):
+                return False, "Player was not found in the database."
+            return True, "Player record successfully deleted."
+
+
+async def admin_force_add_team_member(team_id: int, discord_id: int, role: str) -> tuple[bool, str]:
+    """
+    Force-add a player to a team roster.
+    If the player is currently in another team, they are removed from that team first.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Ensure target team exists
+            team = await conn.fetchrow("SELECT id, team_name FROM teams WHERE id = $1 AND is_active = TRUE", team_id)
+            if not team:
+                return False, "Target team not found or is inactive."
+
+            # Ensure player is registered
+            player = await conn.fetchrow("SELECT discord_id, ign FROM players WHERE discord_id = $1", discord_id)
+            if not player:
+                return False, "Player is not registered in the system."
+
+            # Check if player is already captain of this or another team
+            captain_team = await conn.fetchrow("SELECT team_name FROM teams WHERE captain_discord_id = $1 AND is_active = TRUE", discord_id)
+            if captain_team:
+                return False, f"Player is already the captain of team '{captain_team['team_name']}'."
+
+            # Remove from any existing team roster
+            await conn.execute("DELETE FROM team_members WHERE discord_id = $1", discord_id)
+
+            # Insert into team_members
+            await conn.execute(
+                """
+                INSERT INTO team_members (team_id, discord_id, role, joined_at)
+                VALUES ($1, $2, $3::team_role_enum, NOW())
+                """,
+                team_id,
+                discord_id,
+                role,
+            )
+            return True, f"Added **{player['ign']}** to **{team['team_name']}** as **{role}**."
+
+
+async def admin_hard_delete_team(team_id: int) -> bool:
+    """
+    Permanently delete a team and cascade deletes to members, invites, and queue.
+    """
+    res = await get_pool().execute("DELETE FROM teams WHERE id = $1", team_id)
+    return not res.endswith(" 0")
+

@@ -268,6 +268,20 @@ get_queued_team(team_id, queue_type=None) — check if a team is in a queue
 get_team_queues(team_id)                  — fetch all active queue rows for a team
 ```
 
+### Admin Management
+```
+search_teams(query, limit=25)             — autocomplete search teams by ID, name, or tag
+get_team_by_identifier(identifier)        — resolve team by ID, name, or tag
+admin_update_player_ign(discord_id, ign)  — update player IGN & captain IGN
+admin_update_player_elo(discord_id, elo)  — update player ELO rating
+admin_reset_player_stats(discord_id)      — reset player combat statistics
+admin_reset_player_status(discord_id)     — reset player status to IDLE and clear cooldowns
+admin_delete_player(discord_id)           — safely unregister/delete player record
+admin_force_add_team_member(team_id, discord_id, role)
+                                          — force-assign player to team roster
+admin_hard_delete_team(team_id)           — permanently delete team and cascaded rows
+```
+
 ### Bot Config
 ```
 get_config(key)          — returns value string or None

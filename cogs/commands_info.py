@@ -111,6 +111,18 @@ def _build_page_2_embed() -> discord.Embed:
         inline=False,
     )
 
+    embed.add_field(
+        name="Team Matchmaking Queue",
+        value=(
+            "Use the interactive buttons on the persistent matchmaking panel in the queue channel:\n"
+            "• `[Join Regional Queue]` — Queue for teams in your local region.\n"
+            "• `[Join Global Queue]` — Queue for teams across all regions worldwide.\n"
+            "• `[Leave Queue]` — Selectively leave regional, global, or both queues.\n"
+            "*(Captains can enter both Regional & Global queues simultaneously)*"
+        ),
+        inline=False,
+    )
+
     embed.set_footer(text="Vega Scrims — Page 2 of 3 • Use buttons below to switch categories")
     return embed
 
