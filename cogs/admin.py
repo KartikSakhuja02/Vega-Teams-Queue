@@ -468,15 +468,31 @@ class AdminCog(commands.Cog, name="Admin"):
         t1_score = result.team1_score or 0
         t2_score = result.team2_score or 0
 
-        # Sleek Valorant-style embed matching reference
+        # Outcome summary & Theme color
+        if t1_score > t2_score:
+            outcome = "🟢 Team 1 Victory"
+            sidebar_color = discord.Colour.from_rgb(46, 204, 113)
+        elif t2_score > t1_score:
+            outcome = "🔴 Team 2 Victory"
+            sidebar_color = discord.Colour.from_rgb(235, 66, 85)
+        else:
+            outcome = "🤝 Match Draw"
+            sidebar_color = discord.Colour.gold()
+
+        meta_parts = []
+        if result.duration and result.duration != "Unknown":
+            meta_parts.append(f"⏱️ {result.duration}")
+        if result.match_date and result.match_date != "Unknown":
+            meta_parts.append(f"📅 {result.match_date}")
+        meta_str = f" • {' • '.join(meta_parts)}" if meta_parts else ""
+
         embed = discord.Embed(
             title=f"Match Results — {map_name}",
             description=(
-                f"**Score**\n"
-                f"Team 1 [{t1_score}]\n"
-                f"Team 2 [{t2_score}]"
+                f"**Score:** 🟢 Team 1 **[{t1_score}]** — 🔴 Team 2 **[{t2_score}]**\n"
+                f"**Outcome:** {outcome}{meta_str}"
             ),
-            colour=discord.Colour.from_rgb(235, 66, 85),
+            colour=sidebar_color,
         )
 
         def _fmt_player_list(players: list[PlayerRowStats]) -> str:
@@ -486,42 +502,40 @@ class AdminCog(commands.Cog, name="Admin"):
             lines = []
             for p in players:
                 ign = p.ign or "Unknown"
-                crown = "👑 " if p.is_mvp else ""
-                lines.append(f"{crown}{ign}")
+                mvp_badge = ""
+                if p.mvp_type == "Match MVP" or (p.is_mvp and "match" in str(p.mvp_type).lower()):
+                    mvp_badge = " 👑 `Match MVP`"
+                elif p.mvp_type == "Team MVP" or p.is_mvp:
+                    mvp_badge = " ⭐ `Team MVP`"
 
-                # Format stat pill matching reference: [K/D/A]  ACS  FB  DMG
-                parts = [f"[{p.kills}/{p.deaths}/{p.assists}]"]
+                lines.append(f"**{ign}**{mvp_badge}")
+
+                # Format clean, informative pills: `16/11/4 KDA` • `285 ACS` • `2,400 DMG` • `3 FB`
+                parts = [f"`{p.kills}/{p.deaths}/{p.assists} KDA`"]
                 if p.acs > 0:
-                    parts.append(f"{p.acs} ACS")
-                if p.first_bloods > 0:
-                    parts.append(f"{p.first_bloods} FB")
+                    parts.append(f"`{p.acs} ACS`")
                 if p.damage > 0:
-                    parts.append(f"{p.damage:,} DMG")
+                    parts.append(f"`{p.damage:,} DMG`")
+                if p.first_bloods > 0:
+                    parts.append(f"`{p.first_bloods} FB`")
                 if p.plants > 0:
-                    parts.append(f"{p.plants} PL")
+                    parts.append(f"`{p.plants} PL`")
                 if p.defuses > 0:
-                    parts.append(f"{p.defuses} DF")
+                    parts.append(f"`{p.defuses} DF`")
 
-                pill = "  ".join(parts)
-                lines.append(f"└ `{pill}`")
+                pill_row = " • ".join(parts)
+                lines.append(f"└ {pill_row}")
             return "\n".join(lines)[:1024]
 
-        embed.add_field(
-            name="Team 1",
-            value=_fmt_player_list(result.team1_players),
-            inline=False,
-        )
+        t1_header = f"🟢 Team 1 — {t1_score} Rounds" + (" 🏆" if t1_score > t2_score else "")
+        t2_header = f"🔴 Team 2 — {t2_score} Rounds" + (" 🏆" if t2_score > t1_score else "")
 
-        embed.add_field(
-            name="Team 2",
-            value=_fmt_player_list(result.team2_players),
-            inline=False,
-        )
+        embed.add_field(name=t1_header, value=_fmt_player_list(result.team1_players), inline=False)
+        embed.add_field(name=t2_header, value=_fmt_player_list(result.team2_players), inline=False)
 
-        footer_parts = ["Vega Scrims", map_name]
-        if result.duration and result.duration != "Unknown":
-            footer_parts.append(result.duration)
-        embed.set_footer(text=" • ".join(footer_parts))
+        embed.set_footer(
+            text="ACS: Combat Score • KDA: Kills/Deaths/Assists • DMG: Damage • FB: First Bloods • PL/DF: Plants/Defuses"
+        )
         embed.set_thumbnail(url=image.url)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
