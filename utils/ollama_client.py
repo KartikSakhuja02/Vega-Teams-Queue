@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ import time
 from typing import Optional
 
 import aiohttp
+from PIL import Image
 
 from utils.ocr.models import MatchOCRResult, PlayerRowStats
 
@@ -41,6 +43,7 @@ _BASE_URL   = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 _MODEL      = os.getenv("OLLAMA_MODEL",    "qwen2.5vl:3b")
 _TIMEOUT    = int(os.getenv("OLLAMA_TIMEOUT",    "180"))
 _MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "2048"))
+_NUM_CTX    = int(os.getenv("OLLAMA_NUM_CTX",    "8192"))
 
 # GPU concurrency guard: RTX 2050 / 4 GB VRAM → 1 vision inference at a time.
 inference_semaphore = asyncio.Semaphore(1)
@@ -146,8 +149,27 @@ async def check_connection() -> tuple[bool, str]:
         return False, f"Ollama check failed: {exc}"
 
 
+def _prepare_image(image_bytes: bytes, max_dim: int = 1920) -> bytes:
+    """Resize huge screenshots to max 1080p equivalent to keep token count fast and within context."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            w, h = img.size
+            if max(w, h) > max_dim:
+                ratio = max_dim / max(w, h)
+                new_size = (int(w * ratio), int(h * ratio))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                out = io.BytesIO()
+                fmt = img.format if img.format in ("PNG", "JPEG", "WEBP") else "JPEG"
+                img.save(out, format=fmt, quality=95)
+                return out.getvalue()
+    except Exception as exc:
+        log.debug("Image resize error (ignored): %s", exc)
+    return image_bytes
+
+
 async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = False) -> str:
     """Low-level: send image+prompt to Ollama, return raw text content."""
+    image_bytes = _prepare_image(image_bytes)
     image_b64 = base64.b64encode(image_bytes).decode()
 
     payload: dict = {
@@ -161,6 +183,7 @@ async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = Fals
         ],
         "stream": False,
         "options": {
+            "num_ctx": _NUM_CTX,
             "num_predict": _MAX_TOKENS,
             "temperature": 0.05,
         },
