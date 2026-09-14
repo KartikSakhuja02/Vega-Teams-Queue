@@ -24,3 +24,8 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+ test_bedrock.py
+diagnose_bedrock.py
+check_models.py
+list_bedrock_models.py

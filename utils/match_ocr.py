@@ -4,9 +4,9 @@ utils/match_ocr.py
 Public entry point for the Discord bot.
 
 Priority chain (first available engine wins):
-  1. Local Ollama (gemma3:4b) — if OLLAMA_BASE_URL is set and reachable
-  2. OpenRouter VLM           — if OPENROUTER_API_KEY_2 is set
-  3. Local Tesseract          — always available as last resort
+  1. Local Ollama (qwen2.5vl:3b) — if OLLAMA_BASE_URL is set and reachable
+  2. OpenRouter VLM             — if OPENROUTER_API_KEY_2 is set
+  3. Local Tesseract            — always available as last resort
 
 The cogs only call process_match_screenshot() and get back a MatchOCRResult.
 
@@ -67,7 +67,7 @@ async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
     """
     loop = asyncio.get_running_loop()
 
-    # ── 1. Local Ollama (gemma3:4b — free, no rate limits) ───────────────────
+    # ── 1. Local Ollama (qwen2.5vl:3b — free, no rate limits) ─────────────────
     if _ollama_available():
         try:
             from utils.ollama_client import extract_scoreboard as ollama_extract

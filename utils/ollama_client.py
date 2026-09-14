@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 
 # ── Config (read once at import — changes require bot restart) ────────────────
 _BASE_URL   = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-_MODEL      = os.getenv("OLLAMA_MODEL",    "gemma3:4b")
+_MODEL      = os.getenv("OLLAMA_MODEL",    "qwen2.5vl:3b")
 _TIMEOUT    = int(os.getenv("OLLAMA_TIMEOUT",    "180"))
 _MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "2048"))
 
@@ -146,11 +146,11 @@ async def check_connection() -> tuple[bool, str]:
         return False, f"Ollama check failed: {exc}"
 
 
-async def _call_ollama(image_bytes: bytes, prompt: str) -> str:
+async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = False) -> str:
     """Low-level: send image+prompt to Ollama, return raw text content."""
     image_b64 = base64.b64encode(image_bytes).decode()
 
-    payload = {
+    payload: dict = {
         "model": _MODEL,
         "messages": [
             {
@@ -165,6 +165,8 @@ async def _call_ollama(image_bytes: bytes, prompt: str) -> str:
             "temperature": 0.05,
         },
     }
+    if json_format:
+        payload["format"] = "json"
 
     timeout = aiohttp.ClientTimeout(total=_TIMEOUT)
 
@@ -312,7 +314,7 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
         raise RuntimeError("OLLAMA_BASE_URL / OLLAMA_MODEL not configured")
 
     t0 = time.monotonic()
-    raw_text = await _call_ollama(image_bytes, _SCOREBOARD_PROMPT)
+    raw_text = await _call_ollama(image_bytes, _SCOREBOARD_PROMPT, json_format=True)
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
     log.debug("Ollama scoreboard raw (first 400): %s", raw_text[:400])
