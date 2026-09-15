@@ -203,7 +203,8 @@ async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = Fals
             "options": {
                 "num_ctx": _NUM_CTX,
                 "num_predict": _MAX_TOKENS,
-                "temperature": 0.05,
+                "temperature": 0.15,
+                "repeat_penalty": 1.1,
             },
         }
         if fmt_json:
@@ -225,12 +226,13 @@ async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = Fals
 
             msg = data.get("message") or {}
             content = msg.get("content", "").strip()
-            if content:
+            # Ensure content is not empty and not a stuck repetition loop (e.g. "@@@@@@@@")
+            if content and not re.match(r"^[@\s\W_]{10,}$", content):
                 return content
 
-            last_error = f"done={data.get('done')}, done_reason={data.get('done_reason')}"
+            last_error = f"done={data.get('done')}, done_reason={data.get('done_reason')}, raw_len={len(content)}"
             log.warning(
-                "Ollama returned empty response (%s) on attempt %d. Retrying in 1.5s...",
+                "Ollama returned invalid/empty response (%s) on attempt %d. Retrying in 1.5s...",
                 last_error,
                 idx + 1,
             )
