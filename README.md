@@ -91,6 +91,25 @@ Configured via a `.env` file (see `.env.example`):
 | `/kick player:<@user>` | Kicks a player from your team. Only Captains or Managers can use this. The kicked player is notified via DM, and their Discord role is automatically removed. |
 | `/leave` | Leaves your current team. Captains cannot use this command; they must use `/disband` instead. The team leadership (Captain + Managers) will receive a DM notification that you have left, and your Discord role is automatically removed. |
 
+### Team Matchmaking & Scrims
+
+| Command | Description |
+|---|---|
+| `/post_team_queue` | Refreshes or posts the persistent Team Matchmaking panel in the configured queue channel (Admin only). |
+| `/matchmake_teams` | Evaluates active queues and immediately triggers matchmaking and private scrim channel creation for queued pairs (Admin only). |
+| `/close_scrim` | Closes and deletes the current scrim match channel (Staff or Captains after cancellation). |
+
+- **Multi-Queue Participation**: Teams can queue in their Regional Queue, the Global Queue, or **both simultaneously**.
+- **Automated Matchmaking**: As soon as 2 teams are queued (either in the same region under Regional or in Global), both teams are automatically dequeued from all queues and a private text channel (`#scrim-tag1-vs-tag2`) is generated.
+- **Private Scrim Channel**:
+  - Accessible only to Team 1 members, Team 2 members, and Server Staff (`TEAM_MOD_ROLE_IDS`).
+  - Created under `SCRIM_CATEGORY_ID` (or the queue channel's category).
+- **Persistent Negotiation UI**:
+  - **Propose Match Time**: Opens a modal for either team captain or roster player to propose a match schedule.
+  - **Accept Time**: Opposing team accepts the proposed schedule, transitioning the match status to `CONFIRMED`. Self-acceptance is prevented.
+  - **Cancel Match**: Either captain or staff member can cancel the match negotiation.
+  - Strictly **zero emojis** in all panel titles, descriptions, status messages, and buttons.
+
 ---
 
 ## Team Setup Flow

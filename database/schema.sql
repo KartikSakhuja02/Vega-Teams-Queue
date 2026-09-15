@@ -263,6 +263,32 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- scrim_matches
+-- ---------------------------------------------------------------------------
+-- Stores matched scrims, private negotiation channels, and agreed timings.
+
+CREATE TABLE IF NOT EXISTS scrim_matches (
+    id                   BIGSERIAL    PRIMARY KEY,
+    team1_id             BIGINT       NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
+    team2_id             BIGINT       NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
+    channel_id           BIGINT       NOT NULL UNIQUE,
+    panel_message_id     BIGINT,
+    match_type           TEXT         NOT NULL, -- 'REGIONAL' or 'GLOBAL'
+    region               region_enum  NOT NULL,
+    status               TEXT         NOT NULL DEFAULT 'NEGOTIATING', -- 'NEGOTIATING', 'CONFIRMED', 'CANCELLED', 'COMPLETED'
+    proposed_time        TEXT,
+    proposed_by_team_id  BIGINT       REFERENCES teams (id) ON DELETE SET NULL,
+    proposed_by_user_id  BIGINT,
+    confirmed_by_user_id BIGINT,
+    confirmed_at         TIMESTAMPTZ,
+    created_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_scrim_matches_channel ON scrim_matches (channel_id);
+CREATE INDEX IF NOT EXISTS idx_scrim_matches_teams ON scrim_matches (team1_id, team2_id);
+CREATE INDEX IF NOT EXISTS idx_scrim_matches_status ON scrim_matches (status);
+
 
 
 

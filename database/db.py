@@ -1595,3 +1595,147 @@ async def admin_hard_delete_team(team_id: int) -> bool:
     res = await get_pool().execute("DELETE FROM teams WHERE id = $1", team_id)
     return not res.endswith(" 0")
 
+
+# =============================================================================
+# Scrim Match Helpers
+# =============================================================================
+
+async def create_scrim_match(
+    team1_id: int,
+    team2_id: int,
+    channel_id: int,
+    match_type: str,
+    region: str,
+) -> Optional[dict]:
+    """Create a new scrim match entry."""
+    row = await get_pool().fetchrow(
+        """
+        INSERT INTO scrim_matches (team1_id, team2_id, channel_id, match_type, region, status, created_at)
+        VALUES ($1, $2, $3, $4, $5::region_enum, 'NEGOTIATING', NOW())
+        RETURNING *
+        """,
+        team1_id,
+        team2_id,
+        channel_id,
+        match_type,
+        region,
+    )
+    return dict(row) if row else None
+
+
+async def update_scrim_match_panel(match_id: int, panel_message_id: int) -> bool:
+    """Save the panel message ID for the scrim negotiation embed."""
+    res = await get_pool().execute(
+        "UPDATE scrim_matches SET panel_message_id = $1 WHERE id = $2",
+        panel_message_id,
+        match_id,
+    )
+    return not res.endswith(" 0")
+
+
+async def get_scrim_match_by_channel(channel_id: int) -> Optional[dict]:
+    """Fetch scrim match details by Discord channel ID, joined with both teams."""
+    row = await get_pool().fetchrow(
+        """
+        SELECT
+            sm.*,
+            t1.team_name as team1_name,
+            t1.team_tag as team1_tag,
+            t1.captain_discord_id as team1_captain_id,
+            t1.captain_ign as team1_captain_ign,
+            t2.team_name as team2_name,
+            t2.team_tag as team2_tag,
+            t2.captain_discord_id as team2_captain_id,
+            t2.captain_ign as team2_captain_ign
+        FROM scrim_matches sm
+        JOIN teams t1 ON sm.team1_id = t1.id
+        JOIN teams t2 ON sm.team2_id = t2.id
+        WHERE sm.channel_id = $1
+        """,
+        channel_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_scrim_match_by_id(match_id: int) -> Optional[dict]:
+    """Fetch scrim match details by primary ID, joined with both teams."""
+    row = await get_pool().fetchrow(
+        """
+        SELECT
+            sm.*,
+            t1.team_name as team1_name,
+            t1.team_tag as team1_tag,
+            t1.captain_discord_id as team1_captain_id,
+            t1.captain_ign as team1_captain_ign,
+            t2.team_name as team2_name,
+            t2.team_tag as team2_tag,
+            t2.captain_discord_id as team2_captain_id,
+            t2.captain_ign as team2_captain_ign
+        FROM scrim_matches sm
+        JOIN teams t1 ON sm.team1_id = t1.id
+        JOIN teams t2 ON sm.team2_id = t2.id
+        WHERE sm.id = $1
+        """,
+        match_id,
+    )
+    return dict(row) if row else None
+
+
+async def propose_scrim_time(
+    match_id: int,
+    proposed_time: str,
+    team_id: int,
+    user_id: int,
+) -> Optional[dict]:
+    """Set a newly proposed scrim time."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE scrim_matches
+        SET proposed_time = $1,
+            proposed_by_team_id = $2,
+            proposed_by_user_id = $3,
+            confirmed_by_user_id = NULL,
+            confirmed_at = NULL,
+            status = 'NEGOTIATING'
+        WHERE id = $4
+        RETURNING *
+        """,
+        proposed_time,
+        team_id,
+        user_id,
+        match_id,
+    )
+    return dict(row) if row else None
+
+
+async def accept_scrim_time(match_id: int, user_id: int) -> Optional[dict]:
+    """Accept the proposed scrim time and confirm the match."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE scrim_matches
+        SET status = 'CONFIRMED',
+            confirmed_by_user_id = $1,
+            confirmed_at = NOW()
+        WHERE id = $2 AND proposed_time IS NOT NULL
+        RETURNING *
+        """,
+        user_id,
+        match_id,
+    )
+    return dict(row) if row else None
+
+
+async def cancel_scrim_match(match_id: int) -> Optional[dict]:
+    """Cancel a scrim match."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE scrim_matches
+        SET status = 'CANCELLED'
+        WHERE id = $1
+        RETURNING *
+        """,
+        match_id,
+    )
+    return dict(row) if row else None
+
+
