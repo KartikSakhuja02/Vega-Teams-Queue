@@ -43,7 +43,7 @@ _BASE_URL   = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 _MODEL      = os.getenv("OLLAMA_MODEL",    "qwen2.5vl:3b")
 _TIMEOUT    = int(os.getenv("OLLAMA_TIMEOUT",    "180"))
 _MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "2048"))
-_NUM_CTX    = int(os.getenv("OLLAMA_NUM_CTX",    "4096"))
+_NUM_CTX    = int(os.getenv("OLLAMA_NUM_CTX",    "8192"))
 
 # GPU concurrency guard: RTX 2050 / 4 GB VRAM → 1 vision inference at a time.
 inference_semaphore = asyncio.Semaphore(1)
@@ -57,7 +57,6 @@ DEFAULT_PROMPT = (
     "Describe what you see and identify important text, errors, warnings, "
     "UI elements, or other relevant information."
 )
-
 
 # Headers sent with every request — required for ngrok tunnels
 _HEADERS = {
@@ -175,80 +174,61 @@ def _prepare_image(image_bytes: bytes, max_dim: int = 1920) -> bytes:
 
 
 async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = False) -> str:
-    """Low-level: send image+prompt to Ollama, return raw text content with automatic fallback."""
+    """Low-level: send image+prompt to Ollama, return raw text content."""
     image_bytes = _prepare_image(image_bytes)
     image_b64 = base64.b64encode(image_bytes).decode()
 
-    # If json_format requested, try with format="json" first.
-    # If Ollama grammar parser or cold start yields empty output, retry without format="json".
-    attempts = [json_format]
+    payload: dict = {
+        "model": _MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+                "images": [image_b64],
+            }
+        ],
+        "stream": False,
+        "options": {
+            "num_ctx": _NUM_CTX,
+            "num_predict": _MAX_TOKENS,
+            "temperature": 0.05,
+        },
+    }
     if json_format:
-        attempts.append(False)
-    else:
-        attempts.append(False)
+        payload["format"] = "json"
 
-    last_error = ""
-    for idx, fmt_json in enumerate(attempts):
-        payload: dict = {
-            "model": _MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                    "images": [image_b64],
-                }
-            ],
-            "stream": False,
-            "keep_alive": "30m",
-            "options": {
-                "num_ctx": _NUM_CTX,
-                "num_predict": _MAX_TOKENS,
-                "temperature": 0.15,
-                "repeat_penalty": 1.1,
-            },
-        }
-        if fmt_json:
-            payload["format"] = "json"
+    timeout = aiohttp.ClientTimeout(total=_TIMEOUT)
 
-        timeout = aiohttp.ClientTimeout(total=_TIMEOUT)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout, headers=_HEADERS) as session:
-                async with session.post(
-                    f"{_BASE_URL}/api/chat",
-                    json=payload,
-                ) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        raise RuntimeError(
-                            f"Ollama returned HTTP {resp.status}: {body[:300]}"
-                        )
-                    data = await resp.json()
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=_HEADERS) as session:
+            async with session.post(
+                f"{_BASE_URL}/api/chat",
+                json=payload,
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Ollama returned HTTP {resp.status}: {body[:300]}"
+                    )
+                data = await resp.json()
 
-            msg = data.get("message") or {}
-            content = msg.get("content", "").strip()
-            # Ensure content is not empty and not a stuck repetition loop (e.g. "@@@@@@@@")
-            if content and not re.match(r"^[@\s\W_]{10,}$", content):
-                return content
+    except aiohttp.ClientConnectorError as exc:
+        raise RuntimeError(
+            f"Cannot connect to Ollama at {_BASE_URL}. Is Ollama running?"
+        ) from exc
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            f"Ollama timed out after {_TIMEOUT}s."
+        ) from exc
 
-            last_error = f"done={data.get('done')}, done_reason={data.get('done_reason')}, raw_len={len(content)}"
-            log.warning(
-                "Ollama returned invalid/empty response (%s) on attempt %d. Retrying in 1.5s...",
-                last_error,
-                idx + 1,
-            )
-            await asyncio.sleep(1.5)
-
-        except (aiohttp.ClientConnectorError, asyncio.TimeoutError) as exc:
-            raise exc
-        except Exception as exc:
-            last_error = str(exc)
-            log.warning("Ollama attempt %d encountered error: %s. Retrying...", idx + 1, exc)
-            await asyncio.sleep(1.5)
-
-    raise RuntimeError(
-        f"Ollama returned empty response after {len(attempts)} attempts. "
-        f"Last error: {last_error}"
-    )
+    msg = data.get("message") or {}
+    content = msg.get("content", "").strip()
+    if not content:
+        raise RuntimeError(
+            f"Ollama returned empty response. "
+            f"done={data.get('done')}, done_reason={data.get('done_reason')}"
+        )
+    return content
 
 
 async def analyze_image(image_bytes: bytes, prompt: str = DEFAULT_PROMPT) -> str:
