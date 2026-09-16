@@ -559,15 +559,19 @@ class RegistrationCog(commands.Cog, name="Registration"):
 
     def is_channel_allowed(self, channel_id: int) -> bool:
         """Check if an interaction channel is allowed for registration."""
-        if not self._active_registration_channel_ids and not REGISTRATION_CHANNEL_IDS:
+        allowed: set[int] = set()
+        if _SERVER_B_REG_ID:
+            allowed.add(_SERVER_B_REG_ID)
+        if REGISTRATION_CHANNEL_ID:
+            allowed.add(REGISTRATION_CHANNEL_ID)
+        for cid in REGISTRATION_CHANNEL_IDS:
+            allowed.add(cid)
+        if not allowed:
             return True
-        return (
-            channel_id in self._active_registration_channel_ids
-            or channel_id in REGISTRATION_CHANNEL_IDS
-        )
+        return channel_id in allowed
 
     # ------------------------------------------------------------------
-    # Lifecycle — post/refresh the persistent info card
+    # Lifecycle — post/refresh the persistent info card in Server B only
     # ------------------------------------------------------------------
 
     @commands.Cog.listener()
@@ -579,90 +583,55 @@ class RegistrationCog(commands.Cog, name="Registration"):
 
     async def _ensure_info_message(self) -> None:
         """
-        Post the registration info card to all configured registration channels,
-        or edit the existing one if we already sent it in a previous session.
+        Post/refresh the registration info card in Server B's registration channel only.
+        Does NOT post to Server A.
         """
-        channel_ids: list[int] = list(REGISTRATION_CHANNEL_IDS)
-        solo_queue_ch_id = int(os.environ.get("SOLO_QUEUE_CHANNEL_ID", "0") or "0")
-
-        # Auto-detect registration channel in Server B / connected guilds if not explicitly configured
-        for guild in self.bot.guilds:
-            for ch in guild.text_channels:
-                if ch.id not in channel_ids and any(
-                    kw in ch.name.lower() for kw in ("register", "registration", "player-registration")
-                ):
-                    channel_ids.append(ch.id)
-                    log.info(
-                        "Auto-detected registration channel %d (#%s) in guild '%s' (%d).",
-                        ch.id, ch.name, guild.name, guild.id,
-                    )
-
-        self._active_registration_channel_ids = set(channel_ids)
-
-        if not channel_ids:
-            log.warning(
-                "No registration channels configured or detected — skipping info message."
-            )
+        if not _SERVER_B_REG_ID:
+            log.info("SERVER_B_REGISTRATION_CHANNEL_ID is not configured — skipping registration UI posting.")
             return
 
-        for channel_id in channel_ids:
-            channel = self.bot.get_channel(channel_id)
-            if channel is None:
-                try:
-                    channel = await self.bot.fetch_channel(channel_id)
-                except Exception as e:
-                    log.error(
-                        "Could not fetch registration channel %d: %s", channel_id, e
-                    )
-                    continue
-
-            if not isinstance(channel, discord.TextChannel):
-                log.error(
-                    "Channel %d not found or is not a TextChannel.", channel_id
-                )
-                continue
-
-            # Determine whether this is Server B (or another non-primary server)
-            is_server_b = (
-                channel_id == _SERVER_B_REG_ID
-                or (solo_queue_ch_id and channel.guild.get_channel(solo_queue_ch_id) is not None)
-                or (channel_id != REGISTRATION_CHANNEL_ID and channel_id != 0)
-            )
-            embed = _build_server_b_info_embed() if is_server_b else _build_info_embed()
-
-            config_key = f"registration_message_id_{channel_id}"
-            stored_id = await db.get_config(config_key)
-            if not stored_id and channel_id == REGISTRATION_CHANNEL_ID:
-                stored_id = await db.get_config("registration_message_id")
-
-            if stored_id:
-                try:
-                    existing_msg = await channel.fetch_message(int(stored_id))
-                    # Edit and refresh embed. Pass content=None and attachments=[] to clear any old links/files
-                    await existing_msg.edit(content=None, embed=embed, view=RegistrationView(self), attachments=[])
-                    log.info("Registration info message refreshed in channel %d (ID: %s).", channel_id, stored_id)
-                    continue
-                except discord.NotFound:
-                    log.warning(
-                        "Stored message ID %s was deleted in channel %d — sending a new one.", stored_id, channel_id
-                    )
-                except Exception as e:
-                    log.warning("Could not refresh registration message %s in channel %d: %s", stored_id, channel_id, e)
-
-            # Send a fresh message and pin it.
+        channel = self.bot.get_channel(_SERVER_B_REG_ID)
+        if channel is None:
             try:
-                msg = await channel.send(embed=embed, view=RegistrationView(self))
-                try:
-                    await msg.pin()
-                except discord.Forbidden:
-                    log.warning("Missing Manage Messages permission — could not pin info message in channel %d.", channel_id)
-
-                await db.set_config(config_key, str(msg.id))
-                if channel_id == REGISTRATION_CHANNEL_ID:
-                    await db.set_config("registration_message_id", str(msg.id))
-                log.info("Registration info message sent and pinned in channel %d (ID: %d).", channel_id, msg.id)
+                channel = await self.bot.fetch_channel(_SERVER_B_REG_ID)
             except Exception as e:
-                log.error("Failed to send registration info message in channel %d: %s", channel_id, e)
+                log.error("Could not fetch Server B registration channel %d: %s", _SERVER_B_REG_ID, e)
+                return
+
+        if not isinstance(channel, discord.TextChannel):
+            log.error("Server B registration channel %d is not a TextChannel.", _SERVER_B_REG_ID)
+            return
+
+        embed = _build_server_b_info_embed()
+        config_key = f"registration_message_id_{_SERVER_B_REG_ID}"
+        stored_id = await db.get_config(config_key)
+
+        if stored_id:
+            try:
+                existing_msg = await channel.fetch_message(int(stored_id))
+                await existing_msg.edit(content=None, embed=embed, view=RegistrationView(self), attachments=[])
+                log.info("Server B registration UI refreshed in channel %d (ID: %s).", _SERVER_B_REG_ID, stored_id)
+                return
+            except discord.NotFound:
+                log.warning(
+                    "Stored registration message ID %s in channel %d was deleted — sending a new one.",
+                    stored_id, _SERVER_B_REG_ID,
+                )
+            except Exception as e:
+                log.warning("Could not refresh registration message %s in channel %d: %s", stored_id, _SERVER_B_REG_ID, e)
+
+        # Send fresh message and pin it in Server B
+        try:
+            msg = await channel.send(embed=embed, view=RegistrationView(self))
+            try:
+                await msg.pin()
+            except discord.Forbidden:
+                log.warning("Missing Manage Messages permission — could not pin info message in channel %d.", _SERVER_B_REG_ID)
+
+            await db.set_config(config_key, str(msg.id))
+            log.info("Server B registration UI sent and pinned in channel %d (ID: %d).", _SERVER_B_REG_ID, msg.id)
+        except Exception as e:
+            log.error("Failed to send registration info message in channel %d: %s", _SERVER_B_REG_ID, e)
 
     # ------------------------------------------------------------------
     # /register command
