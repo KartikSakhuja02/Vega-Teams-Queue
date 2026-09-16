@@ -234,8 +234,9 @@ async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = Fals
 async def _call_ollama_generate(
     image_bytes: bytes,
     prompt: str,
-    temperature: float = 0.1,
+    temperature: float = 0.0,
     num_predict: int = 48,
+    stop: Optional[list[str]] = None,
 ) -> str:
     """Send image+prompt to Ollama /api/generate for fast direct vision completion."""
     image_bytes = _prepare_image(image_bytes, max_dim=1280)
@@ -249,6 +250,9 @@ async def _call_ollama_generate(
             "num_ctx": max(_NUM_CTX, 8192),
             "temperature": temperature,
             "num_predict": num_predict,
+            "repeat_penalty": 1.25,
+            "repeat_last_n": 64,
+            "stop": stop or ["\n", "\r", "@@", "----"],
         },
     }
     timeout = aiohttp.ClientTimeout(total=_TIMEOUT)
@@ -531,10 +535,19 @@ def _clean_profile_ign(raw: str) -> Optional[str]:
         return None
     first_line = raw.strip().split("\n")[0].strip()
     cleaned = first_line.strip("`'\" \t\r")
-    cleaned = re.sub(r"^[♀♂·\s>]+", "", cleaned)
-    cleaned = re.sub(r"[♀♂·\s<]+$", "", cleaned).strip()
+    cleaned = re.sub(r"^[♀♂·\s>@#*~_=-]+", "", cleaned)
+    cleaned = re.sub(r"[♀♂·\s<@#*~_=-]+$", "", cleaned).strip()
     if "#" in cleaned:
         cleaned = cleaned.split("#")[0].strip()
+
+    # Reject repetitive hallucination loops (e.g. @@@@@@@@@, aaaaaaaa, ........)
+    if re.search(r"(.)\1{3,}", cleaned):
+        return None
+
+    # Must contain at least one valid alphanumeric character or CJK ideograph
+    if not re.search(r"[a-zA-Z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", cleaned):
+        return None
+
     # Reject pure numbers <= 3 digits (e.g. avatar level badges 144, 464, 51, etc.)
     if cleaned.isdigit() and len(cleaned) <= 3:
         return None
@@ -584,7 +597,13 @@ async def extract_profile_ign(image_bytes: bytes) -> Optional[str]:
             "Output ONLY the username/IGN and nothing else."
         )
 
-        raw_text = await _call_ollama_generate(cropped_bytes, prompt, temperature=0.1, num_predict=32)
+        raw_text = await _call_ollama_generate(
+            cropped_bytes,
+            prompt,
+            temperature=0.0,
+            num_predict=32,
+            stop=["\n", "\r", "@@", "----"],
+        )
         log.info("Profile IGN OCR raw output: %s", repr(raw_text))
 
         ign = _clean_profile_ign(raw_text)
@@ -593,7 +612,13 @@ async def extract_profile_ign(image_bytes: bytes) -> Optional[str]:
 
         # Fallback: line-by-line transcription
         fallback_prompt = "Transcribe all text lines in this image."
-        raw_lines = await _call_ollama_generate(cropped_bytes, fallback_prompt, temperature=0.1, num_predict=48)
+        raw_lines = await _call_ollama_generate(
+            cropped_bytes,
+            fallback_prompt,
+            temperature=0.0,
+            num_predict=48,
+            stop=["\n\n", "@@"],
+        )
         return _parse_ign_from_lines(raw_lines)
 
     try:

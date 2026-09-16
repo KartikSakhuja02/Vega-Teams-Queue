@@ -41,8 +41,7 @@ import time
 import traceback
 from pathlib import Path
 from typing import Optional
-
-import runpod
+#import runpod
 
 from config import CFG
 from preprocessing import PreprocessingError, prepare_image, detect_scoreboard_crop, resize_for_model

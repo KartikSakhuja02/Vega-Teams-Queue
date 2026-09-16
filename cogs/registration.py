@@ -505,8 +505,10 @@ class RegistrationView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
         if not self.cog.is_channel_allowed(interaction.channel_id):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "This form is only available in the designated registration channel.",
                 ephemeral=True,
             )
@@ -517,7 +519,7 @@ class RegistrationView(discord.ui.View):
 
         if existing and existing["is_active"]:
             registered_at = format_regional_time(existing["registered_at"], existing["region"])
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"You are already registered!\n\n"
                 f"IGN        : {existing['ign']}\n"
                 f"Region     : {existing['region']}\n"
@@ -552,11 +554,11 @@ class RegistrationView(discord.ui.View):
             )
             # new_ign / new_region are None — "Start fresh" will collect them
             view = ResumeOrFreshView(cog=self.cog, existing=existing)
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
             return
 
         # New user — normal registration flow
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Select your region to continue with registration.",
             view=RegistrationRegionView(self.cog),
             ephemeral=True,
