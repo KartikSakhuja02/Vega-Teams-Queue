@@ -17,7 +17,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import db
-from cogs.bot_logger import send_log, COL_SUCCESS, COL_DANGER
+from cogs.bot_logger import send_log, COL_DEFAULT, COL_SUCCESS, COL_DANGER, COL_WARNING
 
 log = logging.getLogger(__name__)
 

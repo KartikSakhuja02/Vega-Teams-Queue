@@ -191,10 +191,10 @@ def build_solo_queue_embed(queued_players: list[dict]) -> discord.Embed:
     """Construct an elevated, zero-emoji 10-man solo queue embed."""
     count = len(queued_players)
     embed = discord.Embed(
-        title="VEGA RANKED — 10-MAN SOLO QUEUE",
+        title="VEGA QUEUE",
         description=(
-            "> **Competitive Pick-Up Game (PUG)**\n"
-            "> Queue up solo. When 10 players arrive, a private match lobby is generated with Captain Selection, Player Draft, and Map Veto.\n\n"
+            "> **VEGA Queue\n"
+            "> JOIN QUEUE BY CLICKING ON \"JOIN QUEUE\" BUTTON BELOW\n\n"
             f"> **Lobby Status:** `[ {count} / 10 Players Waiting ]`"
         ),
         colour=EMBED_COLOUR,
