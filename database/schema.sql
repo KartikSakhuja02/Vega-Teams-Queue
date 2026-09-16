@@ -334,5 +334,24 @@ CREATE INDEX IF NOT EXISTS idx_solo_matches_channel ON solo_matches (channel_id)
 CREATE INDEX IF NOT EXISTS idx_solo_matches_status ON solo_matches (status);
 
 
+-- ---------------------------------------------------------------------------
+-- matchmaking_verifications (Server B: Verification Screenshots)
+-- ---------------------------------------------------------------------------
+-- Persistent state tracking for screenshot OCR, region selection, and staff approval.
 
+CREATE TABLE IF NOT EXISTS matchmaking_verifications (
+    orig_message_id   BIGINT PRIMARY KEY,
+    reply_message_id  BIGINT,
+    channel_id        BIGINT NOT NULL,
+    guild_id          BIGINT NOT NULL,
+    player_id         BIGINT NOT NULL,
+    player_name       TEXT NOT NULL,
+    ign               TEXT NOT NULL,
+    region            TEXT,
+    status            TEXT NOT NULL DEFAULT 'PENDING_REGION',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
+CREATE INDEX IF NOT EXISTS idx_mv_reply_msg ON matchmaking_verifications (reply_message_id);
+CREATE INDEX IF NOT EXISTS idx_mv_player ON matchmaking_verifications (player_id);
+CREATE INDEX IF NOT EXISTS idx_mv_status ON matchmaking_verifications (status);

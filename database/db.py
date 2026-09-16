@@ -53,6 +53,29 @@ async def _apply_schema() -> None:
             # Log the error but don't crash — tables may already exist from a prior run.
             log.warning("Schema auto-migration warning (usually safe to ignore): %s", exc)
 
+        try:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS matchmaking_verifications (
+                    orig_message_id   BIGINT PRIMARY KEY,
+                    reply_message_id  BIGINT,
+                    channel_id        BIGINT NOT NULL,
+                    guild_id          BIGINT NOT NULL,
+                    player_id         BIGINT NOT NULL,
+                    player_name       TEXT NOT NULL,
+                    ign               TEXT NOT NULL,
+                    region            TEXT,
+                    status            TEXT NOT NULL DEFAULT 'PENDING_REGION',
+                    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_mv_reply_msg ON matchmaking_verifications (reply_message_id);
+                CREATE INDEX IF NOT EXISTS idx_mv_player ON matchmaking_verifications (player_id);
+                CREATE INDEX IF NOT EXISTS idx_mv_status ON matchmaking_verifications (status);
+                """
+            )
+        except Exception as e:
+            log.warning("Could not ensure matchmaking_verifications table: %s", e)
+
 
 
 async def close_db() -> None:
@@ -2069,5 +2092,131 @@ async def cancel_solo_match(match_id: int) -> Optional[dict]:
         match_id,
     )
     return dict(row) if row else None
+
+
+# =============================================================================
+# Matchmaking Verification Helpers (Server B)
+# =============================================================================
+
+async def save_matchmaking_verification(
+    orig_message_id: int,
+    reply_message_id: int,
+    channel_id: int,
+    guild_id: int,
+    player_id: int,
+    player_name: str,
+    ign: str,
+    region: Optional[str] = None,
+    status: str = "PENDING_REGION",
+) -> dict:
+    """Insert or update a persistent verification session."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO matchmaking_verifications (
+            orig_message_id, reply_message_id, channel_id, guild_id,
+            player_id, player_name, ign, region, status
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (orig_message_id) DO UPDATE SET
+            reply_message_id = EXCLUDED.reply_message_id,
+            player_id        = EXCLUDED.player_id,
+            player_name      = EXCLUDED.player_name,
+            ign              = EXCLUDED.ign,
+            region           = EXCLUDED.region,
+            status           = EXCLUDED.status
+        RETURNING *
+        """,
+        orig_message_id,
+        reply_message_id,
+        channel_id,
+        guild_id,
+        player_id,
+        player_name,
+        ign,
+        region,
+        status,
+    )
+    return dict(row)
+
+
+async def get_matchmaking_verification(message_id: int) -> Optional[dict]:
+    """Lookup pending verification by either screenshot message ID or bot reply message ID."""
+    row = await get_pool().fetchrow(
+        """
+        SELECT * FROM matchmaking_verifications
+        WHERE orig_message_id = $1 OR reply_message_id = $1
+        LIMIT 1
+        """,
+        message_id,
+    )
+    return dict(row) if row else None
+
+
+async def update_matchmaking_verification_ign(
+    orig_message_id: int,
+    ign: str,
+    status: str = "PENDING_REGION",
+) -> Optional[dict]:
+    """Update the detected or edited IGN for a verification session."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE matchmaking_verifications
+        SET ign = $2, status = $3
+        WHERE orig_message_id = $1
+        RETURNING *
+        """,
+        orig_message_id,
+        ign,
+        status,
+    )
+    return dict(row) if row else None
+
+
+async def update_matchmaking_verification_region(
+    orig_message_id: int,
+    region: str,
+    status: str = "PENDING_APPROVAL",
+) -> Optional[dict]:
+    """Update the chosen region and transition status to pending moderator approval."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE matchmaking_verifications
+        SET region = $2, status = $3
+        WHERE orig_message_id = $1
+        RETURNING *
+        """,
+        orig_message_id,
+        region,
+        status,
+    )
+    return dict(row) if row else None
+
+
+async def approve_matchmaking_verification_atomic(message_id: int) -> Optional[dict]:
+    """
+    Atomically transition verification from PENDING_APPROVAL to APPROVED.
+    Guarantees only one moderator action succeeds across concurrent reactions.
+    """
+    row = await get_pool().fetchrow(
+        """
+        UPDATE matchmaking_verifications
+        SET status = 'APPROVED'
+        WHERE (orig_message_id = $1 OR reply_message_id = $1)
+          AND status = 'PENDING_APPROVAL'
+        RETURNING *
+        """,
+        message_id,
+    )
+    return dict(row) if row else None
+
+
+async def delete_matchmaking_verification(orig_message_id: int) -> None:
+    """Delete a verification session."""
+    await get_pool().execute(
+        "DELETE FROM matchmaking_verifications WHERE orig_message_id = $1",
+        orig_message_id,
+    )
+
 
 
