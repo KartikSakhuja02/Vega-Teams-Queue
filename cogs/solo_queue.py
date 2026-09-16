@@ -193,7 +193,7 @@ def build_solo_queue_embed(queued_players: list[dict]) -> discord.Embed:
     embed = discord.Embed(
         title="VEGA QUEUE",
         description=(
-            "> **VEGA Queue\n"
+            "> VEGA Queue\n"
             "> JOIN QUEUE BY CLICKING ON \"JOIN QUEUE\" BUTTON BELOW\n\n"
             f"> **Lobby Status:** `[ {count} / 10 Players Waiting ]`"
         ),
