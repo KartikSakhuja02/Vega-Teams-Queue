@@ -123,6 +123,22 @@ def _build_admin_commands_embed() -> discord.Embed:
     )
 
     embed.add_field(
+        name="🎮 10-Man Solo Queue & Templates",
+        value=(
+            "`/solo_config panel` — Interactive configuration UI for captain, draft, veto, and styling\n"
+            "`/solo_config view` — View all active 10-man solo queue template configurations\n"
+            "`/solo_config captain_mode mode:<template>` — Set captain selection (`HIGHEST_ELO`, `RANDOM`, `FIRST_JOINED`, `HIGHEST_WINRATE`)\n"
+            "`/solo_config draft_mode mode:<template>` — Set player draft (`SNAKE`, `ALTERNATING`, `AUTO_BALANCE`)\n"
+            "`/solo_config veto_mode mode:<template>` — Set map veto format (`ALTERNATING_BAN`, `BAN_BAN_PICK`, `RANDOM_MAP`, `CAPTAIN_PICK`)\n"
+            "`/solo_config theme [preset] [custom_hex]` — Set visual embed accent theme (`PURPLE`, `VALORANT_RED`, `CYBER_CYAN`, `GOLD`, `EMERALD`, or `#hex`)\n"
+            "`/solo_config map_pool maps:<comma_list>` — Set active competitive map pool\n"
+            "`/post_solo_queue` — Post or refresh persistent 10-man solo queue panel\n"
+            "`/cancel_solo_match` — Cancel active 10-man match lobby and release players"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
         name="🔍 Match OCR Testing & Staff Tools",
         value=(
             "`/test_ss_ocr image:<attachment>` — Test scoreboard OCR extraction on match screenshot\n"

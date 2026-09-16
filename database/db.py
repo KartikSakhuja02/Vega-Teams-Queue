@@ -101,6 +101,36 @@ async def set_config(key: str, value: str) -> None:
 # Player helpers
 # =============================================================================
 
+async def get_player_by_ign(ign: str, active_only: bool = True) -> Optional[dict]:
+    """
+    Fetch a player record by case-insensitive in-game name (trimmed).
+    If active_only is True, matches only is_active = TRUE rows.
+    """
+    clean_ign = (ign or "").strip()
+    if not clean_ign:
+        return None
+    if active_only:
+        row = await get_pool().fetchrow(
+            """
+            SELECT * FROM players
+            WHERE LOWER(TRIM(ign)) = LOWER(TRIM($1))
+              AND is_active = TRUE
+            LIMIT 1
+            """,
+            clean_ign,
+        )
+    else:
+        row = await get_pool().fetchrow(
+            """
+            SELECT * FROM players
+            WHERE LOWER(TRIM(ign)) = LOWER(TRIM($1))
+            LIMIT 1
+            """,
+            clean_ign,
+        )
+    return dict(row) if row else None
+
+
 async def register_player(
     discord_id: int,
     discord_username: str,
@@ -111,10 +141,30 @@ async def register_player(
     Insert a new player row.
 
     Returns a dict of the inserted row on success.
-    Returns None if the player is already registered (UNIQUE violation).
+    Returns None if the player is already registered or the IGN is already taken by an active player.
     """
+    clean_ign = (ign or "").strip()
+    pool = get_pool()
+
+    # Reject if an active player already holds this IGN
+    existing_ign = await pool.fetchrow(
+        """
+        SELECT discord_id FROM players
+        WHERE LOWER(TRIM(ign)) = LOWER(TRIM($1))
+          AND is_active = TRUE
+        LIMIT 1
+        """,
+        clean_ign,
+    )
+    if existing_ign:
+        log.warning(
+            "Registration rejected: IGN '%s' is already registered by discord_id %d.",
+            clean_ign, existing_ign["discord_id"]
+        )
+        return None
+
     try:
-        row = await get_pool().fetchrow(
+        row = await pool.fetchrow(
             """
             INSERT INTO players (discord_id, discord_username, ign, region)
             VALUES ($1, $2, $3, $4::region_enum)
@@ -122,7 +172,7 @@ async def register_player(
             """,
             discord_id,
             discord_username,
-            ign,
+            clean_ign,
             region,
         )
         return dict(row) if row else None
@@ -177,17 +227,38 @@ async def reactivate_player(discord_id: int, new_username: str) -> Optional[dict
 
 async def reset_and_reactivate_player(
     discord_id: int,
-    new_username: str,
+    discord_username: str,
     new_ign: str,
     new_region: str,
 ) -> Optional[dict]:
     """
     Re-activate an inactive player with a completely fresh profile.
     All previous stats are wiped to 0 and ELO reset to 1000.
+    Checks that new_ign is not taken by another active player.
     Returns the updated row, or None.
     """
+    clean_ign = (new_ign or "").strip()
+    pool = get_pool()
+    existing_ign = await pool.fetchrow(
+        """
+        SELECT discord_id FROM players
+        WHERE LOWER(TRIM(ign)) = LOWER(TRIM($1))
+          AND discord_id != $2
+          AND is_active = TRUE
+        LIMIT 1
+        """,
+        clean_ign,
+        discord_id,
+    )
+    if existing_ign:
+        log.warning(
+            "Reset/reactivate rejected: IGN '%s' already taken by discord_id %d.",
+            clean_ign, existing_ign["discord_id"]
+        )
+        return None
+
     try:
-        row = await get_pool().fetchrow(
+        row = await pool.fetchrow(
             """
             UPDATE players
             SET is_active        = TRUE,
@@ -206,8 +277,8 @@ async def reset_and_reactivate_player(
             RETURNING *
             """,
             discord_id,
-            new_username,
-            new_ign,
+            discord_username,
+            clean_ign,
             new_region,
         )
         return dict(row) if row else None
@@ -267,15 +338,35 @@ async def get_player_profile(discord_id: int) -> Optional[dict]:
 
 
 async def update_player_ign(discord_id: int, new_ign: str) -> Optional[dict]:
-    """Update a player's in-game name. Returns the updated row or None."""
-    row = await get_pool().fetchrow(
+    """Update a player's in-game name ensuring no other active player shares it. Returns the updated row or None."""
+    clean_ign = (new_ign or "").strip()
+    pool = get_pool()
+    existing_ign = await pool.fetchrow(
+        """
+        SELECT discord_id FROM players
+        WHERE LOWER(TRIM(ign)) = LOWER(TRIM($1))
+          AND discord_id != $2
+          AND is_active = TRUE
+        LIMIT 1
+        """,
+        clean_ign,
+        discord_id,
+    )
+    if existing_ign:
+        log.warning(
+            "Update IGN rejected: '%s' already taken by discord_id %d.",
+            clean_ign, existing_ign["discord_id"]
+        )
+        return None
+
+    row = await pool.fetchrow(
         """
         UPDATE players
         SET ign = $1
         WHERE discord_id = $2
         RETURNING *
         """,
-        new_ign,
+        clean_ign,
         discord_id,
     )
     return dict(row) if row else None
@@ -1430,7 +1521,26 @@ async def admin_update_player_ign(discord_id: int, new_ign: str) -> Optional[dic
     """
     Update a player's IGN and update teams.captain_ign if they are a captain.
     """
+    clean_ign = (new_ign or "").strip()
     pool = get_pool()
+    existing_ign = await pool.fetchrow(
+        """
+        SELECT discord_id FROM players
+        WHERE LOWER(TRIM(ign)) = LOWER(TRIM($1))
+          AND discord_id != $2
+          AND is_active = TRUE
+        LIMIT 1
+        """,
+        clean_ign,
+        discord_id,
+    )
+    if existing_ign:
+        log.warning(
+            "Admin update IGN rejected: '%s' already taken by discord_id %d.",
+            clean_ign, existing_ign["discord_id"]
+        )
+        return None
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             player_row = await conn.fetchrow(
@@ -1440,7 +1550,7 @@ async def admin_update_player_ign(discord_id: int, new_ign: str) -> Optional[dic
                 WHERE discord_id = $2
                 RETURNING *
                 """,
-                new_ign,
+                clean_ign,
                 discord_id,
             )
             if not player_row:
@@ -1453,7 +1563,7 @@ async def admin_update_player_ign(discord_id: int, new_ign: str) -> Optional[dic
                 SET captain_ign = $1
                 WHERE captain_discord_id = $2
                 """,
-                new_ign,
+                clean_ign,
                 discord_id,
             )
             return dict(player_row)

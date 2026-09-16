@@ -294,9 +294,18 @@ class ResumeOrFreshView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
             await self._finish(interaction)
 
+            conflict = await db.get_player_by_ign(self.new_ign)
+            if conflict and conflict.get("discord_id") != interaction.user.id:
+                await interaction.followup.send(
+                    f"The In-Game Name **`{self.new_ign}`** is already registered by another player (<@{conflict['discord_id']}>).\n"
+                    "Players with the same IGN cannot be registered.",
+                    ephemeral=True,
+                )
+                return
+
             player = await db.reset_and_reactivate_player(
                 discord_id=interaction.user.id,
-                new_username=str(interaction.user),
+                discord_username=str(interaction.user),
                 new_ign=self.new_ign,
                 new_region=self.new_region,
             )
@@ -359,10 +368,20 @@ class FreshStartModal(discord.ui.Modal, title="Start Fresh — New Profile"):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
+        chosen_ign = str(self.ign.value).strip()
+        conflict = await db.get_player_by_ign(chosen_ign)
+        if conflict and conflict.get("discord_id") != interaction.user.id:
+            await interaction.followup.send(
+                f"The In-Game Name **`{chosen_ign}`** is already registered by another player (<@{conflict['discord_id']}>).\n"
+                "Players with the same IGN cannot be registered.",
+                ephemeral=True,
+            )
+            return
+
         player = await db.reset_and_reactivate_player(
             discord_id=interaction.user.id,
-            new_username=str(interaction.user),
-            new_ign=str(self.ign.value).strip(),
+            discord_username=str(interaction.user),
+            new_ign=chosen_ign,
             new_region=self.region_value,
         )
         if not player:
@@ -723,6 +742,16 @@ class RegistrationCog(commands.Cog, name="Registration"):
             return
 
         # ── Normal registration ──────────────────────────────────────────
+        # Check if IGN is already registered by another player
+        conflict = await db.get_player_by_ign(ign)
+        if conflict and conflict.get("discord_id") != discord_id:
+            await interaction.followup.send(
+                f"The In-Game Name **`{ign}`** is already registered by another player (<@{conflict['discord_id']}>).\n"
+                "Players with the same IGN cannot be registered. Please choose a unique IGN.",
+                ephemeral=True,
+            )
+            return
+
         # Insert the player.
         player = await db.register_player(
             discord_id=discord_id,

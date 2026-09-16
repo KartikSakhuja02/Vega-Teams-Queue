@@ -89,6 +89,16 @@ class EditIGNModal(discord.ui.Modal, title="Correct Your In-Game Name"):
             await interaction.response.send_message("IGN cannot be empty.", ephemeral=True)
             return
 
+        # Duplicate IGN check
+        conflict = await db.get_player_by_ign(new_ign)
+        if conflict and conflict.get("discord_id") != self.view_ref.player_id:
+            await interaction.response.send_message(
+                f"⚠️ The In-Game Name **`{new_ign}`** is already registered by another player (<@{conflict['discord_id']}>).\n"
+                "Players with the same IGN cannot be registered. Please enter your unique in-game name.",
+                ephemeral=True,
+            )
+            return
+
         self.view_ref.ign = new_ign
         embed = self.view_ref.build_embed()
         await interaction.response.edit_message(embed=embed, view=self.view_ref)
@@ -170,6 +180,26 @@ class VerificationSelectView(discord.ui.View):
 
     async def submit_verification(self, interaction: discord.Interaction, region: str) -> None:
         """Called when region is selected."""
+        # 1. Reject if player is already active
+        existing = await db.get_player(self.player_id)
+        if existing and existing.get("is_active"):
+            await interaction.response.send_message(
+                f"⚠️ You are already registered as **`{existing['ign']}`** in **`{existing['region']}`**.\n"
+                "Duplicate registrations are not allowed. Please use `/edit-profile` if you wish to change your details.",
+                ephemeral=True,
+            )
+            return
+
+        # 2. Reject if IGN belongs to another player
+        conflict = await db.get_player_by_ign(self.ign)
+        if conflict and conflict.get("discord_id") != self.player_id:
+            await interaction.response.send_message(
+                f"⚠️ The In-Game Name **`{self.ign}`** is already registered by another player (<@{conflict['discord_id']}>).\n"
+                "Players with the same IGN cannot be registered. Click **Edit IGN** to correct it.",
+                ephemeral=True,
+            )
+            return
+
         reply_id = interaction.message.id if interaction.message else 0
         pending_data = {
             "player_id": self.player_id,
@@ -244,6 +274,16 @@ class EnterIGNModal(discord.ui.Modal, title="Enter Your In-Game Name"):
         new_ign = str(self.ign_input.value).strip()
         if not new_ign:
             await interaction.response.send_message("IGN cannot be empty.", ephemeral=True)
+            return
+
+        # Duplicate IGN check
+        conflict = await db.get_player_by_ign(new_ign)
+        if conflict and conflict.get("discord_id") != self.player_id:
+            await interaction.response.send_message(
+                f"⚠️ The In-Game Name **`{new_ign}`** is already registered by another player (<@{conflict['discord_id']}>).\n"
+                "Players with the same IGN cannot be registered. Please enter your unique in-game name.",
+                ephemeral=True,
+            )
             return
 
         # Now that IGN is confirmed, send the UI of the IGN with region selection
@@ -354,6 +394,25 @@ class VerificationCog(commands.Cog, name="Verification"):
         if not image_attachments:
             return
 
+        # 1. Prevent duplicate registration if player is already active
+        existing_player = await db.get_player(message.author.id)
+        if existing_player and existing_player.get("is_active"):
+            embed = discord.Embed(
+                title="Already Registered",
+                description=(
+                    f"> **Player:** {message.author.mention}\n"
+                    f"> **Current IGN:** **`{existing_player['ign']}`**\n"
+                    f"> **Region:** **`{existing_player['region']}`**\n\n"
+                    "ℹ️ **You are already registered in the matchmaking system.**\n"
+                    "Duplicate registrations are not permitted.\n\n"
+                    "If you need to update your IGN or Region, please use `/edit-profile`."
+                ),
+                colour=COL_WARNING,
+            )
+            embed.set_footer(text="Vega Scrims — Duplicate registration prevented.")
+            await message.reply(embed=embed, mention_author=False)
+            return
+
         target_att = image_attachments[0]
         log.info(
             "Verification: Image received from %s (%d) in #%s",
@@ -379,6 +438,33 @@ class VerificationCog(commands.Cog, name="Verification"):
 
         # Once the IGN is detected, then only send the UI of the IGN with region selection.
         if detected_ign:
+            # Check if this detected IGN is already registered by another player!
+            conflict = await db.get_player_by_ign(detected_ign)
+            if conflict and conflict.get("discord_id") != message.author.id:
+                embed = discord.Embed(
+                    title="Duplicate In-Game Name Detected",
+                    description=(
+                        f"> **Player:** {message.author.mention}\n"
+                        f"> **Detected IGN:** **`{detected_ign}`**\n\n"
+                        f"⚠️ **This In-Game Name is already registered to another player (<@{conflict['discord_id']}>).**\n"
+                        "Players with the same IGN cannot be registered.\n\n"
+                        "If your screenshot IGN was misdetected, click **Enter IGN** below to enter your correct unique in-game name."
+                    ),
+                    colour=COL_DANGER,
+                )
+                embed.set_footer(text="Duplicate players cannot be registered.")
+                view = EnterIGNView(
+                    cog=self,
+                    player_id=message.author.id,
+                    player_name=str(message.author),
+                    orig_message_id=message.id,
+                )
+                try:
+                    await status_msg.edit(content=None, embed=embed, view=view)
+                except Exception as e:
+                    log.error("Failed to edit status message with duplicate IGN warning: %s", e)
+                return
+
             view = VerificationSelectView(
                 cog=self,
                 player_id=message.author.id,
@@ -429,9 +515,19 @@ class VerificationCog(commands.Cog, name="Verification"):
             return
 
         message_id = payload.message_id
-        pending = self.pending_verifications.get(message_id)
+
+        # ATOMIC POP: prevent multiple moderators / double reactions from duplicate processing
+        pending = self.pending_verifications.pop(message_id, None)
         if not pending:
             return
+
+        # Immediately purge related message IDs so no concurrent reaction can grab it
+        orig_id = pending.get("orig_message_id")
+        reply_id = pending.get("reply_message_id")
+        if orig_id:
+            self.pending_verifications.pop(orig_id, None)
+        if reply_id:
+            self.pending_verifications.pop(reply_id, None)
 
         guild = self.bot.get_guild(payload.guild_id) if payload.guild_id else None
         if not guild:
@@ -469,19 +565,45 @@ class VerificationCog(commands.Cog, name="Verification"):
             member, player_name, ign, region,
         )
 
+        # Check if IGN was registered by someone else in the meantime
+        conflict = await db.get_player_by_ign(ign)
+        if conflict and conflict.get("discord_id") != player_id:
+            log.warning(
+                "Verification aborted for %s: IGN '%s' already registered by player %d.",
+                player_name, ign, conflict["discord_id"],
+            )
+            if channel and reply_message_id:
+                try:
+                    reply_msg = await channel.fetch_message(reply_message_id)
+                    abort_embed = discord.Embed(
+                        title="Verification Rejected — Duplicate IGN",
+                        description=(
+                            f"> **Player:** <@{player_id}>\n"
+                            f"> **IGN:** **`{ign}`**\n\n"
+                            f"❌ **This In-Game Name is already registered by another player (<@{conflict['discord_id']}>).**\n"
+                            "Duplicate registrations are not allowed."
+                        ),
+                        colour=COL_DANGER,
+                    )
+                    await reply_msg.edit(embed=abort_embed, view=None)
+                except Exception:
+                    pass
+            return
+
         # 1. Update/Register in database
         existing = await db.get_player(player_id)
-        if existing:
-            if not existing.get("is_active"):
-                await db.reset_and_reactivate_player(
-                    discord_id=player_id,
-                    new_username=player_name,
-                    new_ign=ign,
-                    new_region=region,
-                )
-            else:
-                await db.admin_update_player_ign(player_id, ign)
-                await db.update_player_region(player_id, region)
+        if existing and existing.get("is_active"):
+            # Player is already active: don't duplicate register, just sync if needed
+            log.info("Player %s (%d) is already active. Updating profile rather than duplicate registering.", player_name, player_id)
+            await db.admin_update_player_ign(player_id, ign)
+            await db.update_player_region(player_id, region)
+        elif existing and not existing.get("is_active"):
+            await db.reset_and_reactivate_player(
+                discord_id=player_id,
+                discord_username=player_name,
+                new_ign=ign,
+                new_region=region,
+            )
         else:
             await db.register_player(
                 discord_id=player_id,
@@ -566,13 +688,6 @@ class VerificationCog(commands.Cog, name="Verification"):
             ],
             guild_id=guild.id,
         )
-
-        # 6. Cleanup pending state
-        orig_id = pending.get("orig_message_id", message_id)
-        self.pending_verifications.pop(orig_id, None)
-        self.pending_verifications.pop(message_id, None)
-        if reply_message_id:
-            self.pending_verifications.pop(reply_message_id, None)
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -51,13 +51,23 @@ class EditIGNModal(discord.ui.Modal, title="Edit In-Game Name"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
+        val = self.new_ign.value.strip()
+        conflict = await db.get_player_by_ign(val)
+        if conflict and conflict.get("discord_id") != interaction.user.id:
+            await interaction.followup.send(
+                f"The In-Game Name **`{val}`** is already registered by another player (<@{conflict['discord_id']}>).\n"
+                "Players with the same IGN cannot be registered.",
+                ephemeral=True,
+            )
+            return
+
         # Hand off to confirmation view
         view = ConfirmChangeView(
             field="IGN",
             old_value=self.new_ign.default or "",
-            new_value=self.new_ign.value.strip(),
+            new_value=val,
         )
-        embed = _confirm_embed("IGN", self.new_ign.default or "—", self.new_ign.value.strip())
+        embed = _confirm_embed("IGN", self.new_ign.default or "—", val)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         view.message = await interaction.original_response()
 
