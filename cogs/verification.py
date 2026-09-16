@@ -170,23 +170,29 @@ class VerificationSelectView(discord.ui.View):
 
     async def submit_verification(self, interaction: discord.Interaction, region: str) -> None:
         """Called when region is selected."""
-        # Store pending verification
-        self.cog.pending_verifications[self.orig_message_id] = {
+        reply_id = interaction.message.id if interaction.message else 0
+        pending_data = {
             "player_id": self.player_id,
             "player_name": self.player_name,
             "ign": self.ign,
             "region": region,
-            "reply_message_id": interaction.message.id if interaction.message else 0,
+            "orig_message_id": self.orig_message_id,
+            "reply_message_id": reply_id,
             "channel_id": interaction.channel_id,
             "guild_id": interaction.guild_id,
         }
 
-        # Update message to pending status
+        # Store pending under both message IDs so mods can react to either
+        self.cog.pending_verifications[self.orig_message_id] = pending_data
+        if reply_id:
+            self.cog.pending_verifications[reply_id] = pending_data
+
+        # Update message to pending status with detected IGN & Region clearly shown
         embed = discord.Embed(
             title="Matchmaking Verification — Pending Review",
             description=(
                 f"> **Player:** <@{self.player_id}>\n"
-                f"> **IGN:** **`{self.ign}`**\n"
+                f"> **Detected IGN:** **`{self.ign}`**\n"
                 f"> **Region:** **`{region}`**\n\n"
                 "⏳ **Please wait for a moderator to verify.**\n"
                 "A moderator will click the ✅ emoji on your screenshot to approve."
@@ -449,11 +455,13 @@ class VerificationCog(commands.Cog, name="Verification"):
                 dm_embed = discord.Embed(
                     title="Matchmaking Verification Approved",
                     description=(
-                        "Your player profile has been verified by the moderation staff!\n\n"
+                        "🎉 **You are now registered for the queue!**\n\n"
+                        "Your profile screenshot has been verified by staff and your competitive profile is active:\n\n"
                         f"• **IGN:** `{ign}`\n"
                         f"• **Region:** `{region}`\n"
-                        f"• **Starting Rating:** `1000 ELO`\n\n"
-                        "You now have access to the competitive queue. Head to the queue channel to join matches!"
+                        f"• **Starting Rating:** `1000 ELO`\n"
+                        f"• **Role Granted:** Matchmaking Verified\n\n"
+                        "Head to the queue channel and click **Join Queue** to start competing!"
                     ),
                     colour=COL_SUCCESS,
                 )
@@ -478,7 +486,11 @@ class VerificationCog(commands.Cog, name="Verification"):
         )
 
         # 6. Cleanup pending state
+        orig_id = pending.get("orig_message_id", message_id)
+        self.pending_verifications.pop(orig_id, None)
         self.pending_verifications.pop(message_id, None)
+        if reply_message_id:
+            self.pending_verifications.pop(reply_message_id, None)
 
 
 async def setup(bot: commands.Bot) -> None:
