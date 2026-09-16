@@ -238,6 +238,7 @@ async def _call_ollama_generate(
     num_predict: int = 48,
 ) -> str:
     """Send image+prompt to Ollama /api/generate for fast direct vision completion."""
+    image_bytes = _prepare_image(image_bytes, max_dim=1280)
     image_b64 = base64.b64encode(image_bytes).decode()
     payload = {
         "model": _MODEL,
@@ -245,6 +246,7 @@ async def _call_ollama_generate(
         "images": [image_b64],
         "stream": False,
         "options": {
+            "num_ctx": max(_NUM_CTX, 8192),
             "temperature": temperature,
             "num_predict": num_predict,
         },
