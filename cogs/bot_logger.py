@@ -31,6 +31,7 @@ from discord.ext import commands
 log = logging.getLogger(__name__)
 
 LOG_CHANNEL_ID: int = int(os.environ.get("LOG_CHANNEL_ID", "0"))
+SERVER_B_LOG_CHANNEL_ID: int = int(os.environ.get("SERVER_B_LOG_CHANNEL_ID", "0"))
 
 # Colour palette
 COL_DEFAULT  = discord.Colour.from_str("#5B4FCF")   # purple  — general
@@ -64,27 +65,34 @@ async def send_log(
     description: str,
     colour: discord.Colour = COL_DEFAULT,
     fields: list[tuple[str, str, bool]] | None = None,
+    guild_id: int | None = None,
 ) -> None:
     """
-    Send a log embed to the log channel.
-
-    Parameters
-    ----------
-    bot         : The running bot instance.
-    title       : Bold heading of the embed.
-    description : Main body text.
-    colour      : Embed left-bar colour.
-    fields      : Optional list of (name, value, inline) tuples.
+    Send a log embed to the appropriate log channel.
+    Routes to SERVER_B_LOG_CHANNEL_ID if the event originated from Server B,
+    otherwise routes to LOG_CHANNEL_ID.
     """
-    if not LOG_CHANNEL_ID:
+    target_channel_id = LOG_CHANNEL_ID
+
+    if SERVER_B_LOG_CHANNEL_ID:
+        if guild_id:
+            server_b_channel = bot.get_channel(SERVER_B_LOG_CHANNEL_ID)
+            if server_b_channel and server_b_channel.guild.id == guild_id:
+                target_channel_id = SERVER_B_LOG_CHANNEL_ID
+            elif not target_channel_id:
+                target_channel_id = SERVER_B_LOG_CHANNEL_ID
+        elif not target_channel_id:
+            target_channel_id = SERVER_B_LOG_CHANNEL_ID
+
+    if not target_channel_id:
         return
 
-    channel = bot.get_channel(LOG_CHANNEL_ID)
+    channel = bot.get_channel(target_channel_id)
     if channel is None:
         try:
-            channel = await bot.fetch_channel(LOG_CHANNEL_ID)
+            channel = await bot.fetch_channel(target_channel_id)
         except Exception:
-            log.warning("Could not fetch log channel %d", LOG_CHANNEL_ID)
+            log.warning("Could not fetch log channel %d", target_channel_id)
             return
 
     embed = discord.Embed(
@@ -97,7 +105,8 @@ async def send_log(
         for name, value, inline in fields:
             embed.add_field(name=name, value=value, inline=inline)
 
-    embed.set_footer(text="Vega Scrims — Action Log")
+    footer_text = "Vega Queue — Action Log" if target_channel_id == SERVER_B_LOG_CHANNEL_ID else "Vega Scrims — Action Log"
+    embed.set_footer(text=footer_text)
 
     try:
         await channel.send(embed=embed)
@@ -124,7 +133,7 @@ class BotLoggerCog(commands.Cog, name="BotLogger"):
         command: app_commands.Command | app_commands.ContextMenu,
     ) -> None:
         """Auto-log every completed slash command."""
-        if not LOG_CHANNEL_ID:
+        if not LOG_CHANNEL_ID and not SERVER_B_LOG_CHANNEL_ID:
             return
 
         user = interaction.user
@@ -156,6 +165,7 @@ class BotLoggerCog(commands.Cog, name="BotLogger"):
                 ("Server",  guild_str,               True),
                 ("Options", options_str,             False),
             ],
+            guild_id=guild.id if guild else None,
         )
 
     # ── Error listener: logs failed commands ─────────────────────────────────
@@ -167,7 +177,7 @@ class BotLoggerCog(commands.Cog, name="BotLogger"):
         error: app_commands.AppCommandError,
     ) -> None:
         """Log command errors to the log channel."""
-        if not LOG_CHANNEL_ID:
+        if not LOG_CHANNEL_ID and not SERVER_B_LOG_CHANNEL_ID:
             return
 
         user    = interaction.user
@@ -183,6 +193,7 @@ class BotLoggerCog(commands.Cog, name="BotLogger"):
                 ("User",  f"{user} ({user.id})", True),
                 ("Error", str(error)[:1000],      False),
             ],
+            guild_id=interaction.guild_id,
         )
 
 

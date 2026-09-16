@@ -443,3 +443,42 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
     log.debug("Ollama scoreboard raw (first 400): %s", raw_text[:400])
     parsed = _extract_json(raw_text)
     return _to_result(parsed, elapsed_ms, image_bytes=image_bytes)
+
+
+_PROFILE_IGN_PROMPT = """\
+You are an expert game profile OCR assistant.
+Analyze this game career or profile screenshot (e.g. Valorant, Valorant Mobile, or similar competitive mobile game).
+Locate the player's profile username / in-game name (IGN).
+If there is a tagline or secondary tag below or next to the username (for example username "klein-" and tagline "rust"), combine them (e.g. "klein-#rust") or return the username.
+Do NOT output rank badges (e.g. "神话", "Myth", "Diamond"), achievements, or system labels.
+
+Return ONLY a valid JSON object in this exact format:
+{
+  "ign": "<player in-game name>"
+}
+"""
+
+
+async def extract_profile_ign(image_bytes: bytes) -> Optional[str]:
+    """
+    Extract the player's in-game name (IGN) from a profile screenshot using Ollama vision.
+    Returns the cleaned IGN string, or None if not found or on error.
+    """
+    if not is_configured():
+        log.warning("Ollama is not configured for profile OCR.")
+        return None
+
+    try:
+        raw_text = await _call_ollama(image_bytes, _PROFILE_IGN_PROMPT, json_format=True)
+        log.debug("Profile IGN OCR raw: %s", raw_text[:200])
+        parsed = _extract_json(raw_text)
+        ign = parsed.get("ign")
+        if ign and isinstance(ign, str):
+            cleaned = ign.strip()
+            if cleaned.lower() not in ("null", "none", "unknown", "n/a", ""):
+                return cleaned
+    except Exception as e:
+        log.error("Failed to extract profile IGN via Ollama: %s", e)
+
+    return None
+

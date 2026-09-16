@@ -82,12 +82,13 @@ class VegaBot(commands.Bot):
         log.info("Loaded cog: cogs.toggle_dms")
         await self.load_extension("cogs.admin")
         log.info("Loaded cog: cogs.admin")
-        await self.load_extension("cogs.vision")
-        log.info("Loaded cog: cogs.vision")
+        # cogs.vision disabled — general AI image description not needed
         await self.load_extension("cogs.team_queue")
         log.info("Loaded cog: cogs.team_queue")
         await self.load_extension("cogs.solo_queue")
         log.info("Loaded cog: cogs.solo_queue")
+        await self.load_extension("cogs.verification")
+        log.info("Loaded cog: cogs.verification")
 
 
         # 3. Sync slash commands.
