@@ -231,6 +231,40 @@ async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = Fals
     return content
 
 
+async def _call_ollama_generate(
+    image_bytes: bytes,
+    prompt: str,
+    temperature: float = 0.1,
+    num_predict: int = 48,
+) -> str:
+    """Send image+prompt to Ollama /api/generate for fast direct vision completion."""
+    image_b64 = base64.b64encode(image_bytes).decode()
+    payload = {
+        "model": _MODEL,
+        "prompt": prompt,
+        "images": [image_b64],
+        "stream": False,
+        "options": {
+            "temperature": temperature,
+            "num_predict": num_predict,
+        },
+    }
+    timeout = aiohttp.ClientTimeout(total=_TIMEOUT)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=_HEADERS) as session:
+            async with session.post(f"{_BASE_URL}/api/generate", json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f"Ollama returned HTTP {resp.status}: {body[:300]}")
+                data = await resp.json()
+    except aiohttp.ClientConnectorError as exc:
+        raise RuntimeError(f"Cannot connect to Ollama at {_BASE_URL}. Is Ollama running?") from exc
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(f"Ollama timed out after {_TIMEOUT}s.") from exc
+
+    return data.get("response", "").strip()
+
+
 async def analyze_image(image_bytes: bytes, prompt: str = DEFAULT_PROMPT) -> str:
     """Send an image to Ollama for general vision analysis. Returns plain text."""
     return await _call_ollama(image_bytes, prompt)
@@ -445,25 +479,56 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
     return _to_result(parsed, elapsed_ms, image_bytes=image_bytes)
 
 
-_PROFILE_IGN_PROMPT = """\
-You are an expert game profile OCR assistant specializing in Valorant Mobile (无畏契约手游).
-Analyze this player profile overview screenshot.
-
-Extract the player's primary In-Game Name (IGN) / username:
-- The username can be in Chinese characters (汉字, e.g. "棠槽"), English letters (e.g. "klein-"), numbers, or mixed.
-- Location:
-  1. Find the player avatar / level badge (e.g. Lv. 150 or Lv. 464) in the upper-left of the profile card.
-  2. Directly to the right of the avatar (and after any small gender icon ♂/♀ or VIP badge), is the player's bold USERNAME (for example: "棠槽" or "klein-").
-  3. IMPORTANT - EXCLUSIONS:
-     • Directly underneath the username, there is a grey rounded box with user-written signature/status text (e.g. "发你麻个枪", "rust", followed by "+ 添加语音"). DO NOT extract this signature/status box!
-     • Do NOT extract "+ 添加语音", account ID ("编号"), level numbers, or rank text ("神话", "超凡", "铂金", etc.).
-- Output ONLY the player's primary username itself.
-
-Return ONLY a valid JSON object in this exact format:
-{
-  "ign": "<exact player username>"
+_INVALID_IGN_VALUES = {
+    "null", "none", "unknown", "n/a", "", "player",
+    "+添加语音", "+ 添加语音", "添加语音", "暂未设置标签",
+    "名片", "文明", "菁英", "超凡", "神话", "钻石", "铂金", "黄金", "白银", "青铜", "铁牌",
 }
-"""
+
+
+def _crop_profile_card(image_bytes: bytes) -> bytes:
+    """Crop the top profile header card where the avatar and username reside."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            w, h = img.size
+            crop = img.crop((int(w * 0.20), int(h * 0.05), int(w * 0.75), int(h * 0.35)))
+            buf = io.BytesIO()
+            fmt = img.format if img.format in ("PNG", "JPEG", "WEBP") else "PNG"
+            crop.save(buf, format=fmt)
+            return buf.getvalue()
+    except Exception as exc:
+        log.debug("Crop profile card error (falling back to full image): %s", exc)
+        return image_bytes
+
+
+def _clean_profile_ign(raw: str) -> Optional[str]:
+    if not raw:
+        return None
+    first_line = raw.strip().split("\n")[0].strip()
+    cleaned = first_line.strip("`'\" \t\r")
+    cleaned = re.sub(r"^[♀♂·\s>]+", "", cleaned)
+    cleaned = re.sub(r"[♀♂·\s<]+$", "", cleaned).strip()
+    if "#" in cleaned:
+        cleaned = cleaned.split("#")[0].strip()
+    # Reject pure numbers <= 3 digits (e.g. avatar level badges 144, 464, 51, etc.)
+    if cleaned.isdigit() and len(cleaned) <= 3:
+        return None
+    if cleaned.lower() in _INVALID_IGN_VALUES or not cleaned:
+        return None
+    return cleaned
+
+
+def _parse_ign_from_lines(raw_text: str) -> Optional[str]:
+    if not raw_text:
+        return None
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    for line in lines:
+        if "编号" in line or "ID" in line or line.startswith("Lv.") or "添加语音" in line:
+            continue
+        cleaned = _clean_profile_ign(line)
+        if cleaned:
+            return cleaned
+    return None
 
 
 async def extract_profile_ign(image_bytes: bytes) -> Optional[str]:
@@ -477,35 +542,30 @@ async def extract_profile_ign(image_bytes: bytes) -> Optional[str]:
         return None
 
     try:
-        # Avoid json_format=True as constrained grammar decoding can cause empty responses on vision models
-        raw_text = await _call_ollama(image_bytes, _PROFILE_IGN_PROMPT, json_format=False)
-        log.debug("Profile IGN OCR raw: %s", raw_text[:300])
+        # 1. Pre-crop to the upper profile header card
+        cropped_bytes = _crop_profile_card(image_bytes)
 
-        ign: Optional[str] = None
+        # 2. Targeted direct prompt
+        prompt = (
+            "Look at the player profile card in this Valorant Mobile screenshot. "
+            "Find the player avatar/icon in the upper card and read the bold username/IGN directly next to it. "
+            "Do not read the status tag or bio below it. "
+            "Output ONLY the username/IGN and nothing else."
+        )
 
-        # 1. Try standard JSON extraction
-        try:
-            parsed = _extract_json(raw_text)
-            if isinstance(parsed, dict):
-                ign = parsed.get("ign")
-        except Exception:
-            pass
+        raw_text = await _call_ollama_generate(cropped_bytes, prompt, temperature=0.1, num_predict=32)
+        log.info("Profile IGN OCR raw output: %s", repr(raw_text))
 
-        # 2. Fallback regex extraction if JSON extraction didn't work
-        if not ign or not isinstance(ign, str):
-            match = re.search(r'["\']ign["\']\s*:\s*["\']([^"\']+)["\']', raw_text, re.IGNORECASE)
-            if match:
-                ign = match.group(1)
+        ign = _clean_profile_ign(raw_text)
+        if ign:
+            return ign
 
-        # 3. Clean up the extracted IGN
-        if ign and isinstance(ign, str):
-            cleaned = ign.strip().strip('"').strip("'")
-            if "#" in cleaned:
-                cleaned = cleaned.split("#")[0].strip()
-            if "\n" in cleaned:
-                cleaned = cleaned.split("\n")[0].strip()
-            if cleaned.lower() not in ("null", "none", "unknown", "n/a", "", "player", "<exact player username>"):
-                return cleaned
+        # 3. Fallback: line-by-line transcription
+        fallback_prompt = "Transcribe all text lines in this image."
+        raw_lines = await _call_ollama_generate(cropped_bytes, fallback_prompt, temperature=0.1, num_predict=48)
+        ign = _parse_ign_from_lines(raw_lines)
+        if ign:
+            return ign
 
     except Exception as e:
         log.error("Failed to extract profile IGN via Ollama: %s", e)

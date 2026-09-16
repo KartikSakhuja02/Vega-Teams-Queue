@@ -217,6 +217,76 @@ class VerificationSelectView(discord.ui.View):
             log.warning("Could not add reaction to original screenshot message %d: %s", self.orig_message_id, e)
 
 
+class EnterIGNModal(discord.ui.Modal, title="Enter Your In-Game Name"):
+    """Modal shown when automatic IGN detection could not find an IGN."""
+
+    ign_input = discord.ui.TextInput(
+        label="In-Game Name (IGN)",
+        placeholder="Enter your exact IGN (e.g. VIP8R)",
+        max_length=64,
+        required=True,
+    )
+
+    def __init__(
+        self,
+        cog: "VerificationCog",
+        player_id: int,
+        player_name: str,
+        orig_message_id: int,
+    ) -> None:
+        super().__init__()
+        self.cog = cog
+        self.player_id = player_id
+        self.player_name = player_name
+        self.orig_message_id = orig_message_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        new_ign = str(self.ign_input.value).strip()
+        if not new_ign:
+            await interaction.response.send_message("IGN cannot be empty.", ephemeral=True)
+            return
+
+        # Now that IGN is confirmed, send the UI of the IGN with region selection
+        view = VerificationSelectView(
+            cog=self.cog,
+            player_id=self.player_id,
+            player_name=self.player_name,
+            ign=new_ign,
+            orig_message_id=self.orig_message_id,
+        )
+        embed = view.build_embed()
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class EnterIGNView(discord.ui.View):
+    """View presented when IGN is not yet detected, with ONLY an Enter IGN button."""
+
+    def __init__(
+        self,
+        cog: "VerificationCog",
+        player_id: int,
+        player_name: str,
+        orig_message_id: int,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.player_id = player_id
+        self.player_name = player_name
+        self.orig_message_id = orig_message_id
+
+    @discord.ui.button(label="Enter IGN", style=discord.ButtonStyle.primary, emoji="✏️")
+    async def enter_ign_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.player_id:
+            await interaction.response.send_message(
+                "Only the player who posted the screenshot can enter the IGN.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            EnterIGNModal(self.cog, self.player_id, self.player_name, self.orig_message_id)
+        )
+
+
 # ── Cog Implementation ────────────────────────────────────────────────────────
 
 class VerificationCog(commands.Cog, name="Verification"):
@@ -307,30 +377,42 @@ class VerificationCog(commands.Cog, name="Verification"):
             except Exception as e:
                 log.error("Error running profile OCR: %s", e)
 
-        display_ign = detected_ign or "Player"
-
-        # Construct verification view
-        view = VerificationSelectView(
-            cog=self,
-            player_id=message.author.id,
-            player_name=str(message.author),
-            ign=display_ign,
-            orig_message_id=message.id,
-        )
-
-        embed = view.build_embed()
-        if not detected_ign:
-            embed.description = (
-                f"> **Player:** {message.author.mention}\n"
-                "> **Detected IGN:** *(Could not automatically detect)*\n\n"
-                "Please click **Edit IGN** below to type your in-game name, "
-                "then select your region from the dropdown."
+        # Once the IGN is detected, then only send the UI of the IGN with region selection.
+        if detected_ign:
+            view = VerificationSelectView(
+                cog=self,
+                player_id=message.author.id,
+                player_name=str(message.author),
+                ign=detected_ign,
+                orig_message_id=message.id,
             )
-
-        try:
-            await status_msg.edit(content=None, embed=embed, view=view)
-        except Exception as e:
-            log.error("Failed to edit status message with verification view: %s", e)
+            embed = view.build_embed()
+            try:
+                await status_msg.edit(content=None, embed=embed, view=view)
+            except Exception as e:
+                log.error("Failed to edit status message with verification view: %s", e)
+        else:
+            # IGN could not be automatically detected: do NOT send region UI or default to 'Player'!
+            view = EnterIGNView(
+                cog=self,
+                player_id=message.author.id,
+                player_name=str(message.author),
+                orig_message_id=message.id,
+            )
+            embed = discord.Embed(
+                title="In-Game Name Not Detected",
+                description=(
+                    f"> **Player:** {message.author.mention}\n\n"
+                    "⚠️ **Could not automatically detect your In-Game Name from the screenshot.**\n\n"
+                    "Please click **Enter IGN** below to type your in-game name, or upload a clearer profile screenshot."
+                ),
+                colour=COL_WARNING,
+            )
+            embed.set_footer(text="Once your IGN is entered, you will be prompted to select your region.")
+            try:
+                await status_msg.edit(content=None, embed=embed, view=view)
+            except Exception as e:
+                log.error("Failed to edit status message with enter IGN view: %s", e)
 
     # ── Reaction Listener ─────────────────────────────────────────────────────
 
