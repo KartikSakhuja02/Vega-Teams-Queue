@@ -110,6 +110,31 @@ Configured via a `.env` file (see `.env.example`):
   - **Cancel Match**: Either captain or staff member can cancel the match negotiation.
   - Strictly **zero emojis** in all panel titles, descriptions, status messages, and buttons.
 
+### 10-Man Solo Player Queue (Server B)
+
+| Command | Description |
+|---|---|
+| `/post_solo_queue` | Refreshes or posts the persistent 10-man Solo Queue panel in Server B (Admin only). |
+| `/cancel_solo_match` | Cancels the active 10-man match lobby and returns players to `IDLE` status (Staff only). |
+
+- **Queue Lobby**:
+  - Displays live player counter `[ X / 10 Players Waiting ]` with player IGN, ELO, and joined time.
+  - Interactive buttons: **`Join Queue`** and **`Leave Queue`** (strictly zero emojis).
+- **Automated 10-Man Match Creation**:
+  - Upon 10 players joining, all 10 players are dequeued and set to `IN_MATCH`.
+  - A private match channel (`#match-lobby-xxx`) is created with access for the 10 players, bot, and staff.
+- **Captain Selection Templates**:
+  - `HIGHEST_ELO` (Default): Top 2 ranked ELO players become Captain 1 and Captain 2.
+  - `RANDOM`: 2 random players are selected as captains.
+  - `FIRST_JOINED`: The first 2 players to queue up become captains.
+  - `HIGHEST_WINRATE`: Top 2 players with the best win percentage become captains.
+- **Player Draft Templates**:
+  - `SNAKE` (Default `1-2-2-2-1`): Turn-based dropdown select where captains draft players.
+  - `ALTERNATING` (`1-1-1-1-1-1-1-1`): Captains alternate picking 1 player each.
+- **Map Veto Phase**:
+  - Dynamic buttons for the map pool (`Ascent`, `Bind`, `Haven`, `Split`, `Sunset`, `Lotus`, `Abyss`).
+  - Captains take turns clicking a button to **BAN** maps until 1 decisive map remains.
+
 ---
 
 ## Team Setup Flow

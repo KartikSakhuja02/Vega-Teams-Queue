@@ -1739,3 +1739,221 @@ async def cancel_scrim_match(match_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+# =============================================================================
+# Solo Queue Helpers (Server B)
+# =============================================================================
+
+async def add_player_to_solo_queue(discord_id: int) -> bool:
+    """Add a player to the 10-man solo queue."""
+    query = """
+        INSERT INTO solo_queue (discord_id, joined_at)
+        VALUES ($1, NOW())
+        ON CONFLICT (discord_id) DO UPDATE
+            SET joined_at = NOW()
+    """
+    await get_pool().execute(query, discord_id)
+    return True
+
+
+async def remove_player_from_solo_queue(discord_id: int) -> bool:
+    """Remove a player from the 10-man solo queue."""
+    res = await get_pool().execute(
+        "DELETE FROM solo_queue WHERE discord_id = $1",
+        discord_id,
+    )
+    return not res.endswith(" 0")
+
+
+async def get_solo_queue() -> list[dict]:
+    """Fetch all players currently waiting in the 10-man solo queue, joined with player stats."""
+    query = """
+        SELECT
+            sq.id as queue_id,
+            sq.discord_id,
+            sq.joined_at,
+            p.ign,
+            p.discord_username,
+            p.elo,
+            p.region,
+            p.wins,
+            p.matches_played
+        FROM solo_queue sq
+        JOIN players p ON sq.discord_id = p.discord_id
+        WHERE p.is_active = TRUE AND p.is_banned = FALSE
+        ORDER BY sq.joined_at ASC
+    """
+    rows = await get_pool().fetch(query)
+    return [dict(r) for r in rows]
+
+
+async def clear_solo_queue(discord_ids: Optional[list[int]] = None) -> None:
+    """Clear specific players or all players from the solo queue."""
+    if discord_ids:
+        await get_pool().execute(
+            "DELETE FROM solo_queue WHERE discord_id = ANY($1::BIGINT[])",
+            discord_ids,
+        )
+    else:
+        await get_pool().execute("DELETE FROM solo_queue")
+
+
+# =============================================================================
+# Solo Match Helpers (Server B)
+# =============================================================================
+
+async def create_solo_match(
+    channel_id: int,
+    captain1_id: int,
+    captain2_id: int,
+    available_player_ids: list[int],
+    available_maps: list[str],
+) -> Optional[dict]:
+    """Create a new 10-man solo match record."""
+    row = await get_pool().fetchrow(
+        """
+        INSERT INTO solo_matches (
+            channel_id,
+            status,
+            captain1_id,
+            captain2_id,
+            team1_player_ids,
+            team2_player_ids,
+            available_player_ids,
+            current_turn_captain_id,
+            draft_step,
+            available_maps,
+            created_at
+        )
+        VALUES ($1, 'DRAFTING', $2, $3, ARRAY[$2]::BIGINT[], ARRAY[$3]::BIGINT[], $4::BIGINT[], $2, 1, $5::TEXT[], NOW())
+        RETURNING *
+        """,
+        channel_id,
+        captain1_id,
+        captain2_id,
+        available_player_ids,
+        available_maps,
+    )
+    return dict(row) if row else None
+
+
+async def update_solo_match_panel(match_id: int, panel_message_id: int) -> bool:
+    """Save the panel message ID for the solo match embed."""
+    res = await get_pool().execute(
+        "UPDATE solo_matches SET panel_message_id = $1 WHERE id = $2",
+        panel_message_id,
+        match_id,
+    )
+    return not res.endswith(" 0")
+
+
+async def get_solo_match_by_channel(channel_id: int) -> Optional[dict]:
+    """Fetch solo match details by Discord channel ID."""
+    row = await get_pool().fetchrow(
+        "SELECT * FROM solo_matches WHERE channel_id = $1",
+        channel_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_solo_match_by_id(match_id: int) -> Optional[dict]:
+    """Fetch solo match details by match ID."""
+    row = await get_pool().fetchrow(
+        "SELECT * FROM solo_matches WHERE id = $1",
+        match_id,
+    )
+    return dict(row) if row else None
+
+
+async def update_solo_match_draft(
+    match_id: int,
+    team1_player_ids: list[int],
+    team2_player_ids: list[int],
+    available_player_ids: list[int],
+    current_turn_captain_id: Optional[int],
+    draft_step: int,
+    status: str,
+) -> Optional[dict]:
+    """Update teams, remaining pool, draft turn, and status during player draft."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE solo_matches
+        SET team1_player_ids = $1::BIGINT[],
+            team2_player_ids = $2::BIGINT[],
+            available_player_ids = $3::BIGINT[],
+            current_turn_captain_id = $4,
+            draft_step = $5,
+            status = $6
+        WHERE id = $7
+        RETURNING *
+        """,
+        team1_player_ids,
+        team2_player_ids,
+        available_player_ids,
+        current_turn_captain_id,
+        draft_step,
+        status,
+        match_id,
+    )
+    return dict(row) if row else None
+
+
+async def update_solo_match_map_veto(
+    match_id: int,
+    available_maps: list[str],
+    banned_maps: list[str],
+    selected_map: Optional[str],
+    current_turn_captain_id: Optional[int],
+    status: str,
+) -> Optional[dict]:
+    """Update map veto state and final selected map."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE solo_matches
+        SET available_maps = $1::TEXT[],
+            banned_maps = $2::TEXT[],
+            selected_map = $3,
+            current_turn_captain_id = $4,
+            status = $5
+        WHERE id = $6
+        RETURNING *
+        """,
+        available_maps,
+        banned_maps,
+        selected_map,
+        current_turn_captain_id,
+        status,
+        match_id,
+    )
+    return dict(row) if row else None
+
+
+async def update_solo_match_voices(
+    match_id: int,
+    voice_team1_id: int,
+    voice_team2_id: int,
+) -> bool:
+    """Save the created voice channel IDs for the match."""
+    res = await get_pool().execute(
+        "UPDATE solo_matches SET voice_team1_id = $1, voice_team2_id = $2 WHERE id = $3",
+        voice_team1_id,
+        voice_team2_id,
+        match_id,
+    )
+    return not res.endswith(" 0")
+
+
+async def cancel_solo_match(match_id: int) -> Optional[dict]:
+    """Cancel a solo match."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE solo_matches
+        SET status = 'CANCELLED',
+            completed_at = NOW()
+        WHERE id = $1
+        RETURNING *
+        """,
+        match_id,
+    )
+    return dict(row) if row else None
+
+

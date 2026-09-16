@@ -19,10 +19,11 @@ from database import db
 load_dotenv()  # Reads variables from .env into os.environ
 TOKEN: str = os.environ["DISCORD_BOT_TOKEN"]
 
-# Optional: set GUILD_ID in .env for instant slash-command sync during development.
+# Optional: set GUILD_IDS (or GUILD_ID) in .env for instant slash-command sync.
+# Can be comma-separated: GUILD_IDS=1111111111111111,2222222222222222
 # Leave blank (or remove) for global sync.
-_GUILD_ID: str = os.environ.get("GUILD_ID", "").strip()
-GUILD: discord.Object | None = discord.Object(id=int(_GUILD_ID)) if _GUILD_ID else None
+_GUILD_IDS_RAW: str = os.environ.get("GUILD_IDS", "").strip() or os.environ.get("GUILD_ID", "").strip()
+GUILD_IDS: list[int] = [int(g.strip()) for g in _GUILD_IDS_RAW.split(",") if g.strip().isdigit()]
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -85,14 +86,17 @@ class VegaBot(commands.Bot):
         log.info("Loaded cog: cogs.vision")
         await self.load_extension("cogs.team_queue")
         log.info("Loaded cog: cogs.team_queue")
+        await self.load_extension("cogs.solo_queue")
+        log.info("Loaded cog: cogs.solo_queue")
 
 
         # 3. Sync slash commands.
-        if GUILD:
-            # Guild sync is instant — useful during development.
-            self.tree.copy_global_to(guild=GUILD)
-            synced = await self.tree.sync(guild=GUILD)
-            log.info("Synced %d slash command(s) to guild %s.", len(synced), GUILD.id)
+        if GUILD_IDS:
+            for g_id in GUILD_IDS:
+                guild_obj = discord.Object(id=g_id)
+                self.tree.copy_global_to(guild=guild_obj)
+                synced = await self.tree.sync(guild=guild_obj)
+                log.info("Synced %d slash command(s) instantly to guild %d.", len(synced), g_id)
         else:
             # Global sync — can take up to an hour to propagate to all servers.
             synced = await self.tree.sync()

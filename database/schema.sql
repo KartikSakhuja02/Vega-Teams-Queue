@@ -290,5 +290,49 @@ CREATE INDEX IF NOT EXISTS idx_scrim_matches_teams ON scrim_matches (team1_id, t
 CREATE INDEX IF NOT EXISTS idx_scrim_matches_status ON scrim_matches (status);
 
 
+-- ---------------------------------------------------------------------------
+-- solo_queue (Server B: 10-Man Solo Player Queue)
+-- ---------------------------------------------------------------------------
+-- Stores individual players waiting for a 10-man PUG match.
+
+CREATE TABLE IF NOT EXISTS solo_queue (
+    id          BIGSERIAL    PRIMARY KEY,
+    discord_id  BIGINT       NOT NULL UNIQUE REFERENCES players (discord_id) ON DELETE CASCADE,
+    joined_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_solo_queue_joined ON solo_queue (joined_at ASC);
+
+
+-- ---------------------------------------------------------------------------
+-- solo_matches (Server B: 10-Man PUG Matches)
+-- ---------------------------------------------------------------------------
+-- Stores 10-man lobby matches, player drafting, and map veto state.
+
+CREATE TABLE IF NOT EXISTS solo_matches (
+    id                      BIGSERIAL    PRIMARY KEY,
+    channel_id              BIGINT       NOT NULL UNIQUE,
+    panel_message_id        BIGINT,
+    status                  TEXT         NOT NULL DEFAULT 'DRAFTING', -- 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'
+    captain1_id             BIGINT       NOT NULL,
+    captain2_id             BIGINT       NOT NULL,
+    team1_player_ids        BIGINT[]     NOT NULL DEFAULT '{}',
+    team2_player_ids        BIGINT[]     NOT NULL DEFAULT '{}',
+    available_player_ids    BIGINT[]     NOT NULL DEFAULT '{}',
+    current_turn_captain_id BIGINT,
+    draft_step              INT          NOT NULL DEFAULT 1,
+    selected_map            TEXT,
+    available_maps          TEXT[]       NOT NULL DEFAULT '{}',
+    banned_maps             TEXT[]       NOT NULL DEFAULT '{}',
+    voice_team1_id          BIGINT,
+    voice_team2_id          BIGINT,
+    created_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    completed_at            TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_solo_matches_channel ON solo_matches (channel_id);
+CREATE INDEX IF NOT EXISTS idx_solo_matches_status ON solo_matches (status);
+
+
 
 
