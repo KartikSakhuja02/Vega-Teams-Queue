@@ -694,8 +694,10 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         user_id = interaction.user.id
         player = await db.get_player(user_id)
         if not player:
+            b_reg_id = int(os.environ.get("SERVER_B_REGISTRATION_CHANNEL_ID", "0") or "0")
+            ch_hint = f" in <#{b_reg_id}>" if b_reg_id else ""
             await interaction.followup.send(
-                "You must register your player profile first using `/register`.",
+                f"You must register your player profile first using `/register`{ch_hint}.",
                 ephemeral=True,
             )
             return

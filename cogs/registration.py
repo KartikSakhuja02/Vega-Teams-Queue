@@ -38,7 +38,27 @@ def format_regional_time(dt: datetime, region: str) -> str:
 # Environment config
 # ---------------------------------------------------------------------------
 
-REGISTRATION_CHANNEL_ID: int = int(os.environ.get("REGISTRATION_CHANNEL_ID", "0"))
+def _parse_channel_ids(raw_value: str) -> list[int]:
+    ids: list[int] = []
+    for chunk in raw_value.split(","):
+        cleaned = chunk.strip()
+        if cleaned.isdigit():
+            ids.append(int(cleaned))
+    return ids
+
+
+_REG_CHANNELS_RAW = (
+    os.environ.get("REGISTRATION_CHANNEL_IDS", "").strip()
+    or os.environ.get("REGISTRATION_CHANNEL_ID", "").strip()
+)
+REGISTRATION_CHANNEL_IDS: list[int] = _parse_channel_ids(_REG_CHANNELS_RAW)
+
+_SERVER_B_REG_RAW = os.environ.get("SERVER_B_REGISTRATION_CHANNEL_ID", "").strip()
+_SERVER_B_REG_ID: int = int(_SERVER_B_REG_RAW) if _SERVER_B_REG_RAW.isdigit() else 0
+if _SERVER_B_REG_ID and _SERVER_B_REG_ID not in REGISTRATION_CHANNEL_IDS:
+    REGISTRATION_CHANNEL_IDS.append(_SERVER_B_REG_ID)
+
+REGISTRATION_CHANNEL_ID: int = REGISTRATION_CHANNEL_IDS[0] if REGISTRATION_CHANNEL_IDS else 0
 
 # Deep indigo — consistent brand colour, no harsh primaries.
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
@@ -95,6 +115,51 @@ def _build_info_embed() -> discord.Embed:
         inline=False,
     )
     embed.set_footer(text="Vega Scrims — Do not delete this message.")
+    return embed
+
+
+def _build_server_b_info_embed() -> discord.Embed:
+    """Build the registration guide embed tailored for Server B 10-man solo queue."""
+    embed = discord.Embed(
+        title="VEGA QUEUE — PLAYER REGISTRATION",
+        colour=EMBED_COLOUR,
+    )
+    embed.description = (
+        "> **VEGA REGISTRATION**\n"
+        "> Register your player profile to participate in the competitive queue.\n"
+        "> Registration is free, instant, and links your Discord account to your player stats.\n\n"
+        "> Click the **Open Registration Form** button below or use `/register`."
+    )
+    embed.add_field(
+        name="Registration Methods",
+        value=(
+            "**Option 1 — Form Button (Recommended)**\n"
+            "Click **Open Registration Form** below to choose your region and enter your IGN.\n\n"
+            "**Option 2 — Slash Command**\n"
+            "`/register ign:<your_ign> region:<region>`\n"
+            "Use the slash command directly in this channel."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Parameters",
+        value=(
+            "• **ign** — Your exact in-game name (e.g. `PlayerName#TAG`).\n"
+            "• **region** — Select your region (`India` / `APAC` / `EMEA` / `Americas`)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Important Notes",
+        value=(
+            "• You only need to register once per Discord account.\n"
+            "• Starting rating is initialized to `1000 ELO`.\n"
+            "• Use `/edit-profile` anytime to update your IGN or region.\n"
+            "• Registration is required before clicking **Join Queue**."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Vega Queue — Do not delete this message.")
     return embed
 
 
@@ -421,9 +486,9 @@ class RegistrationView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        if REGISTRATION_CHANNEL_ID and interaction.channel_id != REGISTRATION_CHANNEL_ID:
+        if not self.cog.is_channel_allowed(interaction.channel_id):
             await interaction.response.send_message(
-                "This form is only available in the registration channel.",
+                "This form is only available in the designated registration channel.",
                 ephemeral=True,
             )
             return
@@ -490,6 +555,16 @@ class RegistrationCog(commands.Cog, name="Registration"):
         self.bot = bot
         # Guard against on_ready firing multiple times (e.g. on reconnect).
         self._info_message_posted: bool = False
+        self._active_registration_channel_ids: set[int] = set(REGISTRATION_CHANNEL_IDS)
+
+    def is_channel_allowed(self, channel_id: int) -> bool:
+        """Check if an interaction channel is allowed for registration."""
+        if not self._active_registration_channel_ids and not REGISTRATION_CHANNEL_IDS:
+            return True
+        return (
+            channel_id in self._active_registration_channel_ids
+            or channel_id in REGISTRATION_CHANNEL_IDS
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle — post/refresh the persistent info card
@@ -504,49 +579,90 @@ class RegistrationCog(commands.Cog, name="Registration"):
 
     async def _ensure_info_message(self) -> None:
         """
-        Post the registration info card to the configured channel, or edit
-        the existing one if we already sent it in a previous session.
+        Post the registration info card to all configured registration channels,
+        or edit the existing one if we already sent it in a previous session.
         """
-        if not REGISTRATION_CHANNEL_ID:
+        channel_ids: list[int] = list(REGISTRATION_CHANNEL_IDS)
+        solo_queue_ch_id = int(os.environ.get("SOLO_QUEUE_CHANNEL_ID", "0") or "0")
+
+        # Auto-detect registration channel in Server B / connected guilds if not explicitly configured
+        for guild in self.bot.guilds:
+            for ch in guild.text_channels:
+                if ch.id not in channel_ids and any(
+                    kw in ch.name.lower() for kw in ("register", "registration", "player-registration")
+                ):
+                    channel_ids.append(ch.id)
+                    log.info(
+                        "Auto-detected registration channel %d (#%s) in guild '%s' (%d).",
+                        ch.id, ch.name, guild.name, guild.id,
+                    )
+
+        self._active_registration_channel_ids = set(channel_ids)
+
+        if not channel_ids:
             log.warning(
-                "REGISTRATION_CHANNEL_ID is not configured — skipping info message."
+                "No registration channels configured or detected — skipping info message."
             )
             return
 
-        channel = self.bot.get_channel(REGISTRATION_CHANNEL_ID)
-        if not isinstance(channel, discord.TextChannel):
-            log.error(
-                "Channel %d not found or is not a TextChannel.", REGISTRATION_CHANNEL_ID
-            )
-            return
+        for channel_id in channel_ids:
+            channel = self.bot.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(channel_id)
+                except Exception as e:
+                    log.error(
+                        "Could not fetch registration channel %d: %s", channel_id, e
+                    )
+                    continue
 
-        embed = _build_info_embed()
-
-        # Check whether we already have a stored message ID in the database.
-        stored_id = await db.get_config("registration_message_id")
-        if stored_id:
-            try:
-                existing_msg = await channel.fetch_message(int(stored_id))
-                
-                # Edit and refresh embed. Pass content=None and attachments=[] to clear any old links/files
-                await existing_msg.edit(content=None, embed=embed, attachments=[])
-                log.info("Registration info message refreshed (ID: %s).", stored_id)
-                return
-            except discord.NotFound:
-                log.warning(
-                    "Stored message ID %s was deleted — sending a new one.", stored_id
+            if not isinstance(channel, discord.TextChannel):
+                log.error(
+                    "Channel %d not found or is not a TextChannel.", channel_id
                 )
+                continue
 
-        # Send a fresh message and pin it.
-        msg = await channel.send(embed=embed, view=RegistrationView(self))
+            # Determine whether this is Server B (or another non-primary server)
+            is_server_b = (
+                channel_id == _SERVER_B_REG_ID
+                or (solo_queue_ch_id and channel.guild.get_channel(solo_queue_ch_id) is not None)
+                or (channel_id != REGISTRATION_CHANNEL_ID and channel_id != 0)
+            )
+            embed = _build_server_b_info_embed() if is_server_b else _build_info_embed()
 
-        try:
-            await msg.pin()
-        except discord.Forbidden:
-            log.warning("Missing Manage Messages permission — could not pin info message.")
+            config_key = f"registration_message_id_{channel_id}"
+            stored_id = await db.get_config(config_key)
+            if not stored_id and channel_id == REGISTRATION_CHANNEL_ID:
+                stored_id = await db.get_config("registration_message_id")
 
-        await db.set_config("registration_message_id", str(msg.id))
-        log.info("Registration info message sent and pinned (ID: %d).", msg.id)
+            if stored_id:
+                try:
+                    existing_msg = await channel.fetch_message(int(stored_id))
+                    # Edit and refresh embed. Pass content=None and attachments=[] to clear any old links/files
+                    await existing_msg.edit(content=None, embed=embed, view=RegistrationView(self), attachments=[])
+                    log.info("Registration info message refreshed in channel %d (ID: %s).", channel_id, stored_id)
+                    continue
+                except discord.NotFound:
+                    log.warning(
+                        "Stored message ID %s was deleted in channel %d — sending a new one.", stored_id, channel_id
+                    )
+                except Exception as e:
+                    log.warning("Could not refresh registration message %s in channel %d: %s", stored_id, channel_id, e)
+
+            # Send a fresh message and pin it.
+            try:
+                msg = await channel.send(embed=embed, view=RegistrationView(self))
+                try:
+                    await msg.pin()
+                except discord.Forbidden:
+                    log.warning("Missing Manage Messages permission — could not pin info message in channel %d.", channel_id)
+
+                await db.set_config(config_key, str(msg.id))
+                if channel_id == REGISTRATION_CHANNEL_ID:
+                    await db.set_config("registration_message_id", str(msg.id))
+                log.info("Registration info message sent and pinned in channel %d (ID: %d).", channel_id, msg.id)
+            except Exception as e:
+                log.error("Failed to send registration info message in channel %d: %s", channel_id, e)
 
     # ------------------------------------------------------------------
     # /register command
@@ -588,7 +704,7 @@ class RegistrationCog(commands.Cog, name="Registration"):
         """Shared registration flow for the slash command and modal."""
 
         # Enforce channel restriction.
-        if REGISTRATION_CHANNEL_ID and interaction.channel_id != REGISTRATION_CHANNEL_ID:
+        if not self.is_channel_allowed(interaction.channel_id):
             await interaction.response.send_message(
                 "This command can only be used in the designated registration channel.",
                 ephemeral=True,
