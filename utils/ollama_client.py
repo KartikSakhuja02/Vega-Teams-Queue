@@ -32,7 +32,7 @@ import time
 from typing import Optional
 
 import aiohttp
-from PIL import Image
+from PIL import Image, ImageOps
 
 from utils.ocr.models import MatchOCRResult, PlayerRowStats
 
@@ -480,18 +480,41 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
 
 
 _INVALID_IGN_VALUES = {
-    "null", "none", "unknown", "n/a", "", "player",
+    "null", "none", "unknown", "n/a", "", "player", "ign", "username",
     "+添加语音", "+ 添加语音", "添加语音", "暂未设置标签",
     "名片", "文明", "菁英", "超凡", "神话", "钻石", "铂金", "黄金", "白银", "青铜", "铁牌",
+    "总览", "战绩", "数据", "战力", "排位赛", "主页访客", "最近访客", "无畏时刻", "瓦谷展示", "动态",
 }
 
 
+def _normalize_image_orientation(image_bytes: bytes, rot_deg: int = 0) -> bytes:
+    """
+    Transpose EXIF orientation, and if height > width (sideways mobile screenshot),
+    rotate 90 degrees CCW to restore native landscape layout of Valorant Mobile.
+    """
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = ImageOps.exif_transpose(img)
+            if rot_deg:
+                img = img.rotate(rot_deg, expand=True)
+            elif img.height > img.width:
+                # Sideways phone screenshot: rotate 90 CCW to make landscape
+                img = img.rotate(90, expand=True)
+            buf = io.BytesIO()
+            fmt = img.format if img.format in ("PNG", "JPEG", "WEBP") else "PNG"
+            img.save(buf, format=fmt)
+            return buf.getvalue()
+    except Exception as exc:
+        log.debug("Orientation normalization error: %s", exc)
+        return image_bytes
+
+
 def _crop_profile_card(image_bytes: bytes) -> bytes:
-    """Crop the top profile header card where the avatar and username reside."""
+    """Crop the top profile header card (top 45% height) where the avatar and username reside."""
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
             w, h = img.size
-            crop = img.crop((int(w * 0.20), int(h * 0.05), int(w * 0.75), int(h * 0.35)))
+            crop = img.crop((0, 0, w, int(h * 0.45)))
             buf = io.BytesIO()
             fmt = img.format if img.format in ("PNG", "JPEG", "WEBP") else "PNG"
             crop.save(buf, format=fmt)
@@ -534,18 +557,24 @@ def _parse_ign_from_lines(raw_text: str) -> Optional[str]:
 async def extract_profile_ign(image_bytes: bytes) -> Optional[str]:
     """
     Extract the player's in-game name (IGN) from a profile screenshot using Ollama vision.
-    Supports English, Chinese (汉字), numbers, and mixed names.
+    Handles sideways/rotated phone screenshots (e.g. portrait photos with black bars),
+    English, Chinese (汉字), numbers, and mixed names.
     Returns the cleaned IGN string, or None if not found or on error.
     """
     if not is_configured():
         log.warning("Ollama is not configured for profile OCR.")
         return None
 
+    # Check if original image was portrait (sideways)
+    is_portrait = False
     try:
-        # 1. Pre-crop to the upper profile header card
-        cropped_bytes = _crop_profile_card(image_bytes)
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            is_portrait = img.height > img.width
+    except Exception:
+        pass
 
-        # 2. Targeted direct prompt
+    async def _try_extract(raw_bytes: bytes) -> Optional[str]:
+        cropped_bytes = _crop_profile_card(raw_bytes)
         prompt = (
             "Look at the player profile card in this Valorant Mobile screenshot. "
             "Find the player avatar/icon in the upper card and read the bold username/IGN directly next to it. "
@@ -560,12 +589,24 @@ async def extract_profile_ign(image_bytes: bytes) -> Optional[str]:
         if ign:
             return ign
 
-        # 3. Fallback: line-by-line transcription
+        # Fallback: line-by-line transcription
         fallback_prompt = "Transcribe all text lines in this image."
         raw_lines = await _call_ollama_generate(cropped_bytes, fallback_prompt, temperature=0.1, num_predict=48)
-        ign = _parse_ign_from_lines(raw_lines)
+        return _parse_ign_from_lines(raw_lines)
+
+    try:
+        # Attempt 1: Normal orientation (with auto 90 CCW rotation if portrait)
+        norm_bytes = _normalize_image_orientation(image_bytes)
+        ign = await _try_extract(norm_bytes)
         if ign:
             return ign
+
+        # Attempt 2: If portrait was detected and 90 CCW failed, try 270 CCW (90 CW)
+        if is_portrait:
+            norm_bytes_270 = _normalize_image_orientation(image_bytes, rot_deg=270)
+            ign = await _try_extract(norm_bytes_270)
+            if ign:
+                return ign
 
     except Exception as e:
         log.error("Failed to extract profile IGN via Ollama: %s", e)
