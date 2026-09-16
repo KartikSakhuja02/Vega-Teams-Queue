@@ -299,6 +299,10 @@ async def update_player_region(discord_id: int, new_region: str) -> Optional[dic
         return None
 
 
+# Alias for compatibility across cogs
+admin_update_player_region = update_player_region
+
+
 async def set_player_status(
     discord_id: int,
     new_status: str,

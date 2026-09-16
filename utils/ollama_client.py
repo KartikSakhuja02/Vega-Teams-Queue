@@ -446,15 +446,22 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
 
 
 _PROFILE_IGN_PROMPT = """\
-You are an expert game profile OCR assistant.
-Analyze this game career or profile screenshot (e.g. Valorant, Valorant Mobile, or similar competitive mobile game).
-Locate the player's profile username / in-game name (IGN).
-If there is a tagline or secondary tag below or next to the username (for example username "klein-" and tagline "rust"), combine them (e.g. "klein-#rust") or return the username.
-Do NOT output rank badges (e.g. "神话", "Myth", "Diamond"), achievements, or system labels.
+You are an expert game profile OCR assistant specializing in Valorant Mobile (无畏契约手游).
+Analyze this player profile overview screenshot.
+
+Extract the player's primary In-Game Name (IGN) / username:
+- The username can be in Chinese characters (汉字, e.g. "棠槽"), English letters (e.g. "klein-"), numbers, or mixed.
+- Location:
+  1. Find the player avatar / level badge (e.g. Lv. 150 or Lv. 464) in the upper-left of the profile card.
+  2. Directly to the right of the avatar (and after any small gender icon ♂/♀ or VIP badge), is the player's bold USERNAME (for example: "棠槽" or "klein-").
+  3. IMPORTANT - EXCLUSIONS:
+     • Directly underneath the username, there is a grey rounded box with user-written signature/status text (e.g. "发你麻个枪", "rust", followed by "+ 添加语音"). DO NOT extract this signature/status box!
+     • Do NOT extract "+ 添加语音", account ID ("编号"), level numbers, or rank text ("神话", "超凡", "铂金", etc.).
+- Output ONLY the player's primary username itself.
 
 Return ONLY a valid JSON object in this exact format:
 {
-  "ign": "<player in-game name>"
+  "ign": "<exact player username>"
 }
 """
 
@@ -462,6 +469,7 @@ Return ONLY a valid JSON object in this exact format:
 async def extract_profile_ign(image_bytes: bytes) -> Optional[str]:
     """
     Extract the player's in-game name (IGN) from a profile screenshot using Ollama vision.
+    Supports English, Chinese (汉字), numbers, and mixed names.
     Returns the cleaned IGN string, or None if not found or on error.
     """
     if not is_configured():
@@ -469,14 +477,36 @@ async def extract_profile_ign(image_bytes: bytes) -> Optional[str]:
         return None
 
     try:
-        raw_text = await _call_ollama(image_bytes, _PROFILE_IGN_PROMPT, json_format=True)
-        log.debug("Profile IGN OCR raw: %s", raw_text[:200])
-        parsed = _extract_json(raw_text)
-        ign = parsed.get("ign")
+        # Avoid json_format=True as constrained grammar decoding can cause empty responses on vision models
+        raw_text = await _call_ollama(image_bytes, _PROFILE_IGN_PROMPT, json_format=False)
+        log.debug("Profile IGN OCR raw: %s", raw_text[:300])
+
+        ign: Optional[str] = None
+
+        # 1. Try standard JSON extraction
+        try:
+            parsed = _extract_json(raw_text)
+            if isinstance(parsed, dict):
+                ign = parsed.get("ign")
+        except Exception:
+            pass
+
+        # 2. Fallback regex extraction if JSON extraction didn't work
+        if not ign or not isinstance(ign, str):
+            match = re.search(r'["\']ign["\']\s*:\s*["\']([^"\']+)["\']', raw_text, re.IGNORECASE)
+            if match:
+                ign = match.group(1)
+
+        # 3. Clean up the extracted IGN
         if ign and isinstance(ign, str):
-            cleaned = ign.strip()
-            if cleaned.lower() not in ("null", "none", "unknown", "n/a", ""):
+            cleaned = ign.strip().strip('"').strip("'")
+            if "#" in cleaned:
+                cleaned = cleaned.split("#")[0].strip()
+            if "\n" in cleaned:
+                cleaned = cleaned.split("\n")[0].strip()
+            if cleaned.lower() not in ("null", "none", "unknown", "n/a", "", "player", "<exact player username>"):
                 return cleaned
+
     except Exception as e:
         log.error("Failed to extract profile IGN via Ollama: %s", e)
 

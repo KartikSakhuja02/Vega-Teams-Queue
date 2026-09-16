@@ -399,7 +399,7 @@ class VerificationCog(commands.Cog, name="Verification"):
                 )
             else:
                 await db.admin_update_player_ign(player_id, ign)
-                await db.admin_update_player_region(player_id, region)
+                await db.update_player_region(player_id, region)
         else:
             await db.register_player(
                 discord_id=player_id,
