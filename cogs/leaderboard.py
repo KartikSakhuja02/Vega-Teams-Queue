@@ -267,7 +267,7 @@ class PageSelect(discord.ui.Select):
 
 
 class LeaderboardPaginationView(discord.ui.View):
-    """Interactive NeatQueue UI View with buttons, dropdowns, and website link."""
+    """Interactive NeatQueue UI View with buttons and metric/page dropdown menus."""
 
     def __init__(
         self,
@@ -346,17 +346,6 @@ class LeaderboardPaginationView(discord.ui.View):
 
         # Row 2: Page Select Menu
         self.add_item(PageSelect(current_page=self.current_page, total_pages=self.total_pages))
-
-        # Row 3: Website Leaderboard Link Button
-        website_url = os.environ.get("LEADERBOARD_URL", "https://discord.com")
-        web_btn = discord.ui.Button(
-            label="Website Leaderboard",
-            emoji="📊",
-            style=discord.ButtonStyle.link,
-            url=website_url,
-            row=3,
-        )
-        self.add_item(web_btn)
 
     async def refresh_and_edit(self, interaction: discord.Interaction) -> None:
         """Fetch fresh data, update components, and edit interaction response."""
