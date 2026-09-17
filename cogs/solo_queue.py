@@ -1035,11 +1035,6 @@ class PlayerDraftSelect(discord.ui.Select):
                 if interaction.message:
                     vote_view.message = interaction.message
                     await db.update_solo_match_panel(self.match_id, interaction.message.id)
-                if interaction.channel:
-                    await interaction.channel.send(
-                        "**TEAMS DRAFTED • MAP VOTING ACTIVE**\n"
-                        "All players please vote for the map above! (1 minute remaining)"
-                    )
                 return
 
             # Move to MAP_VETO
@@ -1065,12 +1060,6 @@ class PlayerDraftSelect(discord.ui.Select):
             embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
             veto_view = SoloMapVetoView(updated_match, self.players_by_id, veto_mode=veto_mode, colour=colour)
             await _safe_edit_draft_message(content=None, embed=embed, view=veto_view)
-
-            if interaction.channel:
-                await interaction.channel.send(
-                    f"**TEAMS DRAFTED • MAP VETO ACTIVE**\n"
-                    f"<@{c1_id}> Please ban the first map below."
-                )
             return
 
         # Advance draft step
@@ -2388,43 +2377,54 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                         )
 
                 # Categories
-                category: Optional[discord.CategoryChannel] = None
+                # Reference parent matchmaking category (e.g. » MATCHMAKING «)
+                parent_category: Optional[discord.CategoryChannel] = None
                 if SOLO_MATCH_CATEGORY_ID:
                     cat = guild.get_channel(SOLO_MATCH_CATEGORY_ID)
                     if isinstance(cat, discord.CategoryChannel):
-                        category = cat
-
-                voice_category: Optional[discord.CategoryChannel] = category
-                if SOLO_VOICE_CATEGORY_ID:
-                    vcat = guild.get_channel(SOLO_VOICE_CATEGORY_ID)
-                    if isinstance(vcat, discord.CategoryChannel):
-                        voice_category = vcat
+                        parent_category = cat
 
                 # Get sequential queue number starting from 1
                 queue_num = await db.get_next_solo_match_id()
 
-                # Create 1 text channel and 3 voice channels IN PARALLEL
+                # Create dedicated category for this queue match (placed right below parent Matchmaking category)
+                pos = (parent_category.position + 1) if parent_category else None
+                cat_kwargs = {
+                    "name": f"Queue #{queue_num}",
+                    "overwrites": text_overwrites,
+                }
+                if pos is not None:
+                    cat_kwargs["position"] = pos
+
+                try:
+                    match_category = await guild.create_category(**cat_kwargs)
+                except Exception as e:
+                    log.warning("Could not create match category Queue #%s with position: %s, retrying without position", queue_num, e)
+                    cat_kwargs.pop("position", None)
+                    match_category = await guild.create_category(**cat_kwargs)
+
+                # Create 1 text channel and 3 voice channels inside match_category
                 text_channel, lobby_vc, team_a_vc, team_b_vc = await asyncio.gather(
                     guild.create_text_channel(
                         name=f"queue-{queue_num}",
                         overwrites=text_overwrites,
-                        category=category,
+                        category=match_category,
                         topic=f"10-Man Solo Ranked Queue #{queue_num}",
                     ),
                     guild.create_voice_channel(
                         name=f"🔊 Queue {queue_num} Lobby",
                         overwrites=voice_lobby_overwrites,
-                        category=voice_category,
+                        category=match_category,
                     ),
                     guild.create_voice_channel(
-                        name=f"🔊 Queue {queue_num} Team A",
+                        name=f"Team 1 - #{queue_num}",
                         overwrites=team_locked_overwrites,
-                        category=voice_category,
+                        category=match_category,
                     ),
                     guild.create_voice_channel(
-                        name=f"🔊 Queue {queue_num} Team B",
+                        name=f"Team 2 - #{queue_num}",
                         overwrites=team_locked_overwrites,
-                        category=voice_category,
+                        category=match_category,
                     ),
                 )
 
@@ -3367,7 +3367,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             # Wait 10 seconds
             await asyncio.sleep(10)
 
-            # Cleanup voice channels & delete text channel
+            # Cleanup voice channels, text channel, and match category
+            cat_to_delete: Optional[discord.CategoryChannel] = None
+            if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+                cat = interaction.channel.category
+                if cat and cat.id != SOLO_MATCH_CATEGORY_ID and f"#{match['id']}" in cat.name:
+                    cat_to_delete = cat
+
             if interaction.guild:
                 v_lobby_id = match.get("voice_lobby_id")
                 v1_id = match.get("voice_team1_id")
@@ -3386,6 +3392,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     await interaction.channel.delete(reason=f"Queue #{match['id']} concluded")
                 except Exception as e:
                     log.error("Failed to delete queue channel: %s", e)
+
+            if cat_to_delete:
+                try:
+                    await cat_to_delete.delete(reason=f"Queue #{match['id']} concluded")
+                except Exception as e:
+                    log.debug("Failed to delete queue category: %s", e)
 
         async def _on_declined(btn_interaction: Optional[discord.Interaction]) -> None:
             await db.release_solo_match_result_submission(match["id"])
@@ -3586,6 +3598,10 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             ephemeral=True,
         )
 
+        cat_to_delete: Optional[discord.CategoryChannel] = None
+        if target_ch and target_ch.category and target_ch.category.id != SOLO_MATCH_CATEGORY_ID and f"#{match['id']}" in target_ch.category.name:
+            cat_to_delete = target_ch.category
+
         if target_ch and isinstance(target_ch, discord.TextChannel):
             try:
                 await target_ch.send(
@@ -3599,6 +3615,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 await target_ch.delete(reason=f"Queue #{match['id']} cancelled by {interaction.user.name}")
             except Exception as e:
                 log.error("Failed to delete match channel: %s", e)
+
+        if cat_to_delete:
+            try:
+                await cat_to_delete.delete(reason=f"Queue #{match['id']} cancelled by {interaction.user.name}")
+            except Exception as e:
+                log.debug("Failed to delete match category: %s", e)
 
     @app_commands.command(
         name="admin-change-command",
