@@ -19,6 +19,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 import os
 import random
@@ -74,6 +75,19 @@ MAP_POOL_RAW = os.environ.get(
     "Ascent, Bind, Haven, Split, Sunset, Lotus, Abyss",
 )
 MAP_POOL: list[str] = [m.strip() for m in MAP_POOL_RAW.split(",") if m.strip()]
+
+MAPS_DIR: str = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "maps")
+
+
+def get_solo_map_file(selected_map: Optional[str]) -> Optional[discord.File]:
+    """Return a discord.File attachment for the selected map if an image exists in maps/."""
+    if not selected_map:
+        return None
+    clean_name = selected_map.strip().lower()
+    path = os.path.join(MAPS_DIR, f"{clean_name}.png")
+    if os.path.exists(path):
+        return discord.File(path, filename=f"{clean_name}.png")
+    return None
 
 CAPTAIN_SELECTION_MODE = os.environ.get("CAPTAIN_SELECTION_MODE", "HIGHEST_ELO").upper()
 DRAFT_MODE = os.environ.get("DRAFT_MODE", "SNAKE").upper()
@@ -486,7 +500,7 @@ def build_solo_map_veto_embed(
     players_by_id: dict[int, dict],
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Ultra-minimalist map veto embed — no emojis, plain text only."""
+    """Map veto and final Match Ready embed matching the vertical reference UI."""
     status = match.get("status", "MAP_VETO")
     turn_id = match.get("current_turn_captain_id")
     selected_map = match.get("selected_map")
@@ -495,35 +509,72 @@ def build_solo_map_veto_embed(
     c1_id = match.get("captain1_id")
     c2_id = match.get("captain2_id")
 
-    def _names(ids: list) -> str:
-        parts = []
-        for pid in ids:
-            p = players_by_id.get(pid, {})
-            name = p.get("ign") or p.get("username") or f"<@{pid}>"
-            if pid in (c1_id, c2_id):
-                parts.append(f"{name} (cap)")
-            else:
-                parts.append(name)
-        return ",  ".join(parts) or "-"
-
     t1_ids = match.get("team1_player_ids") or ([c1_id] if c1_id else [])
     t2_ids = match.get("team2_player_ids") or ([c2_id] if c2_id else [])
-    t1 = _names(t1_ids)
-    t2 = _names(t2_ids)
 
     if status == "IN_PROGRESS":
+        # Calculate Team 1 and Team 2 average ELO
+        t1_elos = [players_by_id.get(pid, {}).get("elo", 1000) for pid in t1_ids]
+        t2_elos = [players_by_id.get(pid, {}).get("elo", 1000) for pid in t2_ids]
+        t1_avg = round(sum(t1_elos) / len(t1_elos)) if t1_elos else 1000
+        t2_avg = round(sum(t2_elos) / len(t2_elos)) if t2_elos else 1000
+
+        # Ensure captain is listed first in mentions
+        ordered_t1 = ([c1_id] if c1_id in t1_ids else []) + [pid for pid in t1_ids if pid != c1_id]
+        ordered_t2 = ([c2_id] if c2_id in t2_ids else []) + [pid for pid in t2_ids if pid != c2_id]
+
+        t1_mentions = " , ".join(f"<@{pid}>" for pid in ordered_t1) if ordered_t1 else "-"
+        t2_mentions = " , ".join(f"<@{pid}>" for pid in ordered_t2) if ordered_t2 else "-"
+
+        v1_id = match.get("voice_team1_id")
+        v2_id = match.get("voice_team2_id")
+
+        details_lines = []
+        if v1_id:
+            details_lines.append(f"<#{v1_id}>")
+        if v2_id:
+            details_lines.append(f"<#{v2_id}>")
+        if selected_map:
+            details_lines.append(f"Map: **{selected_map}**")
+        details_lines.append("\n> Use `/submit-result` when the match concludes.")
+
         desc = (
-            f"**Map:** `{selected_map}`\n\n"
-            f"**Team A** — {t1}\n"
-            f"**Team B** — {t2}\n\n"
-            f"> Use `/submit-result` when the match concludes."
+            f"**__Team 1 - {t1_avg}__**\n"
+            f"{t1_mentions}\n\n"
+            f"**__Team 2 - {t2_avg}__**\n"
+            f"{t2_mentions}\n\n"
+            f"**Match Details**\n"
+            + "\n".join(details_lines)
         )
+
         embed = discord.Embed(
-            title=f"Queue {match['id']}  —  Match Ready",
+            title=f"⚔️ Queue#{match['id']}",
             description=desc,
-            colour=colour or EMBED_COLOUR,
+            colour=discord.Colour(0xE74C3C),
+            timestamp=datetime.now(timezone.utc),
         )
+
+        clean_map = selected_map.strip().lower() if selected_map else ""
+        if clean_map:
+            map_path = os.path.join(MAPS_DIR, f"{clean_map}.png")
+            if os.path.exists(map_path):
+                embed.set_image(url=f"attachment://{clean_map}.png")
+
+        return embed
     else:
+        def _names(ids: list) -> str:
+            parts = []
+            for pid in ids:
+                p = players_by_id.get(pid, {})
+                name = p.get("ign") or p.get("username") or f"<@{pid}>"
+                if pid in (c1_id, c2_id):
+                    parts.append(f"{name} (cap)")
+                else:
+                    parts.append(name)
+            return ",  ".join(parts) or "-"
+
+        t1 = _names(t1_ids)
+        t2 = _names(t2_ids)
         action = "Pick" if len(avail_maps) == 2 else "Ban"
         picker = players_by_id.get(turn_id, {}).get("ign") if turn_id else None
         if not picker and turn_id:
@@ -544,7 +595,7 @@ def build_solo_map_veto_embed(
             description=desc,
             colour=colour or EMBED_COLOUR,
         )
-    return embed
+        return embed
 
 
 def build_solo_map_vote_embed(
@@ -816,19 +867,27 @@ class PlayerDraftSelect(discord.ui.Select):
             except Exception as e:
                 log.debug("Could not defer interaction in PlayerDraftSelect: %s", e)
 
-        async def _safe_edit_draft_message(*, content=None, embed=None, view=None):
+        async def _safe_edit_draft_message(*, content=None, embed=None, view=None, map_name: Optional[str] = None):
             # 1. Edit via interaction.message directly using bot token (immune to 10062 expiration)
             if interaction.message:
                 try:
-                    return await interaction.message.edit(content=content, embed=embed, view=view)
+                    f = get_solo_map_file(map_name)
+                    kwargs = {"content": content, "embed": embed, "view": view}
+                    if f:
+                        kwargs["attachments"] = [f]
+                    return await interaction.message.edit(**kwargs)
                 except Exception as e:
                     log.debug("interaction.message.edit failed in PlayerDraftSelect: %s", e)
             # 2. Try editing via interaction response/webhook
             try:
+                f = get_solo_map_file(map_name)
+                kwargs = {"content": content, "embed": embed, "view": view}
+                if f:
+                    kwargs["attachments"] = [f]
                 if not interaction.response.is_done():
-                    return await interaction.response.edit_message(content=content, embed=embed, view=view)
+                    return await interaction.response.edit_message(**kwargs)
                 else:
-                    return await interaction.edit_original_response(content=content, embed=embed, view=view)
+                    return await interaction.edit_original_response(**kwargs)
             except Exception as e:
                 log.debug("interaction edit response failed in PlayerDraftSelect: %s", e)
             # 3. Fallback: fetch from channel using match panel_message_id
@@ -836,7 +895,11 @@ class PlayerDraftSelect(discord.ui.Select):
             if interaction.channel and panel_id:
                 try:
                     msg = await interaction.channel.fetch_message(panel_id)
-                    return await msg.edit(content=content, embed=embed, view=view)
+                    f = get_solo_map_file(map_name)
+                    kwargs = {"content": content, "embed": embed, "view": view}
+                    if f:
+                        kwargs["attachments"] = [f]
+                    return await msg.edit(**kwargs)
                 except Exception as e:
                     log.error("Fallback msg.edit failed in PlayerDraftSelect: %s", e)
 
@@ -899,7 +962,7 @@ class PlayerDraftSelect(discord.ui.Select):
                     updated_match["team2_player_ids"] = t2_ids
                 updated_match["selected_map"] = existing_map
                 embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
-                await _safe_edit_draft_message(content=None, embed=embed, view=None)
+                await _safe_edit_draft_message(content=None, embed=embed, view=None, map_name=existing_map)
                 if interaction.channel:
                     await interaction.channel.send(
                         f"**MATCH READY • MAP: {existing_map.upper()}**\n"
@@ -927,7 +990,7 @@ class PlayerDraftSelect(discord.ui.Select):
                 if not updated_match.get("team2_player_ids"):
                     updated_match["team2_player_ids"] = t2_ids
                 embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
-                await _safe_edit_draft_message(content=None, embed=embed, view=None)
+                await _safe_edit_draft_message(content=None, embed=embed, view=None, map_name=final_map)
                 if interaction.channel:
                     await interaction.channel.send(
                         f"**MATCH READY • MAP: {final_map.upper()}**\n"
@@ -1146,10 +1209,12 @@ class SoloMapVetoView(discord.ui.View):
             colour = self.colour or await get_solo_embed_colour()
             embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
 
+            map_file = get_solo_map_file(chosen_map)
+            files_arg = [map_file] if map_file else []
             if not interaction.response.is_done():
-                await interaction.response.edit_message(content=None, embed=embed, view=None)
+                await interaction.response.edit_message(content=None, embed=embed, view=None, attachments=files_arg)
             else:
-                await interaction.edit_original_response(content=None, embed=embed, view=None)
+                await interaction.edit_original_response(content=None, embed=embed, view=None, attachments=files_arg)
 
             if interaction.message:
                 await db.update_solo_match_panel(match["id"], interaction.message.id)
@@ -1233,10 +1298,12 @@ class SoloMapVetoView(discord.ui.View):
 
                 embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
 
+                map_file = get_solo_map_file(final_map)
+                files_arg = [map_file] if map_file else []
                 if not interaction.response.is_done():
-                    await interaction.response.edit_message(content=None, embed=embed, view=None)
+                    await interaction.response.edit_message(content=None, embed=embed, view=None, attachments=files_arg)
                 else:
-                    await interaction.edit_original_response(content=None, embed=embed, view=None)
+                    await interaction.edit_original_response(content=None, embed=embed, view=None, attachments=files_arg)
 
                 if interaction.message:
                     await db.update_solo_match_panel(match["id"], interaction.message.id)
@@ -1586,12 +1653,16 @@ class SoloMapVoteView(discord.ui.View):
                 edited_panel = False
                 if interaction and not interaction.is_expired():
                     try:
+                        map_file = get_solo_map_file(final_map)
+                        edit_kwargs = {"content": None, "embed": embed, "view": None}
+                        if map_file:
+                            edit_kwargs["attachments"] = [map_file]
                         if not interaction.response.is_done():
-                            await interaction.response.edit_message(content=None, embed=embed, view=None)
+                            await interaction.response.edit_message(**edit_kwargs)
                             edited_panel = True
                             log.info("SoloMapVoteView._finalize: transitioned message via interaction response")
                         else:
-                            await interaction.edit_original_response(content=None, embed=embed, view=None)
+                            await interaction.edit_original_response(**edit_kwargs)
                             edited_panel = True
                             log.info("SoloMapVoteView._finalize: transitioned message via interaction original_response")
                     except Exception as e:
@@ -1599,7 +1670,11 @@ class SoloMapVoteView(discord.ui.View):
 
                 if not edited_panel and panel_msg:
                     try:
-                        await panel_msg.edit(content=None, embed=embed, view=None)
+                        map_file = get_solo_map_file(final_map)
+                        edit_kwargs = {"content": None, "embed": embed, "view": None}
+                        if map_file:
+                            edit_kwargs["attachments"] = [map_file]
+                        await panel_msg.edit(**edit_kwargs)
                         edited_panel = True
                         log.info("SoloMapVoteView._finalize: transitioned panel_msg (ID: %s) in-place to Match Ready", panel_msg.id)
                     except Exception as e:
@@ -1607,7 +1682,11 @@ class SoloMapVoteView(discord.ui.View):
 
                 if not edited_panel and target_ch and hasattr(target_ch, "send"):
                     try:
-                        ready_msg = await target_ch.send(embed=embed)
+                        map_file = get_solo_map_file(final_map)
+                        send_kwargs = {"embed": embed}
+                        if map_file:
+                            send_kwargs["file"] = map_file
+                        ready_msg = await target_ch.send(**send_kwargs)
                         await db.update_solo_match_panel(current_match["id"], ready_msg.id)
                         edited_panel = True
                         log.info("SoloMapVoteView._finalize: sent new Match Ready embed to target_ch (ID: %s)", ready_msg.id)
@@ -2540,16 +2619,19 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     status="IN_PROGRESS",
                 )
                 updated = await db.get_solo_match_by_id(current_match["id"])
-                embed = build_solo_map_veto_embed(updated, players_by_id, colour=colour)
-                panel_msg = await channel.send(
-                    content=(
+                map_file = get_solo_map_file(final_map)
+                send_kwargs = {
+                    "content": (
                         f"**ALL PLAYERS CHECKED IN • TEAMS AUTO-BALANCED**\n"
                         f"Map randomly selected: **{final_map.upper()}**!\n"
                         f"Teams have been moved to their respective voice channels.\n\n"
                         f"Captains <@{c1_id}> and <@{c2_id}>: Please set up the custom lobby and invite all players."
                     ),
-                    embed=embed,
-                )
+                    "embed": embed,
+                }
+                if map_file:
+                    send_kwargs["file"] = map_file
+                panel_msg = await channel.send(**send_kwargs)
                 await db.update_solo_match_panel(current_match["id"], panel_msg.id)
             elif veto_mode in ("MAP_VOTE", "VOTE"):
                 pool_copy = list(map_pool) if map_pool else ["Bind", "Haven", "Split", "Ascent"]
@@ -3693,7 +3775,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     await panel_msg.edit(embed=embed)
                 elif status == "IN_PROGRESS":
                     embed = build_solo_map_veto_embed(updated_match, players_by_id, colour=colour)
-                    await panel_msg.edit(embed=embed)
+                    map_file = get_solo_map_file(updated_match.get("selected_map"))
+                    edit_kwargs = {"embed": embed}
+                    if map_file:
+                        edit_kwargs["attachments"] = [map_file]
+                    await panel_msg.edit(**edit_kwargs)
         except Exception as e:
             log.debug("Failed to update panel message on captain change: %s", e)
 
