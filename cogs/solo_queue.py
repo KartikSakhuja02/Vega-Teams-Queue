@@ -29,6 +29,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import db
+from cogs.bot_logger import send_log, COL_WARNING
 
 log = logging.getLogger(__name__)
 
@@ -1535,6 +1536,83 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         clean_str = ", ".join(parsed_maps)
         await db.set_config(CONFIG_KEY_MAP_POOL, clean_str)
         await interaction.followup.send(f"Active map pool updated to: {clean_str}", ephemeral=True)
+
+    @solo_config.command(name="clear_queue", description="Clear all players from the 10-man solo queue.")
+    async def solo_config_clear_cmd(self, interaction: discord.Interaction) -> None:
+        await self._handle_clear_solo_queue(interaction)
+
+    async def _handle_clear_solo_queue(self, interaction: discord.Interaction) -> None:
+        """Internal helper to clear the 10-man solo queue and reset player statuses."""
+        await interaction.response.defer(ephemeral=True)
+
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send("You do not have staff permissions to clear the solo queue.", ephemeral=True)
+            return
+
+        queued = await db.get_solo_queue()
+        count = len(queued)
+
+        if count == 0:
+            await interaction.followup.send("The 10-man solo queue is already empty.", ephemeral=True)
+            return
+
+        # Reset all queued players' status back to IDLE
+        for player in queued:
+            try:
+                await db.set_player_status(player["discord_id"], "IDLE")
+            except Exception as exc:
+                log.warning("Failed to reset status for player %d: %s", player["discord_id"], exc)
+
+        # Clear the queue table
+        await db.clear_solo_queue()
+
+        # Refresh the persistent queue panel
+        await self.refresh_queue_message()
+
+        log.info(
+            "Staff %s (%d) cleared the 10-man solo queue (%d players removed).",
+            interaction.user.name,
+            interaction.user.id,
+            count,
+        )
+
+        try:
+            await send_log(
+                self.bot,
+                title="10-Man Solo Queue Cleared",
+                description=f"{interaction.user.mention} cleared all players from the 10-man solo queue.",
+                colour=COL_WARNING,
+                fields=[
+                    ("Staff", f"{interaction.user.mention} (`{interaction.user.id}`)", True),
+                    ("Players Evicted", str(count), True),
+                ],
+                guild_id=interaction.guild_id,
+            )
+        except Exception as e:
+            log.debug("Failed to send clear queue log: %s", e)
+
+        await interaction.followup.send(
+            f"Successfully cleared **{count}** player(s) from the 10-man solo queue and reset their status to IDLE.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="clear_solo_queue",
+        description="Clear all players from the 10-man solo queue and reset status to IDLE (Staff only).",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def clear_solo_queue_cmd(self, interaction: discord.Interaction) -> None:
+        """Staff command to clear all waiting players from the 10-man solo queue."""
+        await self._handle_clear_solo_queue(interaction)
+
+    @app_commands.command(
+        name="clear-solo-queue",
+        description="Clear all players from the 10-man solo queue and reset status to IDLE (Staff only).",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def clear_solo_queue_hyphen_cmd(self, interaction: discord.Interaction) -> None:
+        """Staff command to clear all waiting players from the 10-man solo queue."""
+        await self._handle_clear_solo_queue(interaction)
 
     @app_commands.command(
         name="post_solo_queue",

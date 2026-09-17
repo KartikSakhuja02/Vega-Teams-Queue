@@ -133,6 +133,7 @@ def _build_admin_commands_embed() -> discord.Embed:
             "`/solo_config theme [preset] [custom_hex]` — Set visual embed accent theme (`PURPLE`, `VALORANT_RED`, `CYBER_CYAN`, `GOLD`, `EMERALD`, or `#hex`)\n"
             "`/solo_config map_pool maps:<comma_list>` — Set active competitive map pool\n"
             "`/post_solo_queue` — Post or refresh persistent 10-man solo queue panel\n"
+            "`/clear_solo_queue` *(or `/clear-solo-queue`)* — Clear all waiting players from queue and reset to IDLE\n"
             "`/cancel_solo_match` — Cancel active 10-man match lobby and release players"
         ),
         inline=False,
