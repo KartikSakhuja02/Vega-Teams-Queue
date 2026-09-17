@@ -198,8 +198,8 @@ async def check_connection() -> tuple[bool, str]:
         return False, f"Ollama check failed: {exc}"
 
 
-def _prepare_image(image_bytes: bytes, max_dim: int = 1920) -> bytes:
-    """Resize huge screenshots to max 1080p equivalent to keep token count fast and within context."""
+def _prepare_image(image_bytes: bytes, max_dim: int = 1280) -> bytes:
+    """Resize huge screenshots to max 720p/1080p equivalent (1280px) to keep vision tokens within context limits."""
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
             w, h = img.size
@@ -224,7 +224,7 @@ async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = Fals
 
 async def _call_ollama_internal(image_bytes: bytes, prompt: str, json_format: bool = False) -> str:
     """Internal HTTP call to Ollama /api/chat with auto-retry on grammar stack bug."""
-    image_bytes = _prepare_image(image_bytes)
+    image_bytes = _prepare_image(image_bytes, max_dim=1280)
     image_b64 = base64.b64encode(image_bytes).decode()
 
     # Note: With vision models (qwen2.5vl:3b), passing format="json" activates llama.cpp's BNF grammar
@@ -245,6 +245,8 @@ async def _call_ollama_internal(image_bytes: bytes, prompt: str, json_format: bo
             "num_ctx": _NUM_CTX,
             "num_predict": _MAX_TOKENS,
             "temperature": 0.05,
+            "repeat_penalty": 1.15,
+            "stop": ["@@", "@@@"],
         },
     }
     if json_format:
