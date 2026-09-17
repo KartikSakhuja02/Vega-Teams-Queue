@@ -3401,7 +3401,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             return
 
         # 7. Run OCR Pipeline (Ollama qwen2.5vl:3b -> OpenRouter -> Tesseract fallback)
-        from utils.match_ocr import process_match_screenshot, PlayerRowStats
+        from utils.match_ocr import process_match_screenshot, PlayerRowStats, get_agent_emoji
         result = await process_match_screenshot(image_bytes)
 
         if not result.success or (not result.team1_players and not result.team2_players):
@@ -3666,7 +3666,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                         badges.append("⭐ `Team MVP`")
 
                 mvp_badge = f" {' '.join(badges)}" if badges else ""
-                lines.append(f"<@{pid}>{mvp_badge}")
+                stats_obj = u.get("stats_obj")
+                agent_name = stats_obj.agent if stats_obj else None
+                agent_emoji = get_agent_emoji(self.bot, agent_name, interaction.guild)
+                prefix = f"{agent_emoji} " if agent_emoji else ""
+
+                lines.append(f"{prefix}<@{pid}>{mvp_badge}")
                 lines.append(f"└ [{k}/{d}/{a}] {rating:.2f}r {elo_str}")
             return lines
 

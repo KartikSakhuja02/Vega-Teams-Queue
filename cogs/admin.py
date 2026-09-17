@@ -1674,6 +1674,8 @@ class AdminCog(commands.Cog, name="Admin"):
             colour=sidebar_color,
         )
 
+        from utils.match_ocr import get_agent_emoji
+
         def _fmt_player_list(players: list[PlayerRowStats]) -> str:
             if not players:
                 return "*No players detected*"
@@ -1689,7 +1691,15 @@ class AdminCog(commands.Cog, name="Admin"):
                 elif p.mvp_type == "Team MVP" or p.is_mvp:
                     mvp_badge = " ⭐ `Team MVP`"
 
-                lines.append(f"**{ign}**{mvp_badge}")
+                agent_emoji = get_agent_emoji(self.bot, p.agent, interaction.guild)
+                if agent_emoji:
+                    agent_prefix = f"{agent_emoji} "
+                elif p.agent:
+                    agent_prefix = f"`[{p.agent}]` "
+                else:
+                    agent_prefix = ""
+
+                lines.append(f"{agent_prefix}**{ign}**{mvp_badge}")
 
                 # Format clean, informative pills: `16/11/4 KDA` • `285 ACS` • `2,400 DMG` • `3 FB`
                 parts = [f"`{p.kills}/{p.deaths}/{p.assists} KDA`"]
@@ -1720,6 +1730,73 @@ class AdminCog(commands.Cog, name="Admin"):
         embed.set_thumbnail(url=image.url)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="sync-agent-emojis",
+        description="Upload Valorant agent icon emojis from agents/ to this Discord server.",
+    )
+    async def sync_agent_emojis(self, interaction: discord.Interaction) -> None:
+        """Upload all agent icons from agents/*.png as custom emojis to the current guild."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("You do not have permission to use admin commands.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        from utils.ocr.agent_detector import AGENTS_DIR, clean_agent_name, get_emoji_candidate_names
+        import glob
+        from pathlib import Path
+
+        if not os.path.exists(AGENTS_DIR):
+            await interaction.followup.send(f"❌ Agents directory not found at `{AGENTS_DIR}`.", ephemeral=True)
+            return
+
+        existing_names = {e.name.lower() for e in interaction.guild.emojis}
+        uploaded = 0
+        skipped = 0
+        failed = []
+
+        agent_files = sorted(glob.glob(os.path.join(AGENTS_DIR, "*.png")))
+        if not agent_files:
+            await interaction.followup.send("❌ No PNG files found in `agents/` folder.", ephemeral=True)
+            return
+
+        for fpath in agent_files:
+            stem = Path(fpath).stem
+            canonical = clean_agent_name(stem) or stem
+            candidates = get_emoji_candidate_names(canonical)
+            primary_name = candidates[0] if candidates else stem
+
+            # Check if any variant of this emoji already exists in the server
+            if any(c.lower() in existing_names for c in candidates):
+                skipped += 1
+                continue
+
+            try:
+                with open(fpath, "rb") as f:
+                    img_bytes = f.read()
+                await interaction.guild.create_custom_emoji(
+                    name=primary_name,
+                    image=img_bytes,
+                    reason="Sync Valorant agent emojis for queue result display",
+                )
+                existing_names.add(primary_name.lower())
+                uploaded += 1
+            except Exception as exc:
+                log.warning("Failed to upload agent emoji %s: %s", primary_name, exc)
+                failed.append(f"{primary_name}: {exc}")
+
+        msg = f"**Agent Emojis Sync Complete**:\n• 🆕 Uploaded: `{uploaded}`\n• ⏩ Already present: `{skipped}`"
+        if failed:
+            msg += f"\n• ⚠️ Failed ({len(failed)}): " + ", ".join(failed[:5])
+            if len(failed) > 5:
+                msg += f" ...and {len(failed) - 5} more"
+
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

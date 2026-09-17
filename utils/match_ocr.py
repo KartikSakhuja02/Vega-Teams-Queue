@@ -22,6 +22,12 @@ from typing import Optional
 
 from utils.ocr.models import MatchOCRResult, PlayerRowStats, FieldResult  # noqa: F401
 from utils.ocr.pipeline import run_pipeline
+from utils.ocr.agent_detector import (  # noqa: F401
+    resolve_player_agents,
+    clean_agent_name,
+    get_agent_emoji,
+    get_emoji_candidate_names,
+)
 
 log = logging.getLogger(__name__)
 
@@ -174,6 +180,11 @@ async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
     """
     loop = asyncio.get_running_loop()
 
+    def _finalize(res: MatchOCRResult) -> MatchOCRResult:
+        res = resolve_match_mvps(res)
+        res = resolve_player_agents(res, image_bytes)
+        return res
+
     # ── 1. Local Ollama (qwen2.5vl:3b — free, no rate limits) ─────────────────
     if _ollama_available():
         try:
@@ -185,7 +196,7 @@ async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
                 result.confidence, result.needs_review,
                 result.engine, result.processing_time_ms,
             )
-            return resolve_match_mvps(result)
+            return _finalize(result)
         except Exception as exc:
             log.warning("Ollama OCR failed (%s) — trying next engine", exc)
 
@@ -200,11 +211,11 @@ async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
                 result.confidence, result.needs_review,
                 result.engine, result.processing_time_ms,
             )
-            return resolve_match_mvps(result)
+            return _finalize(result)
         except Exception as exc:
             log.warning("OpenRouter OCR failed (%s) — falling back to Tesseract", exc)
 
     # ── 3. Local Tesseract (always available) ─────────────────────────────────
     log.info("Running local OpenCV+Tesseract pipeline…")
     tess_res = await loop.run_in_executor(None, run_pipeline, image_bytes)
-    return resolve_match_mvps(tess_res)
+    return _finalize(tess_res)

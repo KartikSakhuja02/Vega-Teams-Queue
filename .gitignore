@@ -29,3 +29,4 @@ Thumbs.db
 diagnose_bedrock.py
 check_models.py
 list_bedrock_models.py
+scratch/

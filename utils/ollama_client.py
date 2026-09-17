@@ -35,6 +35,7 @@ import aiohttp
 from PIL import Image, ImageOps
 
 from utils.ocr.models import MatchOCRResult, PlayerRowStats
+from utils.ocr.agent_detector import clean_agent_name
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +93,12 @@ Layout:
     Set is_mvp=true, mvp_type="Enemy MVP".
   • Do not include the badge text ("我方-最佳" or "敌方-最佳") inside the player's name.
 
+  IMPORTANT - AGENT DETECTION (character portrait avatar next to player name):
+  Identify the Valorant agent played by each player from their character avatar portrait.
+  Valid agents include:
+  Astra, Breach, Brimstone, Chamber, Clove, Cypher, Deadlock, Fade, Gekko, Harbor, Iso, Jett, KAY/O, Killjoy, Neon, Omen, Phoenix, Raze, Reyna, Sage, Skye, Sova, Tejo, Viper, Vyse, Waylay, Yoru.
+  Set "agent" to the detected agent's name (e.g. "Iso", "Neon", "Sova", "Phoenix", "Killjoy", "Cypher", "Jett", "Tejo", "Clove", etc.) or null if unclear.
+
   Columns: 排名/头像/IGN | 平均战斗评分(ACS) | 击败/败阵/助攻(K/D/A) | 对局总伤害(damage) | 率先击败(first_bloods) | 部署(plants) | 拆除(defuses)
 
 Return exactly this JSON (no extra keys):
@@ -106,6 +113,7 @@ Return exactly this JSON (no extra keys):
   "players": [
     {
       "name": "<exact name without MVP badge>",
+      "agent": "<Agent name e.g. Iso, Neon, Sova, Phoenix, Killjoy, Cypher, Jett or null>",
       "team": <1 or 2>,
       "is_mvp": <true/false>,
       "mvp_type": <"Team MVP" or "Enemy MVP" or "Match MVP" or null>,
@@ -439,6 +447,7 @@ def _to_result(data: dict, elapsed_ms: float, image_bytes: Optional[bytes] = Non
         c = 0.8
         return PlayerRowStats(
             ign=str(p.get("name") or "Unknown").strip(),
+            agent=clean_agent_name(p.get("agent")),
             team=team_label,
             is_mvp=bool(p.get("is_mvp")),
             mvp_type=p.get("mvp_type"),

@@ -25,6 +25,7 @@ import time
 from typing import Optional
 
 from utils.ocr.models import MatchOCRResult, PlayerRowStats
+from utils.ocr.agent_detector import clean_agent_name
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,10 @@ Layout:
   MVP badges in front of player name:
     "我方-最佳" or "我方最佳" (yellow text) = Team MVP (Our Team MVP)
     "敌方-最佳" or "敌方最佳" (light blue text) = Enemy MVP (Enemy Team MVP)
+  Character Agent (avatar portrait icon on the left of each row):
+    Identify the Valorant agent from the character avatar portrait.
+    Valid agents: Astra, Breach, Brimstone, Chamber, Clove, Cypher, Deadlock, Fade, Gekko, Harbor, Iso, Jett, KAY/O, Killjoy, Neon, Omen, Phoenix, Raze, Reyna, Sage, Skye, Sova, Tejo, Viper, Vyse, Waylay, Yoru.
+    Set "agent" to the detected agent's name (or null if unclear).
 
 Return exactly this JSON (no extra keys):
 {
@@ -78,6 +83,7 @@ Return exactly this JSON (no extra keys):
   "players": [
     {
       "name": "<exact name>",
+      "agent": "<Agent name e.g. Iso, Neon, Sova, Phoenix, Killjoy, Cypher, Jett or null>",
       "team": <1 or 2>,
       "is_mvp": <true/false>,
       "mvp_type": <"Team MVP" or "Enemy MVP" or "Match MVP" or null>,
@@ -279,6 +285,7 @@ def _to_match_result(data: dict, elapsed_ms: float) -> MatchOCRResult:
         c = 0.8
         return PlayerRowStats(
             ign=str(p.get("name") or "Unknown").strip(),
+            agent=clean_agent_name(p.get("agent")),
             team=team_label,
             is_mvp=bool(p.get("is_mvp")),
             mvp_type=p.get("mvp_type"),

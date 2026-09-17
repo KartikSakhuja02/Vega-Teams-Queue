@@ -63,6 +63,10 @@ Layout description:
 - MVP badges (small coloured tag in front of player name):
     "我方-最佳" or "我方最佳" (yellow text on teal/green background) → is_mvp=true, mvp_type="Team MVP" (Our Team MVP)
     "敌方-最佳" or "敌方最佳" (light blue/cyan text on red/maroon background) → is_mvp=true, mvp_type="Enemy MVP" (Enemy Team MVP)
+- Character Agent (avatar portrait icon on the left of each row):
+    Identify the Valorant agent from the character avatar portrait.
+    Valid agents: Astra, Breach, Brimstone, Chamber, Clove, Cypher, Deadlock, Fade, Gekko, Harbor, Iso, Jett, KAY/O, Killjoy, Neon, Omen, Phoenix, Raze, Reyna, Sage, Skye, Sova, Tejo, Viper, Vyse, Waylay, Yoru.
+    Set "agent" to the detected agent's name (or null if unclear).
 
 Required JSON schema (no extra keys, no trailing commas):
 {
@@ -76,6 +80,7 @@ Required JSON schema (no extra keys, no trailing commas):
   "players": [
     {
       "name": "<exact player name, preserve Chinese and English characters>",
+      "agent": "<Agent name e.g. Iso, Neon, Sova, Phoenix, Killjoy, Cypher, Jett or null>",
       "team": <1 or 2>,
       "is_mvp": <true or false>,
       "mvp_type": <"Team MVP" or "Enemy MVP" or "Match MVP" or null>,

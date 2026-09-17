@@ -24,6 +24,7 @@ class FieldResult:
 class PlayerRowStats:
     """All statistics for one player row."""
     ign: str = "Unknown"
+    agent: Optional[str] = None
     team: str = "Team 1"
     is_mvp: bool = False
     mvp_type: Optional[str] = None  # "Team MVP" | "Match MVP"

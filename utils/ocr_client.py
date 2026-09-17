@@ -30,6 +30,7 @@ from typing import Optional
 import aiohttp
 
 from utils.ocr.models import MatchOCRResult, PlayerRowStats
+from utils.ocr.agent_detector import clean_agent_name
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ async def _poll_status(session: aiohttp.ClientSession, job_id: str) -> dict:
 def _player_from_dict(p: dict, team_label: str) -> PlayerRowStats:
     return PlayerRowStats(
         ign=p.get("name") or "Unknown",
+        agent=clean_agent_name(p.get("agent")),
         team=team_label,
         is_mvp=bool(p.get("is_mvp")),
         mvp_type=p.get("mvp_type"),
