@@ -605,7 +605,7 @@ async def finalize_teams_and_move(
 ) -> None:
     """
     Unlock Team A & Team B voice channels for their respective players,
-    and automatically move any players currently connected to voice.
+    and automatically move any players currently connected to voice in parallel.
     """
     v1_id = match.get("voice_team1_id")
     v2_id = match.get("voice_team2_id")
@@ -622,33 +622,30 @@ async def finalize_teams_and_move(
         if isinstance(ch2, discord.VoiceChannel):
             t2_vc = ch2
 
+    async def _handle_player(vc: discord.VoiceChannel, pid: int, team_name: str) -> None:
+        mem = await _get_or_fetch_member(guild, pid)
+        if not mem:
+            return
+        try:
+            await vc.set_permissions(mem, view_channel=True, connect=True, speak=True)
+        except Exception as e:
+            log.debug("Could not set %s voice permissions for %s: %s", team_name, mem.name, e)
+        if mem.voice and mem.voice.channel:
+            try:
+                await mem.move_to(vc, reason=f"Match #{match['id']} {team_name} VC")
+            except Exception as e:
+                log.debug("Could not move %s to %s VC: %s", mem.name, team_name, e)
+
+    tasks = []
     if t1_vc:
         for pid in t1_ids:
-            mem = await _get_or_fetch_member(guild, pid)
-            if mem:
-                try:
-                    await t1_vc.set_permissions(mem, view_channel=True, connect=True, speak=True)
-                except Exception as e:
-                    log.debug("Could not set Team 1 voice permissions for %s: %s", mem.name, e)
-                if mem.voice and mem.voice.channel:
-                    try:
-                        await mem.move_to(t1_vc, reason=f"Match #{match['id']} Team 1 VC")
-                    except Exception as e:
-                        log.debug("Could not move %s to Team 1 VC: %s", mem.name, e)
-
+            tasks.append(_handle_player(t1_vc, pid, "Team 1"))
     if t2_vc:
         for pid in t2_ids:
-            mem = await _get_or_fetch_member(guild, pid)
-            if mem:
-                try:
-                    await t2_vc.set_permissions(mem, view_channel=True, connect=True, speak=True)
-                except Exception as e:
-                    log.debug("Could not set Team 2 voice permissions for %s: %s", mem.name, e)
-                if mem.voice and mem.voice.channel:
-                    try:
-                        await mem.move_to(t2_vc, reason=f"Match #{match['id']} Team 2 VC")
-                    except Exception as e:
-                        log.debug("Could not move %s to Team 2 VC: %s", mem.name, e)
+            tasks.append(_handle_player(t2_vc, pid, "Team 2"))
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # =============================================================================
@@ -712,10 +709,17 @@ class SoloQueueView(discord.ui.View):
 class PlayerDraftSelect(discord.ui.Select):
     """Dropdown for the active captain to select a player."""
 
-    def __init__(self, match_id: int, available_players: list[dict]) -> None:
+    def __init__(
+        self,
+        match_id: int,
+        available_players: list[dict],
+        players_by_id: Optional[dict[int, dict]] = None,
+        colour: Optional[discord.Colour] = None,
+        draft_mode: Optional[str] = None,
+    ) -> None:
         options = [
             discord.SelectOption(
-                label=f"{p['ign']} (ELO: {p.get('elo', 1000)})",
+                label=f"{p.get('ign') or p.get('discord_username') or 'Player'} (ELO: {p.get('elo', 1000)})",
                 value=str(p["discord_id"]),
                 description=f"Region: {p.get('region', 'Global')} | Wins: {p.get('wins', 0)}",
             )
@@ -729,22 +733,24 @@ class PlayerDraftSelect(discord.ui.Select):
             custom_id="solo:draft_select",
         )
         self.match_id = match_id
+        self.players_by_id = players_by_id or {}
+        self.colour = colour
+        self.draft_mode = draft_mode
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
         match = await db.get_solo_match_by_id(self.match_id)
         if not match or match["status"] != "DRAFTING":
-            await interaction.followup.send("Drafting is no longer active for this match.", ephemeral=True)
+            await interaction.response.send_message("Drafting is no longer active for this match.", ephemeral=True)
             return
 
         if interaction.user.id != match["current_turn_captain_id"]:
-            await interaction.followup.send("It is not your turn to pick.", ephemeral=True)
+            await interaction.response.send_message("It is not your turn to pick.", ephemeral=True)
             return
 
         picked_id = int(self.values[0])
         avail_ids = list(match["available_player_ids"])
         if picked_id not in avail_ids:
-            await interaction.followup.send("That player is no longer available in the pool.", ephemeral=True)
+            await interaction.response.send_message("That player is no longer available in the pool.", ephemeral=True)
             return
 
         avail_ids.remove(picked_id)
@@ -762,7 +768,7 @@ class PlayerDraftSelect(discord.ui.Select):
         next_step = match["draft_step"] + 1
 
         # Check if draft complete (after 7 picks, 1 player remains and automatically joins the other team)
-        if next_step > 7 or len(avail_ids) == 1:
+        if next_step > 7 or len(avail_ids) <= 1:
             if avail_ids:
                 last_player_id = avail_ids.pop(0)
                 if len(t1_ids) < 5:
@@ -774,16 +780,15 @@ class PlayerDraftSelect(discord.ui.Select):
                 asyncio.create_task(finalize_teams_and_move(interaction.client, match, interaction.guild, t1_ids, t2_ids))
 
             veto_mode = await get_solo_veto_mode()
-            colour = await get_solo_embed_colour()
+            colour = self.colour or await get_solo_embed_colour()
             map_pool = await get_solo_map_pool()
 
-            # Build player cache
             all_match_pids = t1_ids + t2_ids
-            players_by_id = {}
-            for pid in all_match_pids:
-                p_rec = await db.get_player(pid)
-                if p_rec:
-                    players_by_id[pid] = p_rec
+            missing_pids = [pid for pid in all_match_pids if pid not in self.players_by_id]
+            if missing_pids:
+                fetched = await db.get_players_bulk(missing_pids)
+                for p in fetched:
+                    self.players_by_id[p["discord_id"]] = p
 
             if veto_mode == "RANDOM_MAP":
                 final_map = random.choice(map_pool)
@@ -795,10 +800,13 @@ class PlayerDraftSelect(discord.ui.Select):
                     current_turn_captain_id=None,
                     status="IN_PROGRESS",
                 )
-                embed = build_solo_map_veto_embed(updated_match, players_by_id, colour=colour)
+                embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
                 final_view = discord.ui.View()
-                if interaction.channel:
+                if not interaction.response.is_done():
+                    await interaction.response.edit_message(embed=embed, view=final_view)
+                else:
                     await interaction.edit_original_response(embed=embed, view=final_view)
+                if interaction.channel:
                     await interaction.channel.send(
                         f"Match ready on **{final_map}**. Use `/submit-result` when done."
                     )
@@ -815,16 +823,18 @@ class PlayerDraftSelect(discord.ui.Select):
                 status="MAP_VETO",
             )
 
-            embed = build_solo_map_veto_embed(updated_match, players_by_id, colour=colour)
-            veto_view = SoloMapVetoView(updated_match, players_by_id, veto_mode=veto_mode)
+            embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
+            veto_view = SoloMapVetoView(updated_match, self.players_by_id, veto_mode=veto_mode, colour=colour)
 
-            if interaction.channel:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=veto_view)
+            else:
                 await interaction.edit_original_response(embed=embed, view=veto_view)
             return
 
         # Advance draft step
-        draft_mode = await get_solo_draft_mode()
-        colour = await get_solo_embed_colour()
+        draft_mode = self.draft_mode or await get_solo_draft_mode()
+        colour = self.colour or await get_solo_embed_colour()
         next_turn_id = get_draft_active_captain_id(next_step, c1_id, c2_id, mode=draft_mode)
         updated_match = await db.update_solo_match_draft(
             match_id=self.match_id,
@@ -837,27 +847,50 @@ class PlayerDraftSelect(discord.ui.Select):
         )
 
         all_match_pids = t1_ids + t2_ids + avail_ids
-        players_by_id = {}
-        for pid in all_match_pids:
-            p_rec = await db.get_player(pid)
-            if p_rec:
-                players_by_id[pid] = p_rec
+        missing_pids = [pid for pid in all_match_pids if pid not in self.players_by_id]
+        if missing_pids:
+            fetched = await db.get_players_bulk(missing_pids)
+            for p in fetched:
+                self.players_by_id[p["discord_id"]] = p
 
-        avail_player_dicts = [players_by_id[pid] for pid in avail_ids if pid in players_by_id]
-        embed = build_solo_draft_embed(updated_match, players_by_id, colour=colour)
-        view = SoloDraftView(updated_match, avail_player_dicts)
+        avail_player_dicts = [self.players_by_id[pid] for pid in avail_ids if pid in self.players_by_id]
+        embed = build_solo_draft_embed(updated_match, self.players_by_id, colour=colour)
+        view = SoloDraftView(
+            updated_match,
+            avail_player_dicts,
+            players_by_id=self.players_by_id,
+            colour=colour,
+            draft_mode=draft_mode,
+        )
 
-        if interaction.channel:
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=view)
+        else:
             await interaction.edit_original_response(embed=embed, view=view)
 
 
 class SoloDraftView(discord.ui.View):
     """View holding the player selection dropdown during drafting."""
 
-    def __init__(self, match: dict, available_players: list[dict]) -> None:
+    def __init__(
+        self,
+        match: dict,
+        available_players: list[dict],
+        players_by_id: Optional[dict[int, dict]] = None,
+        colour: Optional[discord.Colour] = None,
+        draft_mode: Optional[str] = None,
+    ) -> None:
         super().__init__(timeout=None)
         if available_players:
-            self.add_item(PlayerDraftSelect(match["id"], available_players))
+            self.add_item(
+                PlayerDraftSelect(
+                    match["id"],
+                    available_players,
+                    players_by_id=players_by_id,
+                    colour=colour,
+                    draft_mode=draft_mode,
+                )
+            )
 
 
 class SoloMapVetoView(discord.ui.View):
@@ -868,11 +901,13 @@ class SoloMapVetoView(discord.ui.View):
         match: dict,
         players_by_id: dict[int, dict],
         veto_mode: str = "ALTERNATING_BAN",
+        colour: Optional[discord.Colour] = None,
     ) -> None:
         super().__init__(timeout=None)
         self.match = match
         self.players_by_id = players_by_id
         self.veto_mode = veto_mode
+        self.colour = colour
 
         avail_maps = match.get("available_maps", [])
         if match.get("status") == "IN_PROGRESS" or len(avail_maps) <= 1:
@@ -899,28 +934,24 @@ class SoloMapVetoView(discord.ui.View):
 
     def _create_map_pick_callback(self, chosen_map: str):
         async def callback(interaction: discord.Interaction) -> None:
-            await interaction.response.defer()
             match = await db.get_solo_match_by_id(self.match["id"])
             if not match or match["status"] != "MAP_VETO":
-                await interaction.followup.send("Map veto is not currently active.", ephemeral=True)
+                await interaction.response.send_message("Map veto is not currently active.", ephemeral=True)
                 return
 
             if interaction.user.id != match["current_turn_captain_id"]:
-                await interaction.followup.send("It is not your turn to pick a map.", ephemeral=True)
+                await interaction.response.send_message("It is not your turn to pick a map.", ephemeral=True)
                 return
 
             avail_maps = list(match["available_maps"])
             banned_maps = list(match["banned_maps"])
 
             if chosen_map not in avail_maps:
-                await interaction.followup.send("That map is not available.", ephemeral=True)
+                await interaction.response.send_message("That map is not available.", ephemeral=True)
                 return
 
             avail_maps.remove(chosen_map)
             banned_maps.extend(avail_maps)
-
-            c1_id = match["captain1_id"]
-            c2_id = match["captain2_id"]
 
             updated_match = await db.update_solo_match_map_veto(
                 match_id=match["id"],
@@ -931,32 +962,35 @@ class SoloMapVetoView(discord.ui.View):
                 status="IN_PROGRESS",
             )
 
-            colour = await get_solo_embed_colour()
+            colour = self.colour or await get_solo_embed_colour()
             embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
             final_view = discord.ui.View()
 
-            if interaction.channel:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=final_view)
+            else:
                 await interaction.edit_original_response(embed=embed, view=final_view)
+
+            if interaction.channel:
                 await interaction.channel.send("Match ready. Use `/submit-result` when done.")
         return callback
 
     def _create_map_ban_callback(self, map_to_ban: str):
         async def callback(interaction: discord.Interaction) -> None:
-            await interaction.response.defer()
             match = await db.get_solo_match_by_id(self.match["id"])
             if not match or match["status"] != "MAP_VETO":
-                await interaction.followup.send("Map veto is not currently active.", ephemeral=True)
+                await interaction.response.send_message("Map veto is not currently active.", ephemeral=True)
                 return
 
             if interaction.user.id != match["current_turn_captain_id"]:
-                await interaction.followup.send("It is not your turn to ban a map.", ephemeral=True)
+                await interaction.response.send_message("It is not your turn to ban a map.", ephemeral=True)
                 return
 
             avail_maps = list(match["available_maps"])
             banned_maps = list(match["banned_maps"])
 
             if map_to_ban not in avail_maps:
-                await interaction.followup.send("That map is already banned.", ephemeral=True)
+                await interaction.response.send_message("That map is already banned.", ephemeral=True)
                 return
 
             avail_maps.remove(map_to_ban)
@@ -965,7 +999,7 @@ class SoloMapVetoView(discord.ui.View):
             c1_id = match["captain1_id"]
             c2_id = match["captain2_id"]
             next_turn_id = c2_id if match["current_turn_captain_id"] == c1_id else c1_id
-            colour = await get_solo_embed_colour()
+            colour = self.colour or await get_solo_embed_colour()
 
             # If 2 maps remain and mode is BAN_BAN_PICK or CAPTAIN_PICK, enter pick phase!
             if len(avail_maps) == 2 and self.veto_mode in ("BAN_BAN_PICK", "CAPTAIN_PICK"):
@@ -979,9 +1013,11 @@ class SoloMapVetoView(discord.ui.View):
                     status="MAP_VETO",
                 )
                 embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
-                next_view = SoloMapVetoView(updated_match, self.players_by_id, veto_mode=self.veto_mode)
+                next_view = SoloMapVetoView(updated_match, self.players_by_id, veto_mode=self.veto_mode, colour=colour)
 
-                if interaction.channel:
+                if not interaction.response.is_done():
+                    await interaction.response.edit_message(embed=embed, view=next_view)
+                else:
                     await interaction.edit_original_response(embed=embed, view=next_view)
                 return
 
@@ -1000,8 +1036,12 @@ class SoloMapVetoView(discord.ui.View):
                 embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
                 final_view = discord.ui.View()
 
-                if interaction.channel:
+                if not interaction.response.is_done():
+                    await interaction.response.edit_message(embed=embed, view=final_view)
+                else:
                     await interaction.edit_original_response(embed=embed, view=final_view)
+
+                if interaction.channel:
                     await interaction.channel.send("Match ready. Use `/submit-result` when done.")
                 return
 
@@ -1016,11 +1056,12 @@ class SoloMapVetoView(discord.ui.View):
             )
 
             embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
-            next_view = SoloMapVetoView(updated_match, self.players_by_id, veto_mode=self.veto_mode)
+            next_view = SoloMapVetoView(updated_match, self.players_by_id, veto_mode=self.veto_mode, colour=colour)
 
-            if interaction.channel:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=next_view)
+            else:
                 await interaction.edit_original_response(embed=embed, view=next_view)
-
         return callback
 
 
@@ -1451,18 +1492,21 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             match_players = queued[:10]
             player_ids = [p["discord_id"] for p in match_players]
 
-            # Atomic dequeue
-            await db.clear_solo_queue(player_ids)
-            for pid in player_ids:
-                await db.set_player_status(pid, "IN_MATCH")
+            # Parallel atomic dequeue and player status update
+            await asyncio.gather(
+                db.clear_solo_queue(player_ids),
+                db.set_players_status_bulk(player_ids, "IN_MATCH"),
+            )
 
             self._schedule_queue_panel_refresh(delay=0.1)
 
             try:
-                # Dynamic configurations
-                captain_mode = await get_solo_captain_mode()
-                map_pool = await get_solo_map_pool()
-                colour = await get_solo_embed_colour()
+                # Parallel fetch of configurations
+                captain_mode, map_pool, colour = await asyncio.gather(
+                    get_solo_captain_mode(),
+                    get_solo_map_pool(),
+                    get_solo_embed_colour(),
+                )
 
                 # Captain selection via configured template
                 cap1, cap2 = select_captains(match_players, mode=captain_mode)
@@ -1509,8 +1553,10 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     ),
                 }
 
-                for pid in player_ids:
-                    mem = await _get_or_fetch_member(guild, pid)
+                # Fetch all 10 members in parallel
+                members = await asyncio.gather(*[_get_or_fetch_member(guild, pid) for pid in player_ids])
+
+                for mem in members:
                     if mem:
                         text_overwrites[mem] = discord.PermissionOverwrite(
                             view_channel=True,
@@ -1562,32 +1608,31 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     if isinstance(vcat, discord.CategoryChannel):
                         voice_category = vcat
 
-                # Create 1 text channel and 3 voice channels
+                # Create 1 text channel and 3 voice channels IN PARALLEL
                 match_lobby_num = random.randint(100, 999)
 
-                text_channel = await guild.create_text_channel(
-                    name=f"match-lobby-{match_lobby_num}",
-                    overwrites=text_overwrites,
-                    category=category,
-                    topic="10-Man Solo Ranked Match Lobby",
-                )
-
-                lobby_vc = await guild.create_voice_channel(
-                    name=f"🔊 Match #{match_lobby_num} Lobby",
-                    overwrites=voice_lobby_overwrites,
-                    category=voice_category,
-                )
-
-                team_a_vc = await guild.create_voice_channel(
-                    name=f"🔊 Match #{match_lobby_num} Team A",
-                    overwrites=team_locked_overwrites,
-                    category=voice_category,
-                )
-
-                team_b_vc = await guild.create_voice_channel(
-                    name=f"🔊 Match #{match_lobby_num} Team B",
-                    overwrites=team_locked_overwrites,
-                    category=voice_category,
+                text_channel, lobby_vc, team_a_vc, team_b_vc = await asyncio.gather(
+                    guild.create_text_channel(
+                        name=f"match-lobby-{match_lobby_num}",
+                        overwrites=text_overwrites,
+                        category=category,
+                        topic="10-Man Solo Ranked Match Lobby",
+                    ),
+                    guild.create_voice_channel(
+                        name=f"🔊 Match #{match_lobby_num} Lobby",
+                        overwrites=voice_lobby_overwrites,
+                        category=voice_category,
+                    ),
+                    guild.create_voice_channel(
+                        name=f"🔊 Match #{match_lobby_num} Team A",
+                        overwrites=team_locked_overwrites,
+                        category=voice_category,
+                    ),
+                    guild.create_voice_channel(
+                        name=f"🔊 Match #{match_lobby_num} Team B",
+                        overwrites=team_locked_overwrites,
+                        category=voice_category,
+                    ),
                 )
 
                 players_by_id = {p["discord_id"]: p for p in match_players}
@@ -1609,20 +1654,24 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     log.error("Failed to insert solo match record.")
                     return
 
-                # Send DMs to each individual player
+                # Send DMs in non-blocking background task so match lobby posts immediately
                 dm_content = (
                     f"⚔️ **Your 10-Man Match #{match['id']} is Ready!**\n"
                     f"Text Lobby: {text_channel.mention}\n"
                     f"Voice Lobby: {lobby_vc.mention}\n\n"
                     f"Please join the **Voice Lobby** now. Team selection will begin once all 10 players join voice."
                 )
-                for pid in player_ids:
-                    mem = await _get_or_fetch_member(guild, pid)
-                    if mem:
-                        try:
-                            await mem.send(dm_content)
-                        except Exception:
-                            pass  # Direct messages may be disabled
+
+                async def _send_dms_background():
+                    async def _send_one(m):
+                        if m:
+                            try:
+                                await m.send(dm_content)
+                            except Exception:
+                                pass
+                    await asyncio.gather(*[_send_one(m) for m in members], return_exceptions=True)
+
+                asyncio.create_task(_send_dms_background())
 
                 # Check initial voice connections
                 connected_pids = {m.id for m in lobby_vc.members if m.id in player_ids}
@@ -1644,7 +1693,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
                 # If all 10 players are somehow already in voice, start immediately
                 if len(connected_pids) >= 10:
-                    await self._start_match_after_checkin(match, guild, text_channel)
+                    await self._start_match_after_checkin(match, guild, text_channel, players_by_id=players_by_id)
 
             except Exception as e:
                 log.error("Error creating 10-man solo match: %s", e, exc_info=True)
@@ -1702,13 +1751,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         if not isinstance(ch, discord.TextChannel):
             return
 
-        players_by_id = {}
-        for pid in all_pids:
-            p_rec = await db.get_player(pid)
-            if p_rec:
-                players_by_id[pid] = p_rec
+        players, colour = await asyncio.gather(
+            db.get_players_bulk(all_pids),
+            get_solo_embed_colour(),
+        )
+        players_by_id = {p["discord_id"]: p for p in players}
 
-        colour = await get_solo_embed_colour()
         embed = build_solo_checkin_embed(match, players_by_id, connected_pids, lobby_vc.id, colour=colour)
 
         if panel_msg_id:
@@ -1719,23 +1767,26 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 log.debug("Could not edit checkin message: %s", e)
 
         if len(connected_pids) >= 10 and match.get("status") == "VOICE_CHECKIN":
-            await self._start_match_after_checkin(match, guild, ch)
+            await self._start_match_after_checkin(match, guild, ch, players_by_id=players_by_id)
 
     async def _start_match_after_checkin(
         self,
         match: dict,
         guild: discord.Guild,
         channel: discord.TextChannel,
+        players_by_id: Optional[dict[int, dict]] = None,
     ) -> None:
         """Advance match from VOICE_CHECKIN to DRAFTING or AUTO_BALANCE."""
         current_match = await db.get_solo_match_by_id(match["id"])
         if not current_match or current_match.get("status") != "VOICE_CHECKIN":
             return
 
-        draft_mode = await get_solo_draft_mode()
-        veto_mode = await get_solo_veto_mode()
-        map_pool = await get_solo_map_pool()
-        colour = await get_solo_embed_colour()
+        draft_mode, veto_mode, map_pool, colour = await asyncio.gather(
+            get_solo_draft_mode(),
+            get_solo_veto_mode(),
+            get_solo_map_pool(),
+            get_solo_embed_colour(),
+        )
 
         all_pids = (
             current_match.get("team1_player_ids", [])
@@ -1744,13 +1795,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         )
         all_pids = list(dict.fromkeys(all_pids))
 
-        match_players = []
-        players_by_id = {}
-        for pid in all_pids:
-            p_rec = await db.get_player(pid)
-            if p_rec:
-                match_players.append(p_rec)
-                players_by_id[pid] = p_rec
+        if not players_by_id:
+            fetched_players = await db.get_players_bulk(all_pids)
+            players_by_id = {p["discord_id"]: p for p in fetched_players}
+
+        match_players = [players_by_id[pid] for pid in all_pids if pid in players_by_id]
 
         c1_id = current_match["captain1_id"]
         c2_id = current_match["captain2_id"]
@@ -1805,7 +1854,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 )
                 updated = await db.get_solo_match_by_id(current_match["id"])
                 embed = build_solo_map_veto_embed(updated, players_by_id, colour=colour)
-                veto_view = SoloMapVetoView(updated, players_by_id, veto_mode=veto_mode)
+                veto_view = SoloMapVetoView(updated, players_by_id, veto_mode=veto_mode, colour=colour)
                 panel_msg = await channel.send(
                     content=(
                         f"**ALL PLAYERS CHECKED IN • TEAMS AUTO-BALANCED**\n"
@@ -1822,11 +1871,17 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         # SNAKE or ALTERNATING drafting
         await db.set_solo_match_status(current_match["id"], "DRAFTING")
-        current_match = await db.get_solo_match_by_id(current_match["id"])
+        current_match["status"] = "DRAFTING"
         avail_ids = current_match.get("available_player_ids", [])
         avail_dicts = [players_by_id[pid] for pid in avail_ids if pid in players_by_id]
         embed = build_solo_draft_embed(current_match, players_by_id, colour=colour)
-        view = SoloDraftView(current_match, avail_dicts)
+        view = SoloDraftView(
+            current_match,
+            avail_dicts,
+            players_by_id=players_by_id,
+            colour=colour,
+            draft_mode=draft_mode,
+        )
 
         panel_msg = await channel.send(
             content=(

@@ -227,6 +227,21 @@ async def get_player(discord_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def get_players_bulk(discord_ids: list[int]) -> list[dict]:
+    """Fetch multiple player records by Discord IDs in a single query."""
+    if not discord_ids:
+        return []
+    try:
+        rows = await get_pool().fetch(
+            "SELECT * FROM players WHERE discord_id = ANY($1::BIGINT[])",
+            discord_ids,
+        )
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.error("Failed to bulk get players: %s", e)
+        return []
+
+
 async def reset_all_player_stats() -> int:
     """
     Reset every active player's ELO back to 1000 and zero all combat/match stats.
@@ -488,6 +503,28 @@ async def set_player_status(
         return dict(row) if row else None
     except Exception:
         return None
+
+
+async def set_players_status_bulk(
+    discord_ids: list[int],
+    new_status: str,
+) -> None:
+    """Update status for multiple players in a single bulk query."""
+    if not discord_ids:
+        return
+    try:
+        await get_pool().execute(
+            """
+            UPDATE players
+            SET status       = $1::player_status_enum,
+                status_since = NOW()
+            WHERE discord_id = ANY($2::BIGINT[])
+            """,
+            new_status,
+            discord_ids,
+        )
+    except Exception as e:
+        log.error("Failed to bulk update player status: %s", e)
 
 
 async def toggle_player_dms(discord_id: int) -> Optional[dict]:
