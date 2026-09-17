@@ -3393,28 +3393,30 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         new_captain: discord.Member,
     ) -> None:
         """Handle admin captain replacement in a queue match lobby."""
+        await interaction.response.defer(ephemeral=False)
+
         if not _is_admin(interaction.user):  # type: ignore[arg-type]
-            await interaction.response.send_message("You do not have staff permissions.", ephemeral=True)
+            await interaction.followup.send("You do not have staff permissions.", ephemeral=True)
             return
 
         match = await db.get_solo_match_by_channel(interaction.channel_id)
         if not match or match.get("status") in ("COMPLETED", "CANCELLED"):
-            await interaction.response.send_message("This command can only be used inside an active queue channel.", ephemeral=True)
+            await interaction.followup.send("This command can only be used inside an active queue channel.", ephemeral=True)
             return
 
         if old_captain.id == new_captain.id:
-            await interaction.response.send_message("Old captain and new captain cannot be the same person.", ephemeral=True)
+            await interaction.followup.send("Old captain and new captain cannot be the same person.", ephemeral=True)
             return
 
         c1_id = match["captain1_id"]
         c2_id = match["captain2_id"]
 
         if old_captain.id not in (c1_id, c2_id):
-            await interaction.response.send_message(f"<@{old_captain.id}> is not currently a captain in this queue.", ephemeral=True)
+            await interaction.followup.send(f"<@{old_captain.id}> is not currently a captain in this queue.", ephemeral=True)
             return
 
         if new_captain.id in (c1_id, c2_id):
-            await interaction.response.send_message(f"<@{new_captain.id}> is already a captain in this queue.", ephemeral=True)
+            await interaction.followup.send(f"<@{new_captain.id}> is already a captain in this queue.", ephemeral=True)
             return
 
         t1_ids = list(match.get("team1_player_ids", []))
@@ -3423,7 +3425,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         all_pids = set(t1_ids + t2_ids + avail_ids + [c1_id, c2_id])
 
         if new_captain.id not in all_pids:
-            await interaction.response.send_message(f"<@{new_captain.id}> is not a player in this queue.", ephemeral=True)
+            await interaction.followup.send(f"<@{new_captain.id}> is not a player in this queue.", ephemeral=True)
             return
 
         is_cap1 = (old_captain.id == c1_id)
@@ -3532,9 +3534,15 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         except Exception as e:
             log.debug("Failed to update panel message on captain change: %s", e)
 
-        await interaction.response.send_message(
-            f"Captain updated: <@{new_captain.id}> has replaced <@{old_captain.id}> as captain."
-        )
+        try:
+            await interaction.followup.send(
+                f"Captain updated: <@{new_captain.id}> has replaced <@{old_captain.id}> as captain."
+            )
+        except Exception:
+            if isinstance(interaction.channel, discord.TextChannel):
+                await interaction.channel.send(
+                    f"Captain updated: <@{new_captain.id}> has replaced <@{old_captain.id}> as captain."
+                )
 
     async def _handle_set_elo_template(
         self,
