@@ -214,7 +214,12 @@ def calculate_player_elo(
     """
     kd_ratio = kills / max(1, deaths)
     is_match_mvp = is_mvp and (mvp_type == "Match MVP" or "match" in str(mvp_type).lower())
-    is_team_mvp = (not is_match_mvp) and (is_mvp or mvp_type == "Team MVP" or "team" in str(mvp_type).lower())
+    is_team_mvp = (not is_match_mvp) and (
+        is_mvp
+        or mvp_type in ("Team MVP", "Enemy MVP")
+        or "team" in str(mvp_type).lower()
+        or "enemy" in str(mvp_type).lower()
+    )
 
     mvp_bonus = 5 if is_match_mvp else (2 if is_team_mvp else 0)
 
@@ -3590,7 +3595,21 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 "stats_obj": stats,
             })
 
-        # 14. Build comprehensive result embed
+        # Safeguard: if no overall match MVP was identified by tag, choose top performer
+        if not overall_mvp_pid and player_updates:
+            mvp_candidates = [u for u in player_updates if u.get("is_mvp")]
+            if not mvp_candidates:
+                mvp_candidates = player_updates
+            top_mvp = max(
+                mvp_candidates,
+                key=lambda x: (
+                    x.get("stats_obj").acs if x.get("stats_obj") else 0,
+                    x.get("kills", 0),
+                ),
+            )
+            overall_mvp_pid = top_mvp["discord_id"]
+            top_mvp["is_mvp"] = True
+
         # 14. Build comprehensive result embed matching the reference UI
         c1_id = match.get("captain1_id")
         c2_id = match.get("captain2_id")
@@ -3616,7 +3635,18 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 # Rating formula
                 rating = round((k + a * 0.25) / max(1, d), 2)
 
-                lines.append(f"<@{pid}>")
+                stats_obj = u.get("stats_obj")
+                mvp_badge = ""
+                if pid == overall_mvp_pid:
+                    mvp_badge = " 👑 `Match MVP`"
+                elif u.get("is_mvp") or (stats_obj and stats_obj.is_mvp):
+                    mtype = str((stats_obj.mvp_type if stats_obj else None) or "").lower()
+                    if "enemy" in mtype or (pid in t2_pids and "team" not in mtype):
+                        mvp_badge = " ⭐ `Enemy MVP`"
+                    else:
+                        mvp_badge = " ⭐ `Team MVP`"
+
+                lines.append(f"<@{pid}>{mvp_badge}")
                 lines.append(f"└ [{k}/{d}/{a}] {rating:.2f}r {elo_str}")
             return lines
 
@@ -3627,13 +3657,17 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             "**Score**",
             f"{t1_team_name} [{t1_score}]",
             f"{t2_team_name} [{t2_score}]",
+        ]
+        if overall_mvp_pid:
+            desc_parts.append(f"👑 **Match MVP:** <@{overall_mvp_pid}>")
+        desc_parts.extend([
             "",
             f"**{t1_team_name}**",
             "\n".join(t1_player_lines) if t1_player_lines else "*No players detected*",
             "",
             f"**{t2_team_name}**",
             "\n".join(t2_player_lines) if t2_player_lines else "*No players detected*",
-        ]
+        ])
 
         result_embed = discord.Embed(
             title=f"Match {match['id']} Results",

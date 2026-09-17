@@ -62,7 +62,9 @@ Layout:
     First 5 = GREEN/TEAL background = team 1
     Last  5 = RED/MAROON background = team 2
   Columns: 队伍排名(name) | 平均战斗评分(ACS) | 击败/敌阵/助攻(K/D/A) | 对局总伤害(damage) | 率先击败(first_bloods) | 部署(plants) | 拆除(defuses)
-  MVP badges: "我方-最佳" = Team MVP, "敌方-最佳" = Match MVP
+  MVP badges in front of player name:
+    "我方-最佳" or "我方最佳" (yellow text) = Team MVP (Our Team MVP)
+    "敌方-最佳" or "敌方最佳" (light blue text) = Enemy MVP (Enemy Team MVP)
 
 Return exactly this JSON (no extra keys):
 {
@@ -78,7 +80,7 @@ Return exactly this JSON (no extra keys):
       "name": "<exact name>",
       "team": <1 or 2>,
       "is_mvp": <true/false>,
-      "mvp_type": <"Team MVP" or "Match MVP" or null>,
+      "mvp_type": <"Team MVP" or "Enemy MVP" or "Match MVP" or null>,
       "acs": <int or null>,
       "kills": <int or null>,
       "deaths": <int or null>,

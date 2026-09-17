@@ -174,7 +174,7 @@ def _ocr_player_row(
     if "我方" in raw_ign and "最佳" in raw_ign:
         is_mvp, mvp_type = True, "Team MVP"
     elif "敌方" in raw_ign and "最佳" in raw_ign:
-        is_mvp, mvp_type = True, "Match MVP"
+        is_mvp, mvp_type = True, "Enemy MVP"
     elif re.search(r"mvp", full_txt):
         is_mvp, mvp_type = True, "Team MVP"
 

@@ -1492,7 +1492,7 @@ class AdminCog(commands.Cog, name="Admin"):
         embed = _build_admin_commands_embed()
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ── /test_ss_ocr ────────────────────────────────────────────────────────
+    # ── /test_ss_ocr and /test-ss-ocr ───────────────────────────────────────
 
     @app_commands.command(
         name="test_ss_ocr",
@@ -1507,6 +1507,29 @@ class AdminCog(commands.Cog, name="Admin"):
         image: discord.Attachment,
     ) -> None:
         """Test OCR extraction on an uploaded match screenshot."""
+        await self._handle_test_ss_ocr(interaction, image)
+
+    @app_commands.command(
+        name="test-ss-ocr",
+        description="Test scoreboard OCR parsing on a match end-screen screenshot.",
+    )
+    @app_commands.describe(
+        image="The match scoreboard screenshot image attachment (PNG/JPG/WEBP)."
+    )
+    async def test_ss_ocr_hyphen(
+        self,
+        interaction: discord.Interaction,
+        image: discord.Attachment,
+    ) -> None:
+        """Test OCR extraction on an uploaded match screenshot (hyphen version)."""
+        await self._handle_test_ss_ocr(interaction, image)
+
+    async def _handle_test_ss_ocr(
+        self,
+        interaction: discord.Interaction,
+        image: discord.Attachment,
+    ) -> None:
+        """Internal handler for OCR testing."""
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
@@ -1584,11 +1607,32 @@ class AdminCog(commands.Cog, name="Admin"):
             meta_parts.append(f"📅 {result.match_date}")
         meta_str = f" • {' • '.join(meta_parts)}" if meta_parts else ""
 
+        # Extract MVP info for header summary
+        all_p = result.team1_players + result.team2_players
+        m_mvp = next((p for p in all_p if p.is_mvp and p.mvp_type == "Match MVP"), None)
+        if not m_mvp and all_p:
+            mvp_cands = [p for p in all_p if p.is_mvp]
+            if mvp_cands:
+                m_mvp = max(mvp_cands, key=lambda x: (x.acs, x.kills))
+
+        t1_mvp = next((p for p in result.team1_players if p.is_mvp), None)
+        t2_mvp = next((p for p in result.team2_players if p.is_mvp), None)
+
+        mvp_lines = []
+        if m_mvp:
+            mvp_lines.append(f"👑 **Match MVP:** **{m_mvp.ign}** (`{m_mvp.acs} ACS` • `{m_mvp.kills}/{m_mvp.deaths}/{m_mvp.assists}`)")
+        if t1_mvp and t1_mvp != m_mvp:
+            mvp_lines.append(f"⭐ **Team 1 MVP (我方最佳):** **{t1_mvp.ign}** (`{t1_mvp.acs} ACS`)")
+        if t2_mvp and t2_mvp != m_mvp:
+            mvp_lines.append(f"⭐ **Team 2 MVP (敌方最佳):** **{t2_mvp.ign}** (`{t2_mvp.acs} ACS`)")
+
+        mvp_desc = ("\n" + "\n".join(mvp_lines)) if mvp_lines else ""
+
         embed = discord.Embed(
             title=f"Match Results — {map_name}",
             description=(
                 f"**Score:** 🟢 Team 1 **[{t1_score}]** — 🔴 Team 2 **[{t2_score}]**\n"
-                f"**Outcome:** {outcome}{meta_str}"
+                f"**Outcome:** {outcome}{meta_str}{mvp_desc}"
             ),
             colour=sidebar_color,
         )
@@ -1603,6 +1647,8 @@ class AdminCog(commands.Cog, name="Admin"):
                 mvp_badge = ""
                 if p.mvp_type == "Match MVP" or (p.is_mvp and "match" in str(p.mvp_type).lower()):
                     mvp_badge = " 👑 `Match MVP`"
+                elif p.mvp_type == "Enemy MVP" or (p.is_mvp and "enemy" in str(p.mvp_type).lower()):
+                    mvp_badge = " ⭐ `Enemy MVP`"
                 elif p.mvp_type == "Team MVP" or p.is_mvp:
                     mvp_badge = " ⭐ `Team MVP`"
 

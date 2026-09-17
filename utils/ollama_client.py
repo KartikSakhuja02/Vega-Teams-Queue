@@ -84,7 +84,14 @@ Layout:
   • GREEN / TEAL row = team 1 (Friendly / 我方)
   • RED / MAROON row = team 2 (Enemy / 敌方)
   • GOLD / YELLOW row = the viewer's highlighted row. Assign this player to whichever team needs to reach 5 players.
-  • "我方-最佳" (Team MVP) is on Team 1. "敌方-最佳" (Enemy MVP) is on Team 2.
+
+  IMPORTANT - MVP BADGE DETECTION (text in front of player name):
+  • "我方-最佳" or "我方最佳" (yellow / gold text on teal/green background) = OUR TEAM MVP (Team 1).
+    Set is_mvp=true, mvp_type="Team MVP".
+  • "敌方-最佳" or "敌方最佳" (light blue / cyan text on maroon/red background) = ENEMY TEAM MVP (Team 2).
+    Set is_mvp=true, mvp_type="Enemy MVP".
+  • Do not include the badge text ("我方-最佳" or "敌方-最佳") inside the player's name.
+
   Columns: 排名/头像/IGN | 平均战斗评分(ACS) | 击败/败阵/助攻(K/D/A) | 对局总伤害(damage) | 率先击败(first_bloods) | 部署(plants) | 拆除(defuses)
 
 Return exactly this JSON (no extra keys):
@@ -98,10 +105,10 @@ Return exactly this JSON (no extra keys):
   "outcome": "Victory or Defeat",
   "players": [
     {
-      "name": "<exact name>",
+      "name": "<exact name without MVP badge>",
       "team": <1 or 2>,
       "is_mvp": <true/false>,
-      "mvp_type": <"Team MVP" or "Match MVP" or null>,
+      "mvp_type": <"Team MVP" or "Enemy MVP" or "Match MVP" or null>,
       "acs": <int or null>,
       "kills": <int or null>,
       "deaths": <int or null>,
