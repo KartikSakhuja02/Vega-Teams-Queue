@@ -427,7 +427,7 @@ def build_solo_checkin_embed(
         lines.append(f"{icon} {ign}")
 
     embed = discord.Embed(
-        title=f"MATCH #{match['id']} — VOICE CHECK-IN",
+        title=f"QUEUE #{match['id']} — VOICE CHECK-IN",
         description=(
             f"`[ {checked_count} / {len(all_pids)} in Voice ]` — <#{lobby_vc_id}>\n\n"
             + "  ".join(lines)
@@ -465,7 +465,7 @@ def build_solo_draft_embed(
 
     picker = _name(turn_id)
     embed = discord.Embed(
-        title=f"Match {match['id']}  —  Draft  [{step}/7]",
+        title=f"Queue {match['id']}  —  Draft  [{step}/7]",
         description=f"{picker}'s pick",
         colour=colour or EMBED_COLOUR,
     )
@@ -508,7 +508,7 @@ def build_solo_map_veto_embed(
             f"Team B — {t2}"
         )
         embed = discord.Embed(
-            title=f"Match {match['id']}  —  Ready",
+            title=f"Queue {match['id']}  —  Ready",
             description=desc,
             colour=colour or EMBED_COLOUR,
         )
@@ -525,7 +525,7 @@ def build_solo_map_veto_embed(
             f"Team B — {t2}"
         )
         embed = discord.Embed(
-            title=f"Match {match['id']}  —  Map Veto",
+            title=f"Queue {match['id']}  —  Map Veto",
             description=desc,
             colour=colour or EMBED_COLOUR,
         )
@@ -632,7 +632,7 @@ async def finalize_teams_and_move(
             log.debug("Could not set %s voice permissions for %s: %s", team_name, mem.name, e)
         if mem.voice and mem.voice.channel:
             try:
-                await mem.move_to(vc, reason=f"Match #{match['id']} {team_name} VC")
+                await mem.move_to(vc, reason=f"Queue #{match['id']} {team_name} VC")
             except Exception as e:
                 log.debug("Could not move %s to %s VC: %s", mem.name, team_name, e)
 
@@ -808,7 +808,7 @@ class PlayerDraftSelect(discord.ui.Select):
                     await interaction.edit_original_response(embed=embed, view=final_view)
                 if interaction.channel:
                     await interaction.channel.send(
-                        f"Match ready on **{final_map}**. Use `/submit-result` when done."
+                        f"Queue ready on **{final_map}**. Use `/submit-result` when done."
                     )
                 return
 
@@ -972,7 +972,7 @@ class SoloMapVetoView(discord.ui.View):
                 await interaction.edit_original_response(embed=embed, view=final_view)
 
             if interaction.channel:
-                await interaction.channel.send("Match ready. Use `/submit-result` when done.")
+                await interaction.channel.send("Queue ready. Use `/submit-result` when done.")
         return callback
 
     def _create_map_ban_callback(self, map_to_ban: str):
@@ -1042,7 +1042,7 @@ class SoloMapVetoView(discord.ui.View):
                     await interaction.edit_original_response(embed=embed, view=final_view)
 
                 if interaction.channel:
-                    await interaction.channel.send("Match ready. Use `/submit-result` when done.")
+                    await interaction.channel.send("Queue ready. Use `/submit-result` when done.")
                 return
 
             # Continue veto
@@ -1608,28 +1608,29 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     if isinstance(vcat, discord.CategoryChannel):
                         voice_category = vcat
 
-                # Create 1 text channel and 3 voice channels IN PARALLEL
-                match_lobby_num = random.randint(100, 999)
+                # Get sequential queue number starting from 1
+                queue_num = await db.get_next_solo_match_id()
 
+                # Create 1 text channel and 3 voice channels IN PARALLEL
                 text_channel, lobby_vc, team_a_vc, team_b_vc = await asyncio.gather(
                     guild.create_text_channel(
-                        name=f"match-lobby-{match_lobby_num}",
+                        name=f"queue-{queue_num}",
                         overwrites=text_overwrites,
                         category=category,
-                        topic="10-Man Solo Ranked Match Lobby",
+                        topic=f"10-Man Solo Ranked Queue #{queue_num}",
                     ),
                     guild.create_voice_channel(
-                        name=f"🔊 Match #{match_lobby_num} Lobby",
+                        name=f"🔊 Queue {queue_num} Lobby",
                         overwrites=voice_lobby_overwrites,
                         category=voice_category,
                     ),
                     guild.create_voice_channel(
-                        name=f"🔊 Match #{match_lobby_num} Team A",
+                        name=f"🔊 Queue {queue_num} Team A",
                         overwrites=team_locked_overwrites,
                         category=voice_category,
                     ),
                     guild.create_voice_channel(
-                        name=f"🔊 Match #{match_lobby_num} Team B",
+                        name=f"🔊 Queue {queue_num} Team B",
                         overwrites=team_locked_overwrites,
                         category=voice_category,
                     ),
@@ -1637,7 +1638,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
                 players_by_id = {p["discord_id"]: p for p in match_players}
 
-                # Create match in DB with VOICE_CHECKIN status
+                # Create match in DB with VOICE_CHECKIN status and sequential ID
                 match = await db.create_solo_match(
                     channel_id=text_channel.id,
                     captain1_id=c1_id,
@@ -1648,6 +1649,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     voice_lobby_id=lobby_vc.id,
                     voice_team1_id=team_a_vc.id,
                     voice_team2_id=team_b_vc.id,
+                    match_id=queue_num,
                 )
 
                 if not match:
@@ -1655,7 +1657,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     return
 
                 # Send DMs in non-blocking background task so match lobby posts immediately
-                dm_content = f"Match {match['id']} is ready! {text_channel.mention}"
+                dm_content = f"Queue {match['id']} is ready! {text_channel.mention}"
 
                 async def _send_dms_background():
                     async def _send_one(m):
@@ -1678,13 +1680,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 panel_msg = await text_channel.send(
                     content=(
                         f"{pings}\n"
-                        f"**10-MAN MATCH FOUND — VOICE CHECK-IN**\n"
+                        f"**10-MAN QUEUE FOUND — VOICE CHECK-IN**\n"
                         f"All 10 players please connect to {lobby_vc.mention} to begin!"
                     ),
                     embed=checkin_embed,
                 )
                 await db.update_solo_match_panel(match["id"], panel_msg.id)
-                log.info("Created 10-man solo match #%d in channel #%s.", match["id"], text_channel.name)
+                log.info("Created 10-man solo queue #%d in channel #%s.", match["id"], text_channel.name)
 
                 # If all 10 players are somehow already in voice, start immediately
                 if len(connected_pids) >= 10:

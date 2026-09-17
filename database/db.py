@@ -69,6 +69,17 @@ async def _apply_schema() -> None:
             log.warning("Could not ensure solo_matches result columns: %s", e)
 
         try:
+            # Clean up old non-active test matches so queue numbering starts cleanly at 1
+            await conn.execute(
+                """
+                DELETE FROM solo_matches WHERE status IN ('CANCELLED', 'COMPLETED');
+                SELECT setval('solo_matches_id_seq', COALESCE((SELECT MAX(id) FROM solo_matches), 1), (SELECT COUNT(*) > 0 FROM solo_matches));
+                """
+            )
+        except Exception:
+            pass
+
+        try:
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS matchmaking_verifications (
@@ -257,7 +268,9 @@ async def reset_all_player_stats() -> int:
             deaths         = 0,
             assists        = 0,
             mvp_count      = 0
-        WHERE is_active = TRUE
+        WHERE is_active = TRUE;
+        DELETE FROM solo_matches WHERE status != 'IN_PROGRESS';
+        ALTER SEQUENCE IF EXISTS solo_matches_id_seq RESTART WITH 1;
         """
     )
     # asyncpg returns e.g. "UPDATE 42" — parse the count
@@ -2015,6 +2028,13 @@ async def clear_solo_queue(discord_ids: Optional[list[int]] = None) -> None:
 # Solo Match Helpers (Server B)
 # =============================================================================
 
+async def get_next_solo_match_id() -> int:
+    """Get the next queue ID starting from 1."""
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM solo_matches")
+    return int(row["next_id"]) if row else 1
+
+
 async def create_solo_match(
     channel_id: int,
     captain1_id: int,
@@ -2025,39 +2045,80 @@ async def create_solo_match(
     voice_lobby_id: Optional[int] = None,
     voice_team1_id: Optional[int] = None,
     voice_team2_id: Optional[int] = None,
+    match_id: Optional[int] = None,
 ) -> Optional[dict]:
-    """Create a new 10-man solo match record."""
-    row = await get_pool().fetchrow(
-        """
-        INSERT INTO solo_matches (
+    """Create a new 10-man solo match/queue record."""
+    pool = get_pool()
+    if match_id is not None:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO solo_matches (
+                id,
+                channel_id,
+                status,
+                captain1_id,
+                captain2_id,
+                team1_player_ids,
+                team2_player_ids,
+                available_player_ids,
+                current_turn_captain_id,
+                draft_step,
+                available_maps,
+                voice_lobby_id,
+                voice_team1_id,
+                voice_team2_id,
+                created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, ARRAY[$4]::BIGINT[], ARRAY[$5]::BIGINT[], $6::BIGINT[], $4, 1, $7::TEXT[], $8, $9, $10, NOW())
+            RETURNING *
+            """,
+            match_id,
             channel_id,
             status,
             captain1_id,
             captain2_id,
-            team1_player_ids,
-            team2_player_ids,
             available_player_ids,
-            current_turn_captain_id,
-            draft_step,
             available_maps,
             voice_lobby_id,
             voice_team1_id,
             voice_team2_id,
-            created_at
         )
-        VALUES ($1, $2, $3, $4, ARRAY[$3]::BIGINT[], ARRAY[$4]::BIGINT[], $5::BIGINT[], $3, 1, $6::TEXT[], $7, $8, $9, NOW())
-        RETURNING *
-        """,
-        channel_id,
-        status,
-        captain1_id,
-        captain2_id,
-        available_player_ids,
-        available_maps,
-        voice_lobby_id,
-        voice_team1_id,
-        voice_team2_id,
-    )
+        try:
+            await pool.execute("SELECT setval('solo_matches_id_seq', (SELECT MAX(id) FROM solo_matches))")
+        except Exception:
+            pass
+    else:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO solo_matches (
+                channel_id,
+                status,
+                captain1_id,
+                captain2_id,
+                team1_player_ids,
+                team2_player_ids,
+                available_player_ids,
+                current_turn_captain_id,
+                draft_step,
+                available_maps,
+                voice_lobby_id,
+                voice_team1_id,
+                voice_team2_id,
+                created_at
+            )
+            VALUES ($1, $2, $3, $4, ARRAY[$3]::BIGINT[], ARRAY[$4]::BIGINT[], $5::BIGINT[], $3, 1, $6::TEXT[], $7, $8, $9, NOW())
+            RETURNING *
+            """,
+            channel_id,
+            status,
+            captain1_id,
+            captain2_id,
+            available_player_ids,
+            available_maps,
+            voice_lobby_id,
+            voice_team1_id,
+            voice_team2_id,
+        )
     return dict(row) if row else None
 
 
