@@ -504,12 +504,13 @@ def build_solo_map_veto_embed(
 
     if status == "IN_PROGRESS":
         desc = (
-            f"Map: {selected_map}\n\n"
-            f"Team A — {t1}\n"
-            f"Team B — {t2}"
+            f"**Map:** `{selected_map}`\n\n"
+            f"**Team A** — {t1}\n"
+            f"**Team B** — {t2}\n\n"
+            f"> Use `/submit-result` when the match concludes."
         )
         embed = discord.Embed(
-            title=f"Queue {match['id']}  —  Ready",
+            title=f"Queue {match['id']}  —  Match Ready",
             description=desc,
             colour=colour or EMBED_COLOUR,
         )
@@ -915,10 +916,11 @@ class PlayerDraftSelect(discord.ui.Select):
                     vote_view.end_time,
                     colour=colour,
                 )
+                vote_content = "**TEAMS DRAFTED • MAP VOTING ACTIVE**\nVote for the map below (1 min). Map with the highest votes will be played!"
                 if not interaction.response.is_done():
-                    await interaction.response.edit_message(embed=embed, view=vote_view)
+                    await interaction.response.edit_message(content=vote_content, embed=embed, view=vote_view)
                 else:
-                    await interaction.edit_original_response(embed=embed, view=vote_view)
+                    await interaction.edit_original_response(content=vote_content, embed=embed, view=vote_view)
                 vote_view.message = interaction.message
                 if interaction.channel:
                     await interaction.channel.send(
@@ -1236,6 +1238,7 @@ class SoloMapVoteView(discord.ui.View):
         self.players_by_id = players_by_id
         self.map_options = map_options
         self.colour = colour
+        self.timeout_duration = timeout
         self.end_time = time.time() + timeout
         self.votes: dict[int, str] = {}
         all_pids = (
@@ -1249,6 +1252,20 @@ class SoloMapVoteView(discord.ui.View):
         self.message: Optional[discord.Message] = None
 
         self._build_buttons()
+        # Explicit timer task to guarantee finalization when the 60s timer expires
+        self._timer_task: Optional[asyncio.Task] = asyncio.create_task(self._run_timer())
+
+    async def _run_timer(self) -> None:
+        try:
+            remaining = self.end_time - time.time()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            if not self.is_finalized:
+                await self._finalize(None, None)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.error("Error in SoloMapVoteView timer task: %s", e)
 
     def _build_buttons(self) -> None:
         self.clear_items()
@@ -1324,6 +1341,8 @@ class SoloMapVoteView(discord.ui.View):
             return
         self.is_finalized = True
         self.stop()
+        if hasattr(self, "_timer_task") and self._timer_task and not self._timer_task.done():
+            self._timer_task.cancel()
 
         counts = {m: 0 for m in self.map_options}
         for m in self.votes.values():
@@ -1335,7 +1354,7 @@ class SoloMapVoteView(discord.ui.View):
             top_maps = [m for m, c in counts.items() if c == max_votes]
             final_map = random.choice(top_maps)
         else:
-            final_map = random.choice(self.map_options) if self.map_options else "Default Map"
+            final_map = random.choice(self.map_options) if self.map_options else "Bind"
 
         banned = [m for m in self.map_options if m != final_map]
 
@@ -1357,14 +1376,16 @@ class SoloMapVoteView(discord.ui.View):
         if not target_ch and self.message:
             target_ch = self.message.channel
 
-        panel_msg = self.message
-        if not panel_msg and isinstance(target_ch, discord.TextChannel):
-            panel_msg_id = current_match.get("panel_message_id")
-            if panel_msg_id:
-                try:
-                    panel_msg = await target_ch.fetch_message(panel_msg_id)
-                except Exception:
-                    pass
+        panel_msg = None
+        panel_msg_id = current_match.get("panel_message_id")
+        if target_ch and isinstance(target_ch, discord.TextChannel) and panel_msg_id:
+            try:
+                panel_msg = await target_ch.fetch_message(panel_msg_id)
+            except Exception as e:
+                log.debug("Could not fetch panel_msg by ID %s: %s", panel_msg_id, e)
+
+        if not panel_msg and self.message:
+            panel_msg = self.message
 
         c1_id = current_match["captain1_id"]
         c2_id = current_match["captain2_id"]
@@ -1450,32 +1471,44 @@ class SoloMapVoteView(discord.ui.View):
                 updated_match = dict(current_match)
                 updated_match["selected_map"] = final_map
                 updated_match["status"] = "IN_PROGRESS"
+            if not updated_match.get("team1_player_ids"):
+                updated_match["team1_player_ids"] = current_match.get("team1_player_ids", [])
+            if not updated_match.get("team2_player_ids"):
+                updated_match["team2_player_ids"] = current_match.get("team2_player_ids", [])
 
             embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
-            final_view = discord.ui.View()
+            content_text = f"**MATCH READY • MAP: {final_map.upper()}**"
+            edited_ok = False
 
             if interaction and not interaction.is_expired():
                 try:
                     if not interaction.response.is_done():
-                        await interaction.response.edit_message(content=None, embed=embed, view=final_view)
+                        await interaction.response.edit_message(content=content_text, embed=embed, view=None)
                     else:
-                        await interaction.edit_original_response(content=None, embed=embed, view=final_view)
-                except Exception:
-                    if panel_msg:
-                        try:
-                            await panel_msg.edit(content=None, embed=embed, view=final_view)
-                        except Exception:
-                            pass
-            elif panel_msg:
-                try:
-                    await panel_msg.edit(content=None, embed=embed, view=final_view)
+                        await interaction.edit_original_response(content=content_text, embed=embed, view=None)
+                    edited_ok = True
                 except Exception as e:
-                    log.debug("Failed to edit map vote message on finalize: %s", e)
-            elif target_ch:
-                await target_ch.send(embed=embed, view=final_view)
+                    log.debug("Interaction edit on finalize failed: %s", e)
+
+            if not edited_ok and panel_msg:
+                try:
+                    await panel_msg.edit(content=content_text, embed=embed, view=None)
+                    edited_ok = True
+                except Exception as e:
+                    log.error("Failed to edit map vote message on finalize: %s", e)
+
+            if not edited_ok and target_ch:
+                try:
+                    await target_ch.send(content=content_text, embed=embed)
+                    edited_ok = True
+                except Exception as e:
+                    log.error("Failed to send fallback embed to target_ch: %s", e)
 
             if target_ch:
-                await target_ch.send(f"Queue ready on **{final_map}**. Use `/submit-result` when done.")
+                try:
+                    await target_ch.send(f"Queue ready on **{final_map}**. Use `/submit-result` when done.")
+                except Exception as e:
+                    log.error("Failed to send ready announcement: %s", e)
 
 
 class MatchResultVoteView(discord.ui.View):
