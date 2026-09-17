@@ -1,9 +1,10 @@
 """
 utils/generate_leaderboard.py
 -----------------------------
-Renders high-definition NeatQueue-style competitive leaderboard cards
+Renders high-definition, enlarged NeatQueue-style competitive leaderboard cards
 using Pillow. Composites Discord member avatars, rank badges, custom
 medals (gold, silver, bronze), and rank movement indicators.
+Dynamically changes player row borders to vibrant green on win or red on loss.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ _ROOT = os.path.dirname(_HERE)
 _AVATAR_CACHE: dict[str, Image.Image] = {}
 
 
-def get_font(bold: bool = False, size: int = 15) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def get_font(bold: bool = False, size: int = 21) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """Load Segoe UI font or fallback to system fonts."""
     font_file = "segoeuib.ttf" if bold else "segoeui.ttf"
     local_path = os.path.join(_ROOT, "Font", "segoe-ui", font_file)
@@ -54,11 +55,11 @@ def get_font(bold: bool = False, size: int = 15) -> ImageFont.FreeTypeFont | Ima
     return ImageFont.load_default()
 
 
-def draw_discord_default_avatar(size: int = 24) -> Image.Image:
-    """Draws a crisp Discord blurple default avatar."""
+def draw_discord_default_avatar(size: int = 34) -> Image.Image:
+    """Draws an enlarged crisp Discord blurple default avatar."""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([0, 0, size - 1, size - 1], radius=max(3, size // 5), fill=(88, 101, 242, 255))
+    draw.rounded_rectangle([0, 0, size - 1, size - 1], radius=max(4, size // 5), fill=(88, 101, 242, 255))
 
     scale = size / 24.0
     cx, cy = size / 2.0, size / 2.0
@@ -69,7 +70,7 @@ def draw_discord_default_avatar(size: int = 24) -> Image.Image:
     return img
 
 
-def draw_medal(rank: int, size: int = 22) -> Image.Image:
+def draw_medal(rank: int, size: int = 28) -> Image.Image:
     """Draws medal with blue ribbons and numbered gold/silver/bronze coin."""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -94,9 +95,9 @@ def draw_medal(rank: int, size: int = 22) -> Image.Image:
     cx, cy = size * 0.5, size * 0.58
     r = size * 0.34
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=outer)
-    draw.ellipse([cx - r + 1, cy - r + 1, cx + r - 1, cy + r - 1], fill=fill_col)
+    draw.ellipse([cx - r + 1.2, cy - r + 1.2, cx + r - 1.2, cy + r - 1.2], fill=fill_col)
 
-    f = get_font(bold=True, size=max(8, int(size * 0.42)))
+    f = get_font(bold=True, size=max(10, int(size * 0.42)))
     num_str = str(rank)
     bbox = f.getbbox(num_str)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -107,7 +108,7 @@ def draw_medal(rank: int, size: int = 22) -> Image.Image:
 async def fetch_avatar_image(avatar_url: Optional[str]) -> Image.Image:
     """Download avatar image asynchronously with fast timeout & in-memory caching."""
     if not avatar_url:
-        return draw_discord_default_avatar(24)
+        return draw_discord_default_avatar(34)
 
     if avatar_url in _AVATAR_CACHE:
         return _AVATAR_CACHE[avatar_url]
@@ -126,7 +127,7 @@ async def fetch_avatar_image(avatar_url: Optional[str]) -> Image.Image:
     except Exception:
         pass
 
-    return draw_discord_default_avatar(24)
+    return draw_discord_default_avatar(34)
 
 
 def render_leaderboard_image(
@@ -135,17 +136,18 @@ def render_leaderboard_image(
     metric: str = "elo",
 ) -> io.BytesIO:
     """
-    Renders the exact NeatQueue-style leaderboard image card.
+    Renders an enlarged, high-readability NeatQueue-style leaderboard image card.
+    Changes row borders to vibrant green on win or red on loss.
     Returns a BytesIO PNG ready for Discord embed image attachment.
     """
     if avatars is None:
         avatars = {}
 
-    card_width = 540
-    row_height = 37
-    row_gap = 2
-    pad_x = 10
-    pad_y = 10
+    card_width = 720
+    row_height = 50
+    row_gap = 4
+    pad_x = 14
+    pad_y = 14
 
     num_rows = min(10, len(players)) if players else 1
     total_height = pad_y * 2 + num_rows * (row_height + row_gap) - row_gap
@@ -156,17 +158,16 @@ def render_leaderboard_image(
     # Outer rounded card background
     draw.rounded_rectangle(
         [0, 0, card_width - 1, total_height - 1],
-        radius=8,
+        radius=10,
         fill=(24, 25, 28, 255),
         outline=(46, 48, 53, 255),
         width=1,
     )
 
-    f_bold = get_font(bold=True, size=15)
-    f_reg = get_font(bold=False, size=15)
+    f_bold = get_font(bold=True, size=21)
+    f_reg = get_font(bold=False, size=21)
 
     if not players:
-        # Empty placeholder
         msg = "No players ranked yet."
         bbox = f_reg.getbbox(msg)
         tw = bbox[2] - bbox[0]
@@ -203,52 +204,61 @@ def render_leaderboard_image(
         row_y0 = cur_y
         row_y1 = cur_y + row_height - 1
 
-        # Background & border styling per rank
+        # Background & border styling per rank and win/loss
         if rank == 1:
             bg_col = (37, 34, 22, 255)
             border_col = (212, 160, 23, 255)
             accent_col = (254, 231, 92, 255)
-            has_border = True
+            border_w = 2
         elif rank == 2:
             bg_col = (34, 36, 39, 255)
             border_col = (142, 146, 151, 255)
             accent_col = (192, 192, 192, 255)
-            has_border = True
+            border_w = 2
         elif rank == 3:
             bg_col = (39, 32, 27, 255)
             border_col = (154, 83, 40, 255)
             accent_col = (205, 127, 50, 255)
-            has_border = True
+            border_w = 2
         else:
-            bg_col = (30, 31, 35, 255) if (i % 2 == 0) else (27, 28, 32, 255)
-            border_col = None
-            accent_col = (88, 101, 242, 255)
-            has_border = False
+            # Ranks 4 to 10: Win or Loss changes the border!
+            if delta > 0:  # WON last match -> Vibrant Green Border
+                bg_col = (25, 35, 29, 255)
+                border_col = (87, 242, 135, 220)
+                accent_col = (87, 242, 135, 255)
+                border_w = 2
+            elif delta < 0:  # LOST last match -> Vibrant Red Border
+                bg_col = (36, 25, 28, 255)
+                border_col = (237, 66, 69, 220)
+                accent_col = (237, 66, 69, 255)
+                border_w = 2
+            else:  # Neutral -> Classic Blurple Accent
+                bg_col = (30, 31, 35, 255) if (i % 2 == 0) else (27, 28, 32, 255)
+                border_col = (46, 48, 53, 255)
+                accent_col = (88, 101, 242, 255)
+                border_w = 1
 
-        if has_border:
-            draw.rounded_rectangle([row_x0, row_y0, row_x1, row_y1], radius=4, fill=bg_col, outline=border_col, width=1)
-        else:
-            draw.rounded_rectangle([row_x0, row_y0, row_x1, row_y1], radius=3, fill=bg_col)
+        draw.rounded_rectangle([row_x0, row_y0, row_x1, row_y1], radius=5, fill=bg_col, outline=border_col, width=border_w)
 
         # Left accent vertical bar
-        bar_w = 5
-        bar_r = 3
-        draw.rounded_rectangle([row_x0, row_y0, row_x0 + bar_w + 1, row_y1], radius=bar_r, fill=accent_col)
+        bar_w = 7
+        bar_r = 4
+        draw.rounded_rectangle([row_x0, row_y0, row_x0 + bar_w + 2, row_y1], radius=bar_r, fill=accent_col)
         draw.rectangle([row_x0 + bar_r, row_y0, row_x0 + bar_w, row_y1], fill=accent_col)
 
-        draw_x = row_x0 + bar_w + 6
+        draw_x = row_x0 + bar_w + 10
         mid_y = (row_y0 + row_y1) / 2.0
 
         # Movement indicator
         if rank >= 4:
             if delta < 0:
                 tri_y = mid_y - 1
-                draw.polygon([(draw_x, tri_y - 4), (draw_x + 8, tri_y - 4), (draw_x + 4, tri_y + 4)], fill=(237, 66, 69, 255))
-                draw_x += 10
+                draw.polygon([(draw_x, tri_y - 6), (draw_x + 12, tri_y - 6), (draw_x + 6, tri_y + 6)], fill=(237, 66, 69, 255))
+                draw_x += 16
             elif delta > 0:
                 tri_y = mid_y - 1
-                draw.polygon([(draw_x, tri_y + 4), (draw_x + 8, tri_y + 4), (draw_x + 4, tri_y - 4)], fill=(87, 242, 135, 255))
-                draw_x += 10
+                draw.polygon([(draw_x, tri_y + 6), (draw_x + 12, tri_y + 6), (draw_x + 6, tri_y - 6)], fill=(87, 242, 135, 255))
+                draw_x += 16
             else:
                 draw_x += 2
 
@@ -257,36 +267,36 @@ def render_leaderboard_image(
         r_bbox = f_bold.getbbox(rank_str)
         r_h = r_bbox[3] - r_bbox[1]
         draw.text((draw_x, mid_y - r_h / 2.0 - r_bbox[1]), rank_str, font=f_bold, fill=(255, 255, 255, 255))
-        draw_x += (r_bbox[2] - r_bbox[0]) + 8
+        draw_x += (r_bbox[2] - r_bbox[0]) + 10
 
         # Avatar
-        av_size = 24
+        av_size = 34
         av_img = avatars.get(pid)
         if av_img is None:
             av_img = draw_discord_default_avatar(av_size)
         else:
             av_img = av_img.resize((av_size, av_size), Image.Resampling.LANCZOS).convert("RGBA")
             mask = Image.new("L", (av_size, av_size), 0)
-            ImageDraw.Draw(mask).rounded_rectangle([0, 0, av_size - 1, av_size - 1], radius=4, fill=255)
+            ImageDraw.Draw(mask).rounded_rectangle([0, 0, av_size - 1, av_size - 1], radius=6, fill=255)
             av_rounded = Image.new("RGBA", (av_size, av_size), (0, 0, 0, 0))
             av_rounded.paste(av_img, (0, 0), mask)
             av_img = av_rounded
 
         av_y = int(mid_y - av_size / 2.0)
         card.paste(av_img, (int(draw_x), av_y), av_img)
-        draw_x += av_size + 8
+        draw_x += av_size + 10
 
-        # Player Name (truncate to avoid overlapping stats)
-        name_str = ign[:17]
+        # Player Name (truncate gracefully if necessary)
+        name_str = ign[:18]
         n_bbox = f_bold.getbbox(name_str)
         n_h = n_bbox[3] - n_bbox[1]
         draw.text((draw_x, mid_y - n_h / 2.0 - n_bbox[1]), name_str, font=f_bold, fill=(255, 255, 255, 255))
-        draw_x += (n_bbox[2] - n_bbox[0]) + 6
+        draw_x += (n_bbox[2] - n_bbox[0]) + 8
 
         # Medal (if top 3)
         if rank in (1, 2, 3):
-            medal_img = draw_medal(rank, size=20)
-            med_y = int(mid_y - 10)
+            medal_img = draw_medal(rank, size=28)
+            med_y = int(mid_y - 14)
             card.paste(medal_img, (int(draw_x), med_y), medal_img)
 
         # Right-aligned stats
@@ -305,7 +315,7 @@ def render_leaderboard_image(
         s_bbox = f_reg.getbbox(stats_str)
         s_w = s_bbox[2] - s_bbox[0]
         s_h = s_bbox[3] - s_bbox[1]
-        right_x = row_x1 - 10 - s_w
+        right_x = row_x1 - 14 - s_w
         draw.text((right_x, mid_y - s_h / 2.0 - s_bbox[1]), stats_str, font=f_reg, fill=(185, 187, 190, 255))
 
         cur_y += row_height + row_gap

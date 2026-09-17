@@ -157,7 +157,7 @@ async def prepare_leaderboard_data(
             except Exception:
                 user = None
 
-        url = user.display_avatar.with_format("png").with_size(64).url if user else None
+        url = user.display_avatar.with_format("png").with_size(128).url if user else None
         av_img = await fetch_avatar_image(url)
         avatars[pid] = av_img
 
