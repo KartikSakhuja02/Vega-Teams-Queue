@@ -42,6 +42,10 @@ def _build_page_1_embed() -> discord.Embed:
         value=(
             "`/profile [player:@user]`\n"
             "View player stats, ELO, K/D/A, matches, and regional ranking.\n\n"
+            "`/leaderboard [region] [metric]`\n"
+            "View competitive player rankings, ELO ratings, win rates, and stats.\n\n"
+            "`/submit-result screenshot:<image>`\n"
+            "Submit match end-screen screenshot in the 10-man lobby to record stats and ELO.\n\n"
             "`/edit-profile`\n"
             "Edit your registered profile details (IGN or Region) with confirmation.\n\n"
             "`/player_status [player:@user]`\n"

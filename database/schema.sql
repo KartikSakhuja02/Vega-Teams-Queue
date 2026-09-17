@@ -326,6 +326,12 @@ CREATE TABLE IF NOT EXISTS solo_matches (
     banned_maps             TEXT[]       NOT NULL DEFAULT '{}',
     voice_team1_id          BIGINT,
     voice_team2_id          BIGINT,
+    winning_team            INT,          -- 1, 2, or 0 for draw
+    team1_score             INT,
+    team2_score             INT,
+    submitted_by            BIGINT,
+    screenshot_url          TEXT,
+    mvp_player_id           BIGINT,
     created_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     completed_at            TIMESTAMPTZ
 );

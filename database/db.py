@@ -56,6 +56,20 @@ async def _apply_schema() -> None:
         try:
             await conn.execute(
                 """
+                ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS winning_team INT;
+                ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS team1_score INT;
+                ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS team2_score INT;
+                ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS submitted_by BIGINT;
+                ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS screenshot_url TEXT;
+                ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS mvp_player_id BIGINT;
+                """
+            )
+        except Exception as e:
+            log.warning("Could not ensure solo_matches result columns: %s", e)
+
+        try:
+            await conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS matchmaking_verifications (
                     orig_message_id   BIGINT PRIMARY KEY,
                     reply_message_id  BIGINT,
@@ -2217,6 +2231,265 @@ async def delete_matchmaking_verification(orig_message_id: int) -> None:
         "DELETE FROM matchmaking_verifications WHERE orig_message_id = $1",
         orig_message_id,
     )
+
+
+# =============================================================================
+# Match Result Submission & Leaderboard Helpers
+# =============================================================================
+
+async def claim_solo_match_result_submission(match_id: int, user_id: int) -> tuple[bool, str, Optional[dict]]:
+    """
+    Atomically transition match from IN_PROGRESS to PROCESSING_RESULT.
+    Guarantees only one player's submission is processed at a time.
+    Returns (success, reason_if_failed, match_dict).
+    """
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        UPDATE solo_matches
+        SET status = 'PROCESSING_RESULT',
+            submitted_by = $1
+        WHERE id = $2 AND status = 'IN_PROGRESS'
+        RETURNING *
+        """,
+        user_id,
+        match_id,
+    )
+    if row:
+        return True, "", dict(row)
+
+    # Could not claim lock — inspect current status to give clear error
+    current = await pool.fetchrow("SELECT * FROM solo_matches WHERE id = $1", match_id)
+    if not current:
+        return False, "Match not found.", None
+    status = current["status"]
+    if status == "PROCESSING_RESULT":
+        return False, "A match result screenshot has already been submitted and is currently being processed by another player. Please wait.", dict(current)
+    if status == "COMPLETED":
+        return False, "Match results have already been finalized and recorded for this match.", dict(current)
+    if status == "CANCELLED":
+        return False, "This match has been cancelled.", dict(current)
+    return False, f"Match is not in progress (current status: `{status}`).", dict(current)
+
+
+async def release_solo_match_result_submission(match_id: int) -> None:
+    """Revert match from PROCESSING_RESULT back to IN_PROGRESS if processing fails."""
+    await get_pool().execute(
+        """
+        UPDATE solo_matches
+        SET status = 'IN_PROGRESS',
+            submitted_by = NULL
+        WHERE id = $1 AND status = 'PROCESSING_RESULT'
+        """,
+        match_id,
+    )
+
+
+async def complete_solo_match_with_stats(
+    match_id: int,
+    winning_team: int,
+    team1_score: int,
+    team2_score: int,
+    map_name: str,
+    submitted_by: int,
+    screenshot_url: Optional[str],
+    mvp_player_id: Optional[int],
+    player_updates: list[dict],
+    all_lobby_player_ids: list[int],
+) -> Optional[dict]:
+    """
+    Atomically finalize a solo match and update player stats, ELO, and status in a single transaction.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # 1. Update solo_matches
+            updated_match = await conn.fetchrow(
+                """
+                UPDATE solo_matches
+                SET status = 'COMPLETED',
+                    completed_at = NOW(),
+                    winning_team = $1,
+                    team1_score = $2,
+                    team2_score = $3,
+                    selected_map = COALESCE($4, selected_map),
+                    submitted_by = $5,
+                    screenshot_url = $6,
+                    mvp_player_id = $7
+                WHERE id = $8
+                RETURNING *
+                """,
+                winning_team,
+                team1_score,
+                team2_score,
+                map_name,
+                submitted_by,
+                screenshot_url,
+                mvp_player_id,
+                match_id,
+            )
+
+            # 2. Update each player's stats & ELO
+            for p in player_updates:
+                pid = p["discord_id"]
+                kills = p.get("kills", 0)
+                deaths = p.get("deaths", 0)
+                assists = p.get("assists", 0)
+                is_win = p.get("is_winner", False)
+                is_mvp = p.get("is_mvp", False)
+                elo_delta = p.get("elo_delta", 0)
+
+                await conn.execute(
+                    """
+                    UPDATE players
+                    SET kills = kills + $1,
+                        deaths = deaths + $2,
+                        assists = assists + $3,
+                        matches_played = matches_played + 1,
+                        wins = wins + (CASE WHEN $4::BOOLEAN THEN 1 ELSE 0 END),
+                        mvp_count = mvp_count + (CASE WHEN $5::BOOLEAN THEN 1 ELSE 0 END),
+                        elo = GREATEST(100, elo + $6),
+                        status = 'IDLE',
+                        status_since = NOW()
+                    WHERE discord_id = $7
+                    """,
+                    kills,
+                    deaths,
+                    assists,
+                    is_win,
+                    is_mvp,
+                    elo_delta,
+                    pid,
+                )
+
+            # 3. Ensure any other lobby participants (e.g. if undetected by OCR) are set to IDLE
+            if all_lobby_player_ids:
+                await conn.execute(
+                    """
+                    UPDATE players
+                    SET status = 'IDLE',
+                        status_since = NOW()
+                    WHERE discord_id = ANY($1::BIGINT[]) AND status = 'IN_MATCH'
+                    """,
+                    all_lobby_player_ids,
+                )
+
+            return dict(updated_match) if updated_match else None
+
+
+async def get_solo_leaderboard(
+    region: Optional[str] = None,
+    metric: str = "elo",
+    limit: int = 10,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """
+    Query top ranked players with pagination and region filter.
+    Returns (players_list, total_count).
+    """
+    pool = get_pool()
+    where_clauses = ["is_active = TRUE"]
+    params: list = []
+    if region and region != "All":
+        params.append(region)
+        where_clauses.append(f"region = ${len(params)}")
+
+    where_sql = " AND ".join(where_clauses)
+
+    count_row = await pool.fetchrow(f"SELECT COUNT(*) FROM players WHERE {where_sql}", *params)
+    total_count = count_row[0] if count_row else 0
+
+    metric = (metric or "elo").lower()
+    if metric == "wins":
+        order_sql = "wins DESC, elo DESC, kills DESC"
+    elif metric == "kda":
+        order_sql = "(CAST(kills AS FLOAT) / GREATEST(1, deaths)) DESC, kills DESC"
+    elif metric in ("mvp", "mvps"):
+        order_sql = "mvp_count DESC, elo DESC, wins DESC"
+    else:
+        order_sql = "elo DESC, wins DESC, kills DESC"
+
+    params.append(limit)
+    limit_param_idx = len(params)
+    params.append(offset)
+    offset_param_idx = len(params)
+
+    query = f"""
+        SELECT 
+            id,
+            discord_id,
+            discord_username,
+            ign,
+            region,
+            elo,
+            kills,
+            deaths,
+            assists,
+            matches_played,
+            wins,
+            mvp_count,
+            ROW_NUMBER() OVER (ORDER BY {order_sql}) as rank_num
+        FROM players
+        WHERE {where_sql}
+        ORDER BY {order_sql}
+        LIMIT ${limit_param_idx} OFFSET ${offset_param_idx}
+    """
+    rows = await pool.fetch(query, *params)
+    return [dict(r) for r in rows], total_count
+
+
+async def get_player_leaderboard_rank(
+    discord_id: int,
+    region: Optional[str] = None,
+    metric: str = "elo",
+) -> Optional[dict]:
+    """
+    Fetch a player's exact rank, ELO, and stats in the specified leaderboard scope.
+    """
+    pool = get_pool()
+    where_clauses = ["is_active = TRUE"]
+    params: list = []
+    if region and region != "All":
+        params.append(region)
+        where_clauses.append(f"region = ${len(params)}")
+    where_sql = " AND ".join(where_clauses)
+
+    metric = (metric or "elo").lower()
+    if metric == "wins":
+        order_sql = "wins DESC, elo DESC, kills DESC"
+    elif metric == "kda":
+        order_sql = "(CAST(kills AS FLOAT) / GREATEST(1, deaths)) DESC, kills DESC"
+    elif metric in ("mvp", "mvps"):
+        order_sql = "mvp_count DESC, elo DESC, wins DESC"
+    else:
+        order_sql = "elo DESC, wins DESC, kills DESC"
+
+    params.append(discord_id)
+    target_idx = len(params)
+
+    query = f"""
+        WITH ranked AS (
+            SELECT 
+                discord_id,
+                discord_username,
+                ign,
+                region,
+                elo,
+                kills,
+                deaths,
+                assists,
+                matches_played,
+                wins,
+                mvp_count,
+                ROW_NUMBER() OVER (ORDER BY {order_sql}) as rank_num
+            FROM players
+            WHERE {where_sql}
+        )
+        SELECT * FROM ranked WHERE discord_id = ${target_idx}
+    """
+    row = await pool.fetchrow(query, *params)
+    return dict(row) if row else None
+
 
 
 

@@ -89,6 +89,8 @@ class VegaBot(commands.Bot):
         log.info("Loaded cog: cogs.solo_queue")
         await self.load_extension("cogs.verification")
         log.info("Loaded cog: cogs.verification")
+        await self.load_extension("cogs.leaderboard")
+        log.info("Loaded cog: cogs.leaderboard")
 
 
         # 3. Sync slash commands.

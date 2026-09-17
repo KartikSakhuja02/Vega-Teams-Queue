@@ -115,6 +115,10 @@ Configured via a `.env` file (see `.env.example`):
 | Command | Description |
 |---|---|
 | `/post_solo_queue` | Refreshes or posts the persistent 10-man Solo Queue panel in Server B (Admin only). |
+| `/submit-result` | Submits match scoreboard screenshot for OCR analysis, updates stats/ELO, and posts to results channel. |
+| `/leaderboard` | View competitive player rankings, ELO ratings, and combat stats with pagination and region filters. |
+| `/solo_config scoring` | Switch ELO scoring template between `DEFAULT` (+25/-20) and `PERFORMANCE` (stats-scaled). |
+| `/solo_config results_channel` | Set dedicated channel where match result scoreboards are posted. |
 | `/cancel_solo_match` | Cancels the active 10-man match lobby and returns players to `IDLE` status (Staff only). |
 
 - **Queue Lobby**:
@@ -134,6 +138,12 @@ Configured via a `.env` file (see `.env.example`):
 - **Map Veto Phase**:
   - Dynamic buttons for the map pool (`Ascent`, `Bind`, `Haven`, `Split`, `Sunset`, `Lotus`, `Abyss`).
   - Captains take turns clicking a button to **BAN** maps until 1 decisive map remains.
+- **Match Result & Scoreboard OCR**:
+  - Any player in the match lobby can upload the match end-screen screenshot using `/submit-result`.
+  - Concurrency locking prevents double submissions.
+  - Ollama vision extracts K/D/A, ACS, first bloods, plants, defuses, and MVP badges.
+  - ELO templates: `DEFAULT` (flat +25/-20) or `PERFORMANCE` (combat scaling with carry loss protection).
+  - Detailed scoreboard is automatically posted to the dedicated results channel and players return to `IDLE`.
 
 ---
 

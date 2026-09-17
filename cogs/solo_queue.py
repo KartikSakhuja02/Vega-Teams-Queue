@@ -84,8 +84,12 @@ EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 CONFIG_KEY_CAPTAIN_MODE = "solo_captain_mode"
 CONFIG_KEY_DRAFT_MODE = "solo_draft_mode"
 CONFIG_KEY_VETO_MODE = "solo_veto_mode"
+CONFIG_KEY_SCORING_MODE = "solo_scoring_mode"
+CONFIG_KEY_RESULTS_CHANNEL_ID = "solo_results_channel_id"
 CONFIG_KEY_MAP_POOL = "solo_map_pool"
 CONFIG_KEY_THEME = "solo_embed_colour"
+
+RESULTS_CHANNEL_ID: int = int(os.environ.get("RESULTS_CHANNEL_ID", os.environ.get("SOLO_RESULTS_CHANNEL_ID", "0")))
 
 THEME_PRESETS: dict[str, str] = {
     "PURPLE": "#5B4FCF",
@@ -116,6 +120,97 @@ async def get_solo_veto_mode() -> str:
     if val and val.upper() in ("ALTERNATING_BAN", "BAN_BAN_PICK", "RANDOM_MAP", "CAPTAIN_PICK"):
         return val.upper()
     return VETO_MODE
+
+
+async def get_solo_scoring_mode() -> str:
+    val = await db.get_config(CONFIG_KEY_SCORING_MODE)
+    if val and val.upper() in ("DEFAULT", "PERFORMANCE"):
+        return val.upper()
+    return "DEFAULT"
+
+
+async def get_solo_results_channel_id() -> int:
+    val = await db.get_config(CONFIG_KEY_RESULTS_CHANNEL_ID)
+    if val and str(val).isdigit():
+        return int(val)
+    return RESULTS_CHANNEL_ID
+
+
+def calculate_player_elo(
+    scoring_mode: str,
+    is_winner: bool,
+    is_draw: bool,
+    is_mvp: bool,
+    mvp_type: Optional[str],
+    kills: int,
+    deaths: int,
+    assists: int,
+    acs: int,
+    damage: int,
+    first_bloods: int,
+) -> int:
+    """
+    Calculate the ELO adjustment (+/-) for a player based on match outcome and template.
+    Templates:
+      - 'DEFAULT': Flat ELO (+25 win, -20 loss, 0 draw) + 5 Match MVP bonus.
+      - 'PERFORMANCE': Combat performance-scaled ELO with carry protection.
+    """
+    kd_ratio = kills / max(1, deaths)
+    is_match_mvp = is_mvp and (mvp_type == "Match MVP" or "match" in str(mvp_type).lower())
+    is_team_mvp = (not is_match_mvp) and (is_mvp or mvp_type == "Team MVP" or "team" in str(mvp_type).lower())
+
+    mvp_bonus = 5 if is_match_mvp else (2 if is_team_mvp else 0)
+
+    if scoring_mode != "PERFORMANCE":
+        if is_draw:
+            return mvp_bonus
+        base = 25 if is_winner else -20
+        return base + mvp_bonus
+
+    # PERFORMANCE MODE:
+    perf_mod = 0
+
+    # 1. K/D Ratio impact
+    if kd_ratio >= 2.0:
+        perf_mod += 6
+    elif kd_ratio >= 1.5:
+        perf_mod += 4
+    elif kd_ratio >= 1.2:
+        perf_mod += 2
+    elif kd_ratio >= 0.9:
+        perf_mod += 0
+    elif kd_ratio >= 0.6:
+        perf_mod -= 3
+    else:
+        perf_mod -= 5
+
+    # 2. ACS impact
+    if acs >= 300:
+        perf_mod += 4
+    elif acs >= 240:
+        perf_mod += 2
+    elif acs >= 180:
+        perf_mod += 0
+    elif acs > 0 and acs < 120:
+        perf_mod -= 3
+
+    # 3. First Bloods impact
+    if first_bloods >= 4:
+        perf_mod += 3
+    elif first_bloods >= 2:
+        perf_mod += 1
+
+    if is_draw:
+        delta = perf_mod + mvp_bonus
+        return max(-5, min(10, delta))
+
+    if is_winner:
+        total = 20 + perf_mod + mvp_bonus
+        return max(12, min(38, total))
+    else:
+        # Carry protection on loss:
+        total = -20 + perf_mod + mvp_bonus
+        return max(-28, min(-8, total))
 
 
 async def get_solo_map_pool() -> list[str]:
@@ -422,6 +517,8 @@ def build_solo_config_embed(
     captain_mode: str,
     draft_mode: str,
     veto_mode: str,
+    scoring_mode: str,
+    results_ch_id: int,
     theme: str,
     map_pool: list[str],
     colour: discord.Colour,
@@ -448,6 +545,22 @@ def build_solo_config_embed(
     embed.add_field(
         name="🗺️ Map Veto Template",
         value=f"`{veto_mode}`\n*(Alternating Bans, Ban-Ban-Pick, Random Map, or Captain Pick)*",
+        inline=True,
+    )
+    scoring_desc = (
+        "Performance Combat-Based (Stats Scaling)"
+        if scoring_mode == "PERFORMANCE"
+        else "Default Flat ELO (+25/-20)"
+    )
+    embed.add_field(
+        name="📊 ELO Scoring Template",
+        value=f"`{scoring_mode}`\n*({scoring_desc})*",
+        inline=True,
+    )
+    results_ch_val = f"<#{results_ch_id}>" if results_ch_id else "*Not configured*"
+    embed.add_field(
+        name="📢 Results Channel",
+        value=results_ch_val,
         inline=True,
     )
     embed.add_field(
@@ -762,7 +875,8 @@ class SoloMapVetoView(discord.ui.View):
                 await interaction.channel.send(
                     f"**MAP DECIDED: {chosen_map.upper()}**\n"
                     f"<@{interaction.user.id}> picked **{chosen_map}**!\n\n"
-                    f"Captains <@{c1_id}> and <@{c2_id}>: Please set up the custom lobby and invite all players."
+                    f"Captains <@{c1_id}> and <@{c2_id}>: Please set up the custom lobby and invite all players.\n\n"
+                    f"📸 **Submit Result:** When the match concludes, any player in this channel can submit the scoreboard screenshot using `/submit-result`!"
                 )
         return callback
 
@@ -836,7 +950,8 @@ class SoloMapVetoView(discord.ui.View):
                         f"**MAP DECIDED: {final_map.upper()}**\n"
                         f"<@{interaction.user.id}> banned **{map_to_ban}**.\n"
                         f"The match will be played on **{final_map}**!\n\n"
-                        f"Captains <@{c1_id}> and <@{c2_id}>: Please set up the custom lobby and invite all players."
+                        f"Captains <@{c1_id}> and <@{c2_id}>: Please set up the custom lobby and invite all players.\n\n"
+                        f"📸 **Submit Result:** When the match concludes, any player in this channel can submit the scoreboard screenshot using `/submit-result`!"
                     )
                 return
 
@@ -990,6 +1105,37 @@ class SoloConfigVetoSelect(discord.ui.Select):
         await view.refresh(interaction)
 
 
+class SoloConfigScoringSelect(discord.ui.Select):
+    def __init__(self, current_mode: str) -> None:
+        options = [
+            discord.SelectOption(
+                label="Default Flat ELO (Default)",
+                value="DEFAULT",
+                description="+25 Win / -20 Loss / +5 Match MVP",
+                default=(current_mode == "DEFAULT"),
+            ),
+            discord.SelectOption(
+                label="Performance Combat-Based ELO",
+                value="PERFORMANCE",
+                description="Scaled by K/D, ACS, First Bloods & Carry Protection",
+                default=(current_mode == "PERFORMANCE"),
+            ),
+        ]
+        super().__init__(
+            placeholder="Select ELO Scoring Template...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=3,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: SoloConfigPanelView = self.view  # type: ignore[assignment]
+        new_mode = self.values[0]
+        await db.set_config(CONFIG_KEY_SCORING_MODE, new_mode)
+        await view.refresh(interaction)
+
+
 class SoloConfigThemeSelect(discord.ui.Select):
     def __init__(self, current_theme: str) -> None:
         options = [
@@ -1029,7 +1175,7 @@ class SoloConfigThemeSelect(discord.ui.Select):
             min_values=1,
             max_values=1,
             options=options,
-            row=3,
+            row=4,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -1049,6 +1195,7 @@ class SoloConfigPanelView(discord.ui.View):
         captain_mode: str,
         draft_mode: str,
         veto_mode: str,
+        scoring_mode: str,
         theme: str,
     ) -> None:
         super().__init__(timeout=600)
@@ -1056,18 +1203,21 @@ class SoloConfigPanelView(discord.ui.View):
         self.add_item(SoloConfigCaptainSelect(captain_mode))
         self.add_item(SoloConfigDraftSelect(draft_mode))
         self.add_item(SoloConfigVetoSelect(veto_mode))
+        self.add_item(SoloConfigScoringSelect(scoring_mode))
         self.add_item(SoloConfigThemeSelect(theme))
 
     async def refresh(self, interaction: discord.Interaction) -> None:
         captain_mode = await get_solo_captain_mode()
         draft_mode = await get_solo_draft_mode()
         veto_mode = await get_solo_veto_mode()
+        scoring_mode = await get_solo_scoring_mode()
+        results_ch_id = await get_solo_results_channel_id()
         theme_val = (await db.get_config(CONFIG_KEY_THEME)) or "PURPLE"
         map_pool = await get_solo_map_pool()
         colour = await get_solo_embed_colour()
 
-        new_view = SoloConfigPanelView(self.cog, captain_mode, draft_mode, veto_mode, theme_val)
-        embed = build_solo_config_embed(captain_mode, draft_mode, veto_mode, theme_val, map_pool, colour)
+        new_view = SoloConfigPanelView(self.cog, captain_mode, draft_mode, veto_mode, scoring_mode, theme_val)
+        embed = build_solo_config_embed(captain_mode, draft_mode, veto_mode, scoring_mode, results_ch_id, theme_val, map_pool, colour)
         await interaction.response.edit_message(embed=embed, view=new_view)
 
 
@@ -1429,12 +1579,14 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         captain_mode = await get_solo_captain_mode()
         draft_mode = await get_solo_draft_mode()
         veto_mode = await get_solo_veto_mode()
+        scoring_mode = await get_solo_scoring_mode()
+        results_ch_id = await get_solo_results_channel_id()
         theme_val = (await db.get_config(CONFIG_KEY_THEME)) or "PURPLE"
         map_pool = await get_solo_map_pool()
         colour = await get_solo_embed_colour()
 
-        embed = build_solo_config_embed(captain_mode, draft_mode, veto_mode, theme_val, map_pool, colour)
-        view = SoloConfigPanelView(self, captain_mode, draft_mode, veto_mode, theme_val)
+        embed = build_solo_config_embed(captain_mode, draft_mode, veto_mode, scoring_mode, results_ch_id, theme_val, map_pool, colour)
+        view = SoloConfigPanelView(self, captain_mode, draft_mode, veto_mode, scoring_mode, theme_val)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     @solo_config.command(name="view", description="View all active 10-man solo queue configurations.")
@@ -1443,12 +1595,36 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         captain_mode = await get_solo_captain_mode()
         draft_mode = await get_solo_draft_mode()
         veto_mode = await get_solo_veto_mode()
+        scoring_mode = await get_solo_scoring_mode()
+        results_ch_id = await get_solo_results_channel_id()
         theme_val = (await db.get_config(CONFIG_KEY_THEME)) or "PURPLE"
         map_pool = await get_solo_map_pool()
         colour = await get_solo_embed_colour()
 
-        embed = build_solo_config_embed(captain_mode, draft_mode, veto_mode, theme_val, map_pool, colour)
+        embed = build_solo_config_embed(captain_mode, draft_mode, veto_mode, scoring_mode, results_ch_id, theme_val, map_pool, colour)
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @solo_config.command(name="scoring", description="Set the ELO scoring template.")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="Default Flat ELO (+25/-20)", value="DEFAULT"),
+        app_commands.Choice(name="Performance Combat-Based ELO (Stats Scaling)", value="PERFORMANCE"),
+    ])
+    async def solo_config_scoring_cmd(self, interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send("You do not have staff permissions.", ephemeral=True)
+            return
+        await db.set_config(CONFIG_KEY_SCORING_MODE, mode.value)
+        await interaction.followup.send(f"Scoring template updated to **`{mode.value}`** ({mode.name}).", ephemeral=True)
+
+    @solo_config.command(name="results_channel", description="Set the dedicated match results channel.")
+    async def solo_config_results_channel_cmd(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send("You do not have staff permissions.", ephemeral=True)
+            return
+        await db.set_config(CONFIG_KEY_RESULTS_CHANNEL_ID, str(channel.id))
+        await interaction.followup.send(f"Dedicated match results channel set to {channel.mention} (`{channel.id}`).", ephemeral=True)
 
     @solo_config.command(name="captain_mode", description="Set the captain selection template.")
     @app_commands.choices(mode=[
@@ -1632,6 +1808,417 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         await self.refresh_queue_message()
         await interaction.followup.send("10-Man solo queue panel refreshed.", ephemeral=True)
+
+    # ── /submit-result ────────────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="submit-result",
+        description="Submit the match scoreboard screenshot for OCR analysis and stats recording.",
+    )
+    @app_commands.describe(
+        screenshot="The Valorant match end-screen scoreboard screenshot (PNG/JPG/WEBP)."
+    )
+    async def submit_result_hyphen_cmd(
+        self,
+        interaction: discord.Interaction,
+        screenshot: discord.Attachment,
+    ) -> None:
+        """Submit match results screenshot (hyphen version)."""
+        await self._handle_submit_result(interaction, screenshot)
+
+    @app_commands.command(
+        name="submit_result",
+        description="Submit the match scoreboard screenshot for OCR analysis and stats recording.",
+    )
+    @app_commands.describe(
+        screenshot="The Valorant match end-screen scoreboard screenshot (PNG/JPG/WEBP)."
+    )
+    async def submit_result_underscore_cmd(
+        self,
+        interaction: discord.Interaction,
+        screenshot: discord.Attachment,
+    ) -> None:
+        """Submit match results screenshot (underscore version)."""
+        await self._handle_submit_result(interaction, screenshot)
+
+    async def _handle_submit_result(
+        self,
+        interaction: discord.Interaction,
+        screenshot: discord.Attachment,
+    ) -> None:
+        """Core logic for analyzing match screenshots, blocking race conditions, and updating stats/ELO."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        # 1. Verify this is an active solo match channel
+        match = await db.get_solo_match_by_channel(interaction.channel_id)
+        if not match:
+            await interaction.response.send_message(
+                "❌ This channel is not an active 10-man match lobby.",
+                ephemeral=True,
+            )
+            return
+
+        t1_pids = list(match.get("team1_player_ids") or [])
+        t2_pids = list(match.get("team2_player_ids") or [])
+        all_match_pids = list(set(t1_pids + t2_pids))
+
+        # 2. Verify authorization (match participant or staff)
+        is_participant = interaction.user.id in all_match_pids
+        is_staff = _is_admin(interaction.user)
+        if not is_participant and not is_staff:
+            await interaction.response.send_message(
+                "❌ Only players participating in this match (or staff) can submit results.",
+                ephemeral=True,
+            )
+            return
+
+        # 3. Validate image format
+        if not screenshot.content_type or not screenshot.content_type.startswith("image/"):
+            await interaction.response.send_message(
+                "❌ Please upload a valid scoreboard image (PNG, JPG, or WEBP).",
+                ephemeral=True,
+            )
+            return
+
+        # 4. Atomic concurrency claim / lock
+        claimed, err_reason, _ = await db.claim_solo_match_result_submission(
+            match["id"], interaction.user.id
+        )
+        if not claimed:
+            await interaction.response.send_message(f"❌ {err_reason}", ephemeral=True)
+            return
+
+        # 5. Defer public response so players in the lobby see submission in progress
+        await interaction.response.defer(thinking=True)
+
+        # 6. Read attachment image bytes
+        try:
+            image_bytes = await screenshot.read()
+        except Exception as exc:
+            await db.release_solo_match_result_submission(match["id"])
+            await interaction.followup.send(f"❌ Failed to read attached image: {exc}")
+            return
+
+        # 7. Run OCR Pipeline (Ollama qwen2.5vl:3b -> OpenRouter -> Tesseract fallback)
+        from utils.match_ocr import process_match_screenshot, PlayerRowStats
+        result = await process_match_screenshot(image_bytes)
+
+        if not result.success or (not result.team1_players and not result.team2_players):
+            await db.release_solo_match_result_submission(match["id"])
+            await interaction.followup.send(
+                f"❌ **Scoreboard Analysis Failed**: {result.error or 'Could not detect scoreboard table.'}\n"
+                f"• Engine: `{result.engine}`\n"
+                f"• Time: `{result.processing_time_ms} ms`\n\n"
+                "Please make sure the entire Valorant match scoreboard is clearly visible and try again."
+            )
+            return
+
+        # 8. Map name normalization
+        MAP_TRANSLATIONS = {
+            "源工重镇": "Bind",
+            "亚海悬城": "Ascent",
+            "莲华古城": "Lotus",
+            "深海明珠": "Pearl",
+            "微风岛屿": "Breeze",
+            "隐世修所": "Haven",
+            "天堂": "Haven",
+            "霓虹町": "Split",
+            "分裂": "Split",
+            "森寒冬港": "Icebox",
+            "极地寒港": "Icebox",
+            "冰箱": "Icebox",
+            "裂变峡谷": "Fracture",
+            "碎片": "Fracture",
+            "日落之城": "Sunset",
+            "日落": "Sunset",
+            "幽邃地窟": "Abyss",
+            "深渊": "Abyss",
+        }
+        raw_map = result.map_name or match.get("selected_map") or "Unknown"
+        map_name = MAP_TRANSLATIONS.get(raw_map, raw_map)
+
+        # 9. Fetch registered player records for the 10 lobby players
+        lobby_player_records: dict[int, dict] = {}
+        for pid in all_match_pids:
+            p_rec = await db.get_player(pid)
+            if p_rec:
+                lobby_player_records[pid] = dict(p_rec)
+
+        import re
+        import difflib
+
+        def _clean_str(s: str) -> str:
+            if not s:
+                return ""
+            s = s.split("#")[0]
+            s = re.sub(r"[^\w\u4e00-\u9fff]", "", s, flags=re.UNICODE)
+            return s.lower()
+
+        clean_to_pid: dict[str, int] = {}
+        for pid, prec in lobby_player_records.items():
+            ign_clean = _clean_str(prec.get("ign", ""))
+            if ign_clean:
+                clean_to_pid[ign_clean] = pid
+            user_clean = _clean_str(prec.get("discord_username", ""))
+            if user_clean and user_clean not in clean_to_pid:
+                clean_to_pid[user_clean] = pid
+
+        def _find_best_player(ocr_ign: str, candidate_pids: set[int]) -> Optional[int]:
+            ocr_c = _clean_str(ocr_ign)
+            if not ocr_c:
+                return None
+            # Exact match
+            for p_c, pid in clean_to_pid.items():
+                if pid in candidate_pids and p_c == ocr_c:
+                    return pid
+            # Substring match (min len 3)
+            if len(ocr_c) >= 3:
+                for p_c, pid in clean_to_pid.items():
+                    if pid in candidate_pids and (ocr_c in p_c or p_c in ocr_c):
+                        return pid
+            # Fuzzy match (ratio >= 0.70)
+            best_pid = None
+            best_sim = 0.0
+            for p_c, pid in clean_to_pid.items():
+                if pid in candidate_pids:
+                    sim = difflib.SequenceMatcher(None, ocr_c, p_c).ratio()
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_pid = pid
+            if best_sim >= 0.70:
+                return best_pid
+            return None
+
+        # 10. Check Team Alignment (determine if OCR Team 1 is Match Team 1 or Team 2)
+        t1_set = set(t1_pids)
+        t2_set = set(t2_pids)
+        ocr_t1_in_lobby_t1 = 0
+        ocr_t1_in_lobby_t2 = 0
+
+        for p in result.team1_players:
+            matched = _find_best_player(p.ign, set(all_match_pids))
+            if matched:
+                if matched in t1_set:
+                    ocr_t1_in_lobby_t1 += 1
+                elif matched in t2_set:
+                    ocr_t1_in_lobby_t2 += 1
+
+        # If OCR Team 1 matched more players from Lobby Team 2, swap OCR teams & scores
+        if ocr_t1_in_lobby_t2 > ocr_t1_in_lobby_t1:
+            result.team1_players, result.team2_players = result.team2_players, result.team1_players
+            result.team1_score, result.team2_score = result.team2_score, result.team1_score
+
+        # 11. Pair each team's OCR rows to Lobby players
+        matched_stats_by_pid: dict[int, PlayerRowStats] = {}
+        avail_t1 = set(t1_pids)
+        avail_t2 = set(t2_pids)
+
+        for p in result.team1_players:
+            mpid = _find_best_player(p.ign, avail_t1)
+            if mpid:
+                avail_t1.discard(mpid)
+                matched_stats_by_pid[mpid] = p
+
+        for p in result.team2_players:
+            mpid = _find_best_player(p.ign, avail_t2)
+            if mpid:
+                avail_t2.discard(mpid)
+                matched_stats_by_pid[mpid] = p
+
+        # Assign any remaining unmatched OCR rows to remaining lobby players on that team
+        unmatched_ocr_t1 = [p for p in result.team1_players if p not in matched_stats_by_pid.values()]
+        for pid in list(avail_t1):
+            if unmatched_ocr_t1:
+                matched_stats_by_pid[pid] = unmatched_ocr_t1.pop(0)
+                avail_t1.remove(pid)
+
+        unmatched_ocr_t2 = [p for p in result.team2_players if p not in matched_stats_by_pid.values()]
+        for pid in list(avail_t2):
+            if unmatched_ocr_t2:
+                matched_stats_by_pid[pid] = unmatched_ocr_t2.pop(0)
+                avail_t2.remove(pid)
+
+        # 12. Determine match outcome
+        t1_score = result.team1_score or 0
+        t2_score = result.team2_score or 0
+        is_draw = (t1_score == t2_score)
+        winning_team = 0 if is_draw else (1 if t1_score > t2_score else 2)
+
+        # 13. Calculate ELO & stats for all 10 players
+        scoring_mode = await get_solo_scoring_mode()
+        player_updates: list[dict] = []
+        overall_mvp_pid = None
+
+        for pid in all_match_pids:
+            is_t1 = (pid in t1_pids)
+            is_win = (not is_draw) and ((is_t1 and winning_team == 1) or ((not is_t1) and winning_team == 2))
+
+            stats = matched_stats_by_pid.get(pid)
+            kills = stats.kills if stats else 0
+            deaths = stats.deaths if stats else 0
+            assists = stats.assists if stats else 0
+            acs = stats.acs if stats else 0
+            damage = stats.damage if stats else 0
+            fb = stats.first_bloods if stats else 0
+            is_mvp = stats.is_mvp if stats else False
+            mvp_type = stats.mvp_type if stats else None
+
+            is_match_mvp = is_mvp and (mvp_type == "Match MVP" or "match" in str(mvp_type).lower())
+            if is_match_mvp:
+                overall_mvp_pid = pid
+
+            elo_delta = calculate_player_elo(
+                scoring_mode=scoring_mode,
+                is_winner=is_win,
+                is_draw=is_draw,
+                is_mvp=is_mvp,
+                mvp_type=mvp_type,
+                kills=kills,
+                deaths=deaths,
+                assists=assists,
+                acs=acs,
+                damage=damage,
+                first_bloods=fb,
+            )
+
+            player_updates.append({
+                "discord_id": pid,
+                "kills": kills,
+                "deaths": deaths,
+                "assists": assists,
+                "is_winner": is_win,
+                "is_mvp": is_match_mvp or is_mvp,
+                "elo_delta": elo_delta,
+                "stats_obj": stats,
+            })
+
+        # 14. Commit to database atomically
+        await db.complete_solo_match_with_stats(
+            match_id=match["id"],
+            winning_team=winning_team,
+            team1_score=t1_score,
+            team2_score=t2_score,
+            map_name=map_name,
+            submitted_by=interaction.user.id,
+            screenshot_url=screenshot.url,
+            mvp_player_id=overall_mvp_pid,
+            player_updates=player_updates,
+            all_lobby_player_ids=all_match_pids,
+        )
+
+        # 15. Build comprehensive result embed matching /test_ss_ocr style
+        if t1_score > t2_score:
+            outcome_text = "🟢 Team 1 Victory"
+            sidebar_color = discord.Colour.from_rgb(46, 204, 113)
+        elif t2_score > t1_score:
+            outcome_text = "🔴 Team 2 Victory"
+            sidebar_color = discord.Colour.from_rgb(235, 66, 85)
+        else:
+            outcome_text = "🤝 Match Draw"
+            sidebar_color = discord.Colour.gold()
+
+        meta_parts = []
+        if result.duration and result.duration != "Unknown":
+            meta_parts.append(f"⏱️ {result.duration}")
+        if result.match_date and result.match_date != "Unknown":
+            meta_parts.append(f"📅 {result.match_date}")
+        meta_str = f" • {' • '.join(meta_parts)}" if meta_parts else ""
+
+        result_embed = discord.Embed(
+            title=f"Match Results — {map_name}",
+            description=(
+                f"**Score:** 🟢 Team 1 **[{t1_score}]** — 🔴 Team 2 **[{t2_score}]**\n"
+                f"**Outcome:** {outcome_text}{meta_str}"
+            ),
+            colour=sidebar_color,
+        )
+
+        def _format_team_lines(team_pids: list[int]) -> str:
+            lines = []
+            t_updates = [u for u in player_updates if u["discord_id"] in team_pids]
+            t_updates.sort(
+                key=lambda x: (x["kills"], x.get("stats_obj").acs if x.get("stats_obj") else 0),
+                reverse=True,
+            )
+
+            for u in t_updates:
+                pid = u["discord_id"]
+                prec = lobby_player_records.get(pid, {})
+                ign = prec.get("ign") or prec.get("discord_username") or f"Player {pid}"
+                stats = u.get("stats_obj")
+
+                mvp_badge = ""
+                if stats and (stats.mvp_type == "Match MVP" or "match" in str(stats.mvp_type).lower()):
+                    mvp_badge = " 👑 `Match MVP`"
+                elif stats and (stats.mvp_type == "Team MVP" or stats.is_mvp):
+                    mvp_badge = " ⭐ `Team MVP`"
+
+                delta = u["elo_delta"]
+                delta_str = f"`(+{delta} ELO)`" if delta > 0 else (f"`({delta} ELO)`" if delta < 0 else "`(= ELO)`")
+
+                lines.append(f"**{ign}**{mvp_badge}")
+
+                k, d, a = u["kills"], u["deaths"], u["assists"]
+                parts = [f"`{k}/{d}/{a} KDA`"]
+                if stats and stats.acs > 0:
+                    parts.append(f"`{stats.acs} ACS`")
+                if stats and stats.damage > 0:
+                    parts.append(f"`{stats.damage:,} DMG`")
+                if stats and stats.first_bloods > 0:
+                    parts.append(f"`{stats.first_bloods} FB`")
+                if stats and stats.plants > 0:
+                    parts.append(f"`{stats.plants} PL`")
+                if stats and stats.defuses > 0:
+                    parts.append(f"`{stats.defuses} DF`")
+                parts.append(delta_str)
+
+                lines.append(f"└ {' • '.join(parts)}")
+            return "\n".join(lines)[:1024] if lines else "*No players detected*"
+
+        t1_header = f"🟢 Team 1 — {t1_score} Rounds" + (" 🏆" if t1_score > t2_score else "")
+        t2_header = f"🔴 Team 2 — {t2_score} Rounds" + (" 🏆" if t2_score > t1_score else "")
+
+        result_embed.add_field(name=t1_header, value=_format_team_lines(t1_pids), inline=False)
+        result_embed.add_field(name=t2_header, value=_format_team_lines(t2_pids), inline=False)
+        result_embed.set_footer(
+            text=f"Scoring: {scoring_mode} • ACS: Combat Score • KDA: K/D/A • DMG: Damage • FB: First Bloods • PL/DF: Plants/Defuses"
+        )
+        result_embed.set_thumbnail(url=screenshot.url)
+
+        # 16. Post to dedicated results channel if configured
+        results_ch_id = await get_solo_results_channel_id()
+        if results_ch_id and interaction.guild:
+            results_channel = interaction.guild.get_channel(results_ch_id)
+            if isinstance(results_channel, discord.TextChannel):
+                try:
+                    await results_channel.send(embed=result_embed)
+                    log.info("Posted match #%d result to results channel #%s.", match["id"], results_channel.name)
+                except Exception as e:
+                    log.warning("Could not post match result to results channel %d: %s", results_ch_id, e)
+
+        # 17. Post in active match lobby channel
+        await interaction.followup.send(
+            content=f"✅ **Match Results Finalized by {interaction.user.mention}!**",
+            embed=result_embed,
+        )
+        await interaction.channel.send(
+            "🎉 **Stats and ELO Updated!** All 10 players have been released back to **IDLE** and can join new queues.\n"
+            "Staff can use `/cancel_solo_match` to close this channel when ready."
+        )
+
+        # 18. Cleanup voice channels if created
+        v1_id = match.get("voice_team1_id")
+        v2_id = match.get("voice_team2_id")
+        for vid in (v1_id, v2_id):
+            if vid and interaction.guild:
+                vch = interaction.guild.get_channel(vid)
+                if isinstance(vch, discord.VoiceChannel):
+                    try:
+                        await vch.delete(reason=f"Match #{match['id']} concluded")
+                    except Exception as e:
+                        log.debug("Failed to delete temporary match voice channel: %s", e)
 
     @app_commands.command(
         name="cancel_solo_match",
