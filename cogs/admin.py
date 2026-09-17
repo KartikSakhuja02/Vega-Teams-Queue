@@ -1777,8 +1777,16 @@ class AdminCog(commands.Cog, name="Admin"):
                 continue
 
             try:
-                with open(fpath, "rb") as f:
-                    img_bytes = f.read()
+                import io
+                from PIL import Image
+
+                with Image.open(fpath) as pil_img:
+                    pil_img = pil_img.convert("RGBA")
+                    pil_img = pil_img.resize((128, 128), Image.Resampling.LANCZOS)
+                    buf = io.BytesIO()
+                    pil_img.save(buf, format="PNG", optimize=True)
+                    img_bytes = buf.getvalue()
+
                 await interaction.guild.create_custom_emoji(
                     name=primary_name,
                     image=img_bytes,
