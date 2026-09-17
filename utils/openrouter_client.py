@@ -70,11 +70,39 @@ Layout:
     Set is_mvp=true, mvp_type="Enemy MVP".
   • Do not include the badge text ("我方-最佳" or "敌方-最佳") inside the player's name.
 
-  IMPORTANT - AGENT DETECTION (character portrait avatar next to player name):
+  IMPORTANT - AGENT DETECTION (character portrait avatar square next to player name):
   Identify the Valorant agent played by each player from their character avatar portrait.
   Valid agents include:
   Astra, Breach, Brimstone, Chamber, Clove, Cypher, Deadlock, Fade, Gekko, Harbor, Iso, Jett, KAY/O, Killjoy, Neon, Omen, Phoenix, Raze, Reyna, Sage, Skye, Sova, Tejo, Viper, Vyse, Waylay, Yoru.
-  Set "agent" to the detected agent's name (e.g. "Iso", "Neon", "Sova", "Phoenix", "Killjoy", "Cypher", "Jett", "Tejo", "Clove", etc.) or null if unclear.
+  Visual Guide for Agent Portrait Avatars:
+  • Jett: White/silver swept-up hair, pale skin, facing left, blue/grey tint.
+  • Neon: Bright electric cyan/blue spiky glowing hair, blue facial lightning marks.
+  • Sova: Blonde hair covering one eye, robotic blue eye, fur collar.
+  • Omen: Dark blue/purple hooded cloak, 3 glowing vertical cyan slits on shadow face.
+  • Chamber: Short combed brown hair, gold glasses, white collar shirt & navy vest, french goatee.
+  • Yoru: Blue spiked hair with dark fade/undercut, eyebrow slit.
+  • Viper: Dark short hair, black/green tactical gas mask covering mouth/nose.
+  • Reyna: Long dark purple hair, purple eyes/glow, sharp smirk.
+  • Gekko: Bright neon lime-green dyed hair, yellow/purple highlights.
+  • Cypher: White fedora hat with wide brim, glowing blue eyes mask, trench coat collar.
+  • Sage: Long black hair in ponytail, pale skin, jade teal orb earrings/collar.
+  • Clove: Short pink/purple wavy bob hair, mischievous grin, dark choker.
+  • Breach: Orange/red hair and thick beard, bionic mechanical neck/shoulders.
+  • Brimstone: Grey beard/mustache, dark beret cap, orange tactical headset.
+  • Killjoy: Yellow beanie hat, round glasses, green jacket.
+  • Phoenix: Dark skin, black short fade hair, yellow/orange flame jacket collar.
+  • Fade: Black hair with white/grey streaks, heterochromia eyes, dark coat.
+  • Raze: Orange backwards cap/headband, curly dark hair, headphones around neck.
+  • Skye: Green headband over brown hair, leaf feather motif.
+  • Astra: Purple braids/dreadlocks, golden arm, astral stars collar.
+  • Deadlock: Blonde hair tied back, metal prosthetic neck collar, scar across left eye.
+  • Harbor: Thick black beard & mustache, teal wave armor collar.
+  • Iso: Dark bowl/curtain haircut with purple undertone, angular facial shadow.
+  • KAY/O: Metallic robot face with LED glass visor/screen.
+  • Tejo: Military brown hair, tactical combat visor/goggles, comms headset.
+  • Vyse: Liquid metallic reflective mask/helmet, dark thorny rose collar.
+  • Waylay: Light lavender/purple hair, modern tactical combat gear.
+  Set "agent" to the detected agent's name or null if unclear.
 
   Columns: 排名/头像/IGN | 平均战斗评分(ACS) | 击败/败阵/助攻(K/D/A) | 对局总伤害(damage) | 率先击败(first_bloods) | 部署(plants) | 拆除(defuses)
 

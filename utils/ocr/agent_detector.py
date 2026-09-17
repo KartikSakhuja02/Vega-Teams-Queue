@@ -215,7 +215,7 @@ def detect_agent_in_row_strip(
     if rh < 10 or rw < 10:
         return None, 0.0
 
-    target_size = min(rh, rw)
+    target_size = int(rh * 0.90)
 
     scores: list[tuple[float, str]] = []
 
@@ -262,13 +262,13 @@ def detect_agents_from_image(img_bgr: np.ndarray) -> list[dict]:
     h, w = img_bgr.shape[:2]
 
     # Calibrated Valorant Mobile scoreboard bounds:
-    # Table rows span ~ 27% to 91.5% of image height
-    y_start = 0.270 * h
-    y_end = 0.915 * h
+    # Table rows span ~ 26.8% to 92.0% of image height
+    y_start = 0.268 * h
+    y_end = 0.920 * h
     step = (y_end - y_start) / 10.0
 
-    # Avatar icon horizontal window: 15.0% to 18.6% of image width
-    x0, x1 = int(0.150 * w), int(0.186 * w)
+    # Avatar icon horizontal search window: 14.0% to 18.8% of image width
+    x0, x1 = int(0.140 * w), int(0.188 * w)
 
     results: list[dict] = []
 
@@ -341,19 +341,19 @@ def resolve_player_agents(
         t1_rows = [d for d in cv_detections if d.get("team") == 1]
         t2_rows = [d for d in cv_detections if d.get("team") == 2]
 
-        # Method 1: Row background color match + descending ACS rank within team
+        # Method 1: Row background color match + descending ACS rank within team (tie-breaker: damage, kills)
         if len(t1_rows) == len(result.team1_players) and len(t2_rows) == len(result.team2_players):
-            sorted_t1 = sorted(result.team1_players, key=lambda p: (-p.acs, -p.kills, -p.damage))
+            sorted_t1 = sorted(result.team1_players, key=lambda p: (-p.acs, -p.damage, -p.kills))
             for p, d in zip(sorted_t1, t1_rows):
                 _apply_agent(p, d["agent"], d["score"])
 
-            sorted_t2 = sorted(result.team2_players, key=lambda p: (-p.acs, -p.kills, -p.damage))
+            sorted_t2 = sorted(result.team2_players, key=lambda p: (-p.acs, -p.damage, -p.kills))
             for p, d in zip(sorted_t2, t2_rows):
                 _apply_agent(p, d["agent"], d["score"])
 
         else:
             # Method 2: Global ACS rank across all 10 players (scoreboard is sorted by ACS)
-            sorted_all = sorted(all_players, key=lambda p: (-p.acs, -p.kills, -p.damage))
+            sorted_all = sorted(all_players, key=lambda p: (-p.acs, -p.damage, -p.kills))
             for idx, p in enumerate(sorted_all):
                 if idx < len(cv_detections):
                     d = cv_detections[idx]
