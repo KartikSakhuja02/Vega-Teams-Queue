@@ -86,70 +86,103 @@ def get_emoji_candidate_names(agent_name: Optional[str]) -> list[str]:
     if not canon:
         return []
 
-    names = []
-    # Base alphanumeric name
-    safe = re.sub(r"[^a-zA-Z0-9_]", "", canon)
-    if safe:
-        names.append(safe)
+    raw = canon.lower().strip()
+    safe = re.sub(r"[^a-z0-9_]", "", raw)
+    cands = [safe, raw, canon]
 
-    # Common variations in Discord servers:
-    if canon == "Phoenix":
-        names.extend(["Phoenix", "Pheonix", "phoenix", "pheonix"])
-    elif canon == "Harbor":
-        names.extend(["Harbor", "Harbour", "harbor", "harbour"])
-    elif canon == "KAY/O":
-        names.extend(["KAYO", "kayo", "Kayo", "KayO"])
-    else:
-        names.extend([canon, canon.lower(), canon.upper()])
+    if safe == "phoenix":
+        cands.extend(["pheonix", "phx"])
+    elif safe == "harbor":
+        cands.extend(["harbour"])
+    elif safe in ("kayo", "kay_o"):
+        cands.extend(["kayo", "kay_o", "kay"])
+    elif safe == "killjoy":
+        cands.extend(["kj"])
+    elif safe == "brimstone":
+        cands.extend(["brim"])
+    elif safe == "deadlock":
+        cands.extend(["dead_lock", "dl"])
 
-    # Deduplicate while preserving order
+    expanded = list(cands)
+    for c in cands:
+        clean_c = re.sub(r"[^a-z0-9_]", "", c.lower())
+        if clean_c:
+            expanded.extend([
+                f"agent_{clean_c}", f"agent{clean_c}",
+                f"{clean_c}_agent", f"{clean_c}agent",
+                f"val_{clean_c}", f"v_{clean_c}",
+                f"{clean_c}_icon", f"{clean_c}icon",
+            ])
+
     seen = set()
-    deduped = []
-    for n in names:
-        if n.lower() not in seen:
-            seen.add(n.lower())
-            deduped.append(n)
-    return deduped
+    result = []
+    for x in expanded:
+        xl = x.lower()
+        if xl not in seen:
+            seen.add(xl)
+            result.append(xl)
+    return result
 
 
 def get_agent_emoji(bot, agent_name: Optional[str], guild=None) -> str:
     """
     Find Discord custom emoji for an agent.
-    Checks guild emojis first (if guild provided).
+    Checks:
+    1. guild.emojis (exact matches, then prefix/suffix/substring matches).
+    2. bot.emojis belonging to guild.id (if guild.emojis cache was slightly stale).
+    3. Global bot.emojis (fallback if bot has external emoji permissions).
     Returns '<:Name:ID>' string, or '' if not found.
-    NEVER returns external emojis in a guild context that would degrade to ':agent:' raw text.
     """
     if not agent_name or not bot:
         return ""
 
-    candidates = [c.lower() for c in get_emoji_candidate_names(agent_name)]
+    candidates = get_emoji_candidate_names(agent_name)
     if not candidates:
         return ""
 
-    # 1. Search in current guild emojis (highest priority, always renders for server members)
-    if guild and hasattr(guild, "emojis"):
-        # First pass: exact name match
+    primary = candidates[0]
+
+    # 1. Search in current guild emojis (highest priority, guaranteed to render for server members)
+    if guild and hasattr(guild, "emojis") and guild.emojis:
         for emoji in guild.emojis:
             ename = emoji.name.lower()
             if ename in candidates:
                 return str(emoji)
-        # Second pass: substring match (e.g. "agent_iso", "val_jett", "v_fade")
         for emoji in guild.emojis:
             ename = emoji.name.lower()
-            for cand in candidates:
-                if len(cand) >= 3 and cand in ename:
-                    return str(emoji)
-        # If guild was provided and emoji was not found in guild emojis, return ""
-        # DO NOT fall back to external emojis from other servers, because
-        # Discord clients suppress external emojis without Nitro/channel perms,
-        # causing broken literal text like ':cypher:' or ':jett:'.
-        return ""
+            if primary in ename or any(c in ename for c in candidates if len(c) >= 3):
+                return str(emoji)
 
-    # 2. Only if NO guild was provided (e.g. DM), search global bot emojis
-    if hasattr(bot, "emojis"):
+    # 2. Check bot.emojis for emojis belonging to this guild (if guild cache was slightly lagging)
+    gid = getattr(guild, "id", None)
+    if gid and hasattr(bot, "emojis") and bot.emojis:
+        for emoji in bot.emojis:
+            if getattr(emoji, "guild_id", None) == gid:
+                ename = emoji.name.lower()
+                if ename in candidates:
+                    return str(emoji)
+        for emoji in bot.emojis:
+            if getattr(emoji, "guild_id", None) == gid:
+                ename = emoji.name.lower()
+                if primary in ename or any(c in ename for c in candidates if len(c) >= 3):
+                    return str(emoji)
+
+    # 3. Global bot.emojis fallback (if bot has permission or guild not provided)
+    can_use_external = False
+    if guild and hasattr(guild, "me") and guild.me:
+        perms = guild.me.guild_permissions
+        can_use_external = getattr(perms, "use_external_emojis", False)
+    elif not guild:
+        can_use_external = True
+
+    if can_use_external and hasattr(bot, "emojis") and bot.emojis:
         for emoji in bot.emojis:
             ename = emoji.name.lower()
             if ename in candidates:
+                return str(emoji)
+        for emoji in bot.emojis:
+            ename = emoji.name.lower()
+            if primary in ename or any(c in ename for c in candidates if len(c) >= 3):
                 return str(emoji)
 
     return ""
