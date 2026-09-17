@@ -58,22 +58,14 @@ def build_leaderboard_embed(
     region_label = "Global (All Regions)" if region in ("All", None) else region
     metric_label = METRIC_LABELS.get(metric, "ELO Rating")
 
-    embed = discord.Embed(
-        title="🏆 Vega Scrims — Competitive Leaderboard",
-        description=(
-            f"**Region:** `{region_label}` • **Sorted by:** `{metric_label}`\n"
-            f"**Total Registered Players:** `{total_count}`\n"
-            "────────────────────────────────────────"
-        ),
-        colour=EMBED_COLOUR,
+    desc_header = (
+        f"**Region:** `{region_label}` • **Sorted by:** `{metric_label}`\n"
+        f"**Total Registered Players:** `{total_count}`\n"
+        "────────────────────────────────────────"
     )
 
     if not players:
-        embed.add_field(
-            name="No Players Found",
-            value="*No active players found for this region/metric filter.*",
-            inline=False,
-        )
+        body = "\n\n*No active players found for this region/metric filter.*"
     else:
         lines: list[str] = []
         for p in players:
@@ -111,7 +103,17 @@ def build_leaderboard_embed(
             line_bot = "└ " + " • ".join(pill_parts)
             lines.append(f"{line_top}\n{line_bot}")
 
-        embed.add_field(name="Rankings", value="\n\n".join(lines)[:4000], inline=False)
+        body = "\n\n" + "\n\n".join(lines)
+
+    full_description = desc_header + body
+    if len(full_description) > 4096:
+        full_description = full_description[:4090] + "..."
+
+    embed = discord.Embed(
+        title="🏆 Vega Scrims — Competitive Leaderboard",
+        description=full_description,
+        colour=EMBED_COLOUR,
+    )
 
     # Footer with caller's personal rank
     footer_parts = [f"Page {page}/{total_pages}"]
