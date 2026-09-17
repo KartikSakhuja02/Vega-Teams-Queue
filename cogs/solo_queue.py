@@ -1065,6 +1065,124 @@ class SoloMapVetoView(discord.ui.View):
         return callback
 
 
+class MatchResultVoteView(discord.ui.View):
+    """
+    Voting view to confirm match results. Requires 6 confirm votes from match participants.
+    """
+
+    def __init__(
+        self,
+        match: dict,
+        all_player_ids: list[int],
+        result_embed: discord.Embed,
+        on_confirmed_callback,
+        on_declined_callback,
+        timeout: float = 300.0,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.match = match
+        self.all_player_ids = set(all_player_ids)
+        self.result_embed = result_embed
+        self.on_confirmed_callback = on_confirmed_callback
+        self.on_declined_callback = on_declined_callback
+
+        self.confirms: set[int] = set()
+        self.declines: set[int] = set()
+        self.is_resolved: bool = False
+
+        self._update_labels()
+
+    def _update_labels(self) -> None:
+        self.confirm_btn.label = f"Confirm ({len(self.confirms)}/6)"
+        self.decline_btn.label = f"Decline ({len(self.declines)}/5)" if self.declines else "Decline"
+
+    @discord.ui.button(
+        label="Confirm (0/6)",
+        style=discord.ButtonStyle.success,
+        custom_id="solo_result_vote:confirm",
+    )
+    async def confirm_btn(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if self.is_resolved:
+            await interaction.response.send_message("Voting has already concluded.", ephemeral=True)
+            return
+
+        if interaction.user.id not in self.all_player_ids and not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.response.send_message(
+                "Only players who participated in this match can vote.",
+                ephemeral=True,
+            )
+            return
+
+        uid = interaction.user.id
+        self.declines.discard(uid)
+        self.confirms.add(uid)
+        self._update_labels()
+
+        if len(self.confirms) >= 6:
+            self.is_resolved = True
+            for child in self.children:
+                child.disabled = True  # type: ignore[attr-defined]
+            await interaction.response.edit_message(
+                content="✅ **Result Confirmed by Match Players!** Updating ELO and posting to results channel...",
+                embed=self.result_embed,
+                view=self,
+            )
+            await self.on_confirmed_callback(interaction)
+        else:
+            await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(
+        label="Decline",
+        style=discord.ButtonStyle.danger,
+        custom_id="solo_result_vote:decline",
+    )
+    async def decline_btn(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if self.is_resolved:
+            await interaction.response.send_message("Voting has already concluded.", ephemeral=True)
+            return
+
+        if interaction.user.id not in self.all_player_ids and not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.response.send_message(
+                "Only players who participated in this match can vote.",
+                ephemeral=True,
+            )
+            return
+
+        uid = interaction.user.id
+        self.confirms.discard(uid)
+        self.declines.add(uid)
+        self._update_labels()
+
+        if len(self.declines) >= 5:
+            self.is_resolved = True
+            for child in self.children:
+                child.disabled = True  # type: ignore[attr-defined]
+            await interaction.response.edit_message(
+                content="❌ **Result Declined by Match Players.** Submission has been cancelled. Please take a clear screenshot and try again.",
+                embed=self.result_embed,
+                view=self,
+            )
+            await self.on_declined_callback(interaction)
+        else:
+            await interaction.response.edit_message(view=self)
+
+    async def on_timeout(self) -> None:
+        if not self.is_resolved:
+            self.is_resolved = True
+            for child in self.children:
+                child.disabled = True  # type: ignore[attr-defined]
+            if self.on_declined_callback:
+                await self.on_declined_callback(None)
+
+
 # =============================================================================
 # Interactive Admin Configuration Panel Components
 # =============================================================================
@@ -2223,15 +2341,15 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await interaction.response.send_message(f"❌ {err_reason}", ephemeral=True)
             return
 
-        # 5. Defer public response so players in the lobby see submission in progress
-        await interaction.response.defer(thinking=True)
+        # 5. Send public calculating message
+        await interaction.response.send_message("Calculating result, please wait...")
 
         # 6. Read attachment image bytes
         try:
             image_bytes = await screenshot.read()
         except Exception as exc:
             await db.release_solo_match_result_submission(match["id"])
-            await interaction.followup.send(f"❌ Failed to read attached image: {exc}")
+            await interaction.edit_original_response(content=f"❌ Failed to read attached image: {exc}")
             return
 
         # 7. Run OCR Pipeline (Ollama qwen2.5vl:3b -> OpenRouter -> Tesseract fallback)
@@ -2240,11 +2358,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         if not result.success or (not result.team1_players and not result.team2_players):
             await db.release_solo_match_result_submission(match["id"])
-            await interaction.followup.send(
-                f"❌ **Scoreboard Analysis Failed**: {result.error or 'Could not detect scoreboard table.'}\n"
-                f"• Engine: `{result.engine}`\n"
-                f"• Time: `{result.processing_time_ms} ms`\n\n"
-                "Please make sure the entire Valorant match scoreboard is clearly visible and try again."
+            await interaction.edit_original_response(
+                content=(
+                    f"❌ **Scoreboard Analysis Failed**: {result.error or 'Could not detect scoreboard table.'}\n"
+                    f"• Engine: `{result.engine}`\n"
+                    f"• Time: `{result.processing_time_ms} ms`\n\n"
+                    "Please make sure the entire Valorant match scoreboard is clearly visible and try again."
+                )
             )
             return
 
@@ -2427,21 +2547,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 "stats_obj": stats,
             })
 
-        # 14. Commit to database atomically
-        await db.complete_solo_match_with_stats(
-            match_id=match["id"],
-            winning_team=winning_team,
-            team1_score=t1_score,
-            team2_score=t2_score,
-            map_name=map_name,
-            submitted_by=interaction.user.id,
-            screenshot_url=screenshot.url,
-            mvp_player_id=overall_mvp_pid,
-            player_updates=player_updates,
-            all_lobby_player_ids=all_match_pids,
-        )
-
-        # 15. Build comprehensive result embed matching /test_ss_ocr style
+        # 14. Build comprehensive result embed
         if t1_score > t2_score:
             outcome_text = "🟢 Team 1 Victory"
             sidebar_color = discord.Colour.from_rgb(46, 204, 113)
@@ -2460,7 +2566,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         meta_str = f" • {' • '.join(meta_parts)}" if meta_parts else ""
 
         result_embed = discord.Embed(
-            title=f"Match Results — {map_name}",
+            title=f"Queue {match['id']} Results — {map_name}",
             description=(
                 f"**Score:** 🟢 Team 1 **[{t1_score}]** — 🔴 Team 2 **[{t2_score}]**\n"
                 f"**Outcome:** {outcome_text}{meta_str}"
@@ -2520,39 +2626,83 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         )
         result_embed.set_thumbnail(url=screenshot.url)
 
-        # 16. Post to dedicated results channel if configured
-        results_ch_id = await get_solo_results_channel_id()
-        if results_ch_id and interaction.guild:
-            results_channel = interaction.guild.get_channel(results_ch_id)
-            if isinstance(results_channel, discord.TextChannel):
-                try:
-                    await results_channel.send(embed=result_embed)
-                    log.info("Posted match #%d result to results channel #%s.", match["id"], results_channel.name)
-                except Exception as e:
-                    log.warning("Could not post match result to results channel %d: %s", results_ch_id, e)
+        # 15. Handlers for voting resolution
+        async def _on_confirmed(btn_interaction: discord.Interaction) -> None:
+            # Commit to database atomically
+            await db.complete_solo_match_with_stats(
+                match_id=match["id"],
+                winning_team=winning_team,
+                team1_score=t1_score,
+                team2_score=t2_score,
+                map_name=map_name,
+                submitted_by=interaction.user.id,
+                screenshot_url=screenshot.url,
+                mvp_player_id=overall_mvp_pid,
+                player_updates=player_updates,
+                all_lobby_player_ids=all_match_pids,
+            )
 
-        # 17. Post in active match lobby channel
-        await interaction.followup.send(
-            content=f"✅ **Match Results Finalized by {interaction.user.mention}!**",
-            embed=result_embed,
-        )
-        await interaction.channel.send(
-            "🎉 **Stats and ELO Updated!** All 10 players have been released back to **IDLE** and can join new queues.\n"
-            "Staff can use `/cancel_solo_match` to close this channel when ready."
-        )
-
-        # 18. Cleanup voice channels if created
-        v_lobby_id = match.get("voice_lobby_id")
-        v1_id = match.get("voice_team1_id")
-        v2_id = match.get("voice_team2_id")
-        for vid in (v_lobby_id, v1_id, v2_id):
-            if vid and interaction.guild:
-                vch = interaction.guild.get_channel(vid)
-                if isinstance(vch, discord.VoiceChannel):
+            # Post to dedicated results channel if configured
+            results_ch_id = await get_solo_results_channel_id()
+            if results_ch_id and interaction.guild:
+                results_channel = interaction.guild.get_channel(results_ch_id)
+                if isinstance(results_channel, discord.TextChannel):
                     try:
-                        await vch.delete(reason=f"Match #{match['id']} concluded")
+                        await results_channel.send(embed=result_embed)
+                        log.info("Posted match #%d result to results channel #%s.", match["id"], results_channel.name)
                     except Exception as e:
-                        log.debug("Failed to delete temporary match voice channel: %s", e)
+                        log.warning("Could not post match result to results channel %d: %s", results_ch_id, e)
+
+            # Announce 10-second countdown in lobby channel
+            if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+                await interaction.channel.send(
+                    "🎉 **Result confirmed!** Stats and ELO have been updated.\n"
+                    "Deleting channel in 10 seconds..."
+                )
+
+            # Wait 10 seconds
+            await asyncio.sleep(10)
+
+            # Cleanup voice channels & delete text channel
+            if interaction.guild:
+                v_lobby_id = match.get("voice_lobby_id")
+                v1_id = match.get("voice_team1_id")
+                v2_id = match.get("voice_team2_id")
+                for vid in (v_lobby_id, v1_id, v2_id):
+                    if vid:
+                        vch = interaction.guild.get_channel(vid)
+                        if isinstance(vch, discord.VoiceChannel):
+                            try:
+                                await vch.delete(reason=f"Queue #{match['id']} concluded")
+                            except Exception:
+                                pass
+
+            if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+                try:
+                    await interaction.channel.delete(reason=f"Queue #{match['id']} concluded")
+                except Exception as e:
+                    log.error("Failed to delete queue channel: %s", e)
+
+        async def _on_declined(btn_interaction: Optional[discord.Interaction]) -> None:
+            await db.release_solo_match_result_submission(match["id"])
+            if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+                await interaction.channel.send(
+                    "❌ **Result submission declined.** Please take a clearer scoreboard screenshot and use `/submit_result` again."
+                )
+
+        vote_view = MatchResultVoteView(
+            match=match,
+            all_player_ids=all_match_pids,
+            result_embed=result_embed,
+            on_confirmed_callback=_on_confirmed,
+            on_declined_callback=_on_declined,
+        )
+
+        await interaction.edit_original_response(
+            content="**Result Verification Vote** — 6 confirm votes needed to finalize results.",
+            embed=result_embed,
+            view=vote_view,
+        )
 
     @app_commands.command(
         name="cancel_solo_match",
