@@ -1198,8 +1198,9 @@ class SoloMapVoteView(discord.ui.View):
             match.get("team1_player_ids", [])
             + match.get("team2_player_ids", [])
             + match.get("available_player_ids", [])
+            + [match.get("captain1_id"), match.get("captain2_id")]
         )
-        self.all_player_ids = set(all_pids)
+        self.all_player_ids = {pid for pid in all_pids if pid}
         self.is_finalized: bool = False
         self.message: Optional[discord.Message] = None
 
@@ -2283,62 +2284,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         c1_id = current_match["captain1_id"]
         c2_id = current_match["captain2_id"]
 
-        # Run MAP_VOTE first if selected: all 10 players vote, then transition to draft
-        if veto_mode in ("MAP_VOTE", "VOTE"):
-            pool_copy = list(map_pool) if map_pool else ["Bind", "Haven", "Split", "Ascent"]
-            selected_4 = random.sample(pool_copy, min(4, len(pool_copy)))
-
-            if draft_mode == "AUTO_BALANCE":
-                t1_ids, t2_ids = auto_balance_teams(match_players)
-                c1_id = t1_ids[0]
-                c2_id = t2_ids[0]
-                await finalize_teams_and_move(self.bot, current_match, guild, t1_ids, t2_ids)
-                avail_ids = []
-            else:
-                t1_ids = [c1_id]
-                t2_ids = [c2_id]
-                avail_ids = current_match.get("available_player_ids", [])
-
-            await db.update_solo_match_draft(
-                match_id=current_match["id"],
-                team1_player_ids=t1_ids,
-                team2_player_ids=t2_ids,
-                available_player_ids=avail_ids,
-                current_turn_captain_id=c1_id,
-                draft_step=1,
-                status="MAP_VETO",
-            )
-            updated = await db.get_solo_match_by_id(current_match["id"])
-            vote_view = SoloMapVoteView(
-                self.bot,
-                updated,
-                players_by_id,
-                selected_4,
-                colour=colour,
-                timeout=60.0,
-            )
-            embed = build_solo_map_vote_embed(
-                updated,
-                players_by_id,
-                selected_4,
-                {},
-                vote_view.end_time,
-                colour=colour,
-            )
-            panel_msg = await channel.send(
-                content=(
-                    f"**ALL PLAYERS CHECKED IN • MAP VOTING ACTIVE**\n"
-                    f"Captains: <@{c1_id}> and <@{c2_id}>.\n"
-                    f"Vote for the map below! The draft will commence once the map is chosen (1 min)."
-                ),
-                embed=embed,
-                view=vote_view,
-            )
-            vote_view.message = panel_msg
-            await db.update_solo_match_panel(current_match["id"], panel_msg.id)
-            log.info("Match #%d started after checkin with MAP_VOTE.", current_match["id"])
-            return
-
         if draft_mode == "AUTO_BALANCE":
             t1_ids, t2_ids = auto_balance_teams(match_players)
             c1_id = t1_ids[0]
@@ -2376,6 +2321,47 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     ),
                     embed=embed,
                 )
+                await db.update_solo_match_panel(current_match["id"], panel_msg.id)
+            elif veto_mode in ("MAP_VOTE", "VOTE"):
+                pool_copy = list(map_pool) if map_pool else ["Bind", "Haven", "Split", "Ascent"]
+                selected_4 = random.sample(pool_copy, min(4, len(pool_copy)))
+                await db.update_solo_match_draft(
+                    match_id=current_match["id"],
+                    team1_player_ids=t1_ids,
+                    team2_player_ids=t2_ids,
+                    available_player_ids=[],
+                    current_turn_captain_id=c1_id,
+                    draft_step=8,
+                    status="MAP_VETO",
+                )
+                updated = await db.get_solo_match_by_id(current_match["id"])
+                vote_view = SoloMapVoteView(
+                    self.bot,
+                    updated,
+                    players_by_id,
+                    selected_4,
+                    colour=colour,
+                    timeout=60.0,
+                )
+                embed = build_solo_map_vote_embed(
+                    updated,
+                    players_by_id,
+                    selected_4,
+                    {},
+                    vote_view.end_time,
+                    colour=colour,
+                )
+                panel_msg = await channel.send(
+                    content=(
+                        f"**ALL PLAYERS CHECKED IN • TEAMS AUTO-BALANCED**\n"
+                        f"Captains: <@{c1_id}> and <@{c2_id}>.\n"
+                        f"Teams have been moved to their respective voice channels.\n\n"
+                        f"Vote for the map below (1 min). The map with the most votes will be played!"
+                    ),
+                    embed=embed,
+                    view=vote_view,
+                )
+                vote_view.message = panel_msg
                 await db.update_solo_match_panel(current_match["id"], panel_msg.id)
             else:
                 await db.update_solo_match_draft(
@@ -3126,27 +3112,130 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         )
 
     @app_commands.command(
-        name="cancel_solo_match",
-        description="Cancel the current 10-man match lobby and return players to IDLE (Staff only).",
+        name="cancel",
+        description="Cancel the current queue match and release all players to IDLE (Staff only).",
+    )
+    @app_commands.describe(
+        match_id="Optional match ID to cancel if running outside the match channel"
     )
     @app_commands.default_permissions(manage_channels=True)
-    async def cancel_solo_match_command(self, interaction: discord.Interaction) -> None:
-        """Cancel an active 10-man match and release players."""
+    async def cancel_command(
+        self,
+        interaction: discord.Interaction,
+        match_id: Optional[int] = None,
+    ) -> None:
+        await self._handle_cancel_match(interaction, match_id=match_id)
+
+    @app_commands.command(
+        name="cancel-match",
+        description="Cancel the current queue match and release all players to IDLE (Staff only).",
+    )
+    @app_commands.describe(
+        match_id="Optional match ID to cancel if running outside the match channel"
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def cancel_match_command(
+        self,
+        interaction: discord.Interaction,
+        match_id: Optional[int] = None,
+    ) -> None:
+        await self._handle_cancel_match(interaction, match_id=match_id)
+
+    @app_commands.command(
+        name="cancel-queue",
+        description="Cancel the current queue match and release all players to IDLE (Staff only).",
+    )
+    @app_commands.describe(
+        match_id="Optional match ID to cancel if running outside the match channel"
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def cancel_queue_command(
+        self,
+        interaction: discord.Interaction,
+        match_id: Optional[int] = None,
+    ) -> None:
+        await self._handle_cancel_match(interaction, match_id=match_id)
+
+    @app_commands.command(
+        name="cancel_solo_match",
+        description="Cancel the current queue match and release all players to IDLE (Staff only).",
+    )
+    @app_commands.describe(
+        match_id="Optional match ID to cancel if running outside the match channel"
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def cancel_solo_match_command(
+        self,
+        interaction: discord.Interaction,
+        match_id: Optional[int] = None,
+    ) -> None:
+        await self._handle_cancel_match(interaction, match_id=match_id)
+
+    async def _handle_cancel_match(
+        self,
+        interaction: discord.Interaction,
+        match_id: Optional[int] = None,
+    ) -> None:
+        """Cancel an active queue match or scrim match, clean database, and release players."""
         await interaction.response.defer(ephemeral=True)
 
-        match = await db.get_solo_match_by_channel(interaction.channel_id)
-        if not match:
-            await interaction.followup.send("This channel is not an active 10-man match lobby.", ephemeral=True)
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send("You do not have staff permissions to cancel matches.", ephemeral=True)
             return
 
-        # Release players to IDLE
-        all_pids = (
+        match = None
+        if match_id is not None:
+            match = await db.get_solo_match_by_id(match_id)
+        else:
+            match = await db.get_solo_match_by_channel(interaction.channel_id)
+
+        if not match:
+            # Check if this is a team scrim match channel
+            scrim = await db.get_scrim_match_by_channel(interaction.channel_id)
+            if scrim:
+                await db.cancel_scrim_match(scrim["id"])
+                await interaction.followup.send(
+                    f"Scrim match #{scrim['id']} cancelled in database. Deleting channel in 5 seconds...",
+                    ephemeral=True,
+                )
+                if isinstance(interaction.channel, discord.TextChannel):
+                    try:
+                        await interaction.channel.send("⚠️ **This scrim match has been cancelled by staff.** Deleting channel in 5 seconds...")
+                    except Exception:
+                        pass
+                await asyncio.sleep(5)
+                if isinstance(interaction.channel, discord.TextChannel):
+                    try:
+                        await interaction.channel.delete(reason=f"Scrim match #{scrim['id']} cancelled by {interaction.user.name}")
+                    except Exception as e:
+                        log.error("Failed to delete scrim channel: %s", e)
+                return
+
+            await interaction.followup.send("No active queue match found for this channel or match ID.", ephemeral=True)
+            return
+
+        if match.get("status") in ("COMPLETED", "CANCELLED"):
+            await interaction.followup.send(f"Queue #{match['id']} is already {match['status']}.", ephemeral=True)
+            return
+
+        # Release players to IDLE and remove from queue
+        all_pids = list(dict.fromkeys(
             match.get("team1_player_ids", [])
             + match.get("team2_player_ids", [])
             + match.get("available_player_ids", [])
-        )
+            + [match.get("captain1_id"), match.get("captain2_id")]
+        ))
+        all_pids = [pid for pid in all_pids if pid]
+
         for pid in all_pids:
-            await db.set_player_status(pid, "IDLE")
+            try:
+                await db.set_player_status(pid, "IDLE")
+                await db.remove_player_from_solo_queue(pid)
+            except Exception as e:
+                log.debug("Error resetting player %s status: %s", pid, e)
+
+        # Cancel match in database
+        await db.cancel_solo_match(match["id"])
 
         # Delete voice channels if created
         v_lobby_id = match.get("voice_lobby_id")
@@ -3157,18 +3246,37 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 vch = interaction.guild.get_channel(vid)
                 if isinstance(vch, discord.VoiceChannel):
                     try:
-                        await vch.delete(reason=f"10-man match #{match['id']} cancelled")
+                        await vch.delete(reason=f"Queue #{match['id']} cancelled by {interaction.user.name}")
                     except Exception as e:
                         log.debug("Failed to delete temporary match voice channel: %s", e)
 
-        await db.cancel_solo_match(match["id"])
-        await interaction.followup.send("10-man match cancelled. Deleting channel in 5 seconds...")
-        await asyncio.sleep(5)
-        try:
-            if isinstance(interaction.channel, discord.TextChannel):
-                await interaction.channel.delete(reason=f"10-man match #{match['id']} cancelled by {interaction.user.name}")
-        except Exception as e:
-            log.error("Failed to delete match channel: %s", e)
+        # Refresh the main queue embed to show updated counts/states
+        asyncio.create_task(self.refresh_queue_message())
+
+        # Locate the match text channel to announce & delete
+        match_ch_id = match.get("channel_id")
+        target_ch = interaction.guild.get_channel(match_ch_id) if (interaction.guild and match_ch_id) else None
+        if not target_ch and isinstance(interaction.channel, discord.TextChannel):
+            target_ch = interaction.channel
+
+        await interaction.followup.send(
+            f"Queue #{match['id']} cancelled in database. All {len(all_pids)} players returned to IDLE.",
+            ephemeral=True,
+        )
+
+        if target_ch and isinstance(target_ch, discord.TextChannel):
+            try:
+                await target_ch.send(
+                    f"⚠️ **Queue #{match['id']} has been cancelled by {interaction.user.mention}.**\n"
+                    "Match cancelled in database and players returned to IDLE. Deleting channel in 5 seconds..."
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+            try:
+                await target_ch.delete(reason=f"Queue #{match['id']} cancelled by {interaction.user.name}")
+            except Exception as e:
+                log.error("Failed to delete match channel: %s", e)
 
     @app_commands.command(
         name="admin-change-command",
