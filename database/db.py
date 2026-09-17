@@ -2183,6 +2183,39 @@ async def update_solo_match_draft(
     return dict(row) if row else None
 
 
+async def update_solo_match_captains(
+    match_id: int,
+    captain1_id: int,
+    captain2_id: int,
+    team1_player_ids: list[int],
+    team2_player_ids: list[int],
+    available_player_ids: list[int],
+    current_turn_captain_id: Optional[int],
+) -> Optional[dict]:
+    """Update captains and team allocations for an active solo match."""
+    row = await get_pool().fetchrow(
+        """
+        UPDATE solo_matches
+        SET captain1_id = $1,
+            captain2_id = $2,
+            team1_player_ids = $3::BIGINT[],
+            team2_player_ids = $4::BIGINT[],
+            available_player_ids = $5::BIGINT[],
+            current_turn_captain_id = $6
+        WHERE id = $7
+        RETURNING *
+        """,
+        captain1_id,
+        captain2_id,
+        team1_player_ids,
+        team2_player_ids,
+        available_player_ids,
+        current_turn_captain_id,
+        match_id,
+    )
+    return dict(row) if row else None
+
+
 async def update_solo_match_map_veto(
     match_id: int,
     available_maps: list[str],

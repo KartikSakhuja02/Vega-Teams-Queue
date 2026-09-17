@@ -3015,6 +3015,190 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         except Exception as e:
             log.error("Failed to delete match channel: %s", e)
 
+    @app_commands.command(
+        name="admin-change-command",
+        description="Admin command to replace a captain in the current queue lobby.",
+    )
+    @app_commands.describe(
+        old_captain="The current captain to be replaced",
+        new_captain="The player to promote to captain",
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def admin_change_command_alt(
+        self,
+        interaction: discord.Interaction,
+        old_captain: discord.Member,
+        new_captain: discord.Member,
+    ) -> None:
+        await self._handle_admin_change_captain(interaction, old_captain, new_captain)
+
+    @app_commands.command(
+        name="admin-change-captain",
+        description="Admin command to replace a captain in the current queue lobby.",
+    )
+    @app_commands.describe(
+        old_captain="The current captain to be replaced",
+        new_captain="The player to promote to captain",
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def admin_change_captain_command(
+        self,
+        interaction: discord.Interaction,
+        old_captain: discord.Member,
+        new_captain: discord.Member,
+    ) -> None:
+        await self._handle_admin_change_captain(interaction, old_captain, new_captain)
+
+    async def _handle_admin_change_captain(
+        self,
+        interaction: discord.Interaction,
+        old_captain: discord.Member,
+        new_captain: discord.Member,
+    ) -> None:
+        """Handle admin captain replacement in a queue match lobby."""
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.response.send_message("You do not have staff permissions.", ephemeral=True)
+            return
+
+        match = await db.get_solo_match_by_channel(interaction.channel_id)
+        if not match or match.get("status") in ("COMPLETED", "CANCELLED"):
+            await interaction.response.send_message("This command can only be used inside an active queue channel.", ephemeral=True)
+            return
+
+        if old_captain.id == new_captain.id:
+            await interaction.response.send_message("Old captain and new captain cannot be the same person.", ephemeral=True)
+            return
+
+        c1_id = match["captain1_id"]
+        c2_id = match["captain2_id"]
+
+        if old_captain.id not in (c1_id, c2_id):
+            await interaction.response.send_message(f"<@{old_captain.id}> is not currently a captain in this queue.", ephemeral=True)
+            return
+
+        if new_captain.id in (c1_id, c2_id):
+            await interaction.response.send_message(f"<@{new_captain.id}> is already a captain in this queue.", ephemeral=True)
+            return
+
+        t1_ids = list(match.get("team1_player_ids", []))
+        t2_ids = list(match.get("team2_player_ids", []))
+        avail_ids = list(match.get("available_player_ids", []))
+        all_pids = set(t1_ids + t2_ids + avail_ids + [c1_id, c2_id])
+
+        if new_captain.id not in all_pids:
+            await interaction.response.send_message(f"<@{new_captain.id}> is not a player in this queue.", ephemeral=True)
+            return
+
+        is_cap1 = (old_captain.id == c1_id)
+        new_c1 = new_captain.id if is_cap1 else c1_id
+        new_c2 = new_captain.id if not is_cap1 else c2_id
+
+        if is_cap1:
+            if new_captain.id in avail_ids:
+                avail_ids.remove(new_captain.id)
+                avail_ids.append(old_captain.id)
+                if old_captain.id in t1_ids:
+                    t1_ids.remove(old_captain.id)
+                if new_captain.id not in t1_ids:
+                    t1_ids.insert(0, new_captain.id)
+            elif new_captain.id in t2_ids:
+                t2_ids.remove(new_captain.id)
+                t2_ids.append(old_captain.id)
+                if old_captain.id in t1_ids:
+                    t1_ids.remove(old_captain.id)
+                if new_captain.id not in t1_ids:
+                    t1_ids.insert(0, new_captain.id)
+            elif new_captain.id in t1_ids:
+                t1_ids = [new_captain.id] + [p for p in t1_ids if p != new_captain.id]
+                if old_captain.id not in t1_ids:
+                    t1_ids.append(old_captain.id)
+            else:
+                t1_ids = [new_captain.id] + [p for p in t1_ids if p not in (new_captain.id, old_captain.id)] + [old_captain.id]
+        else:
+            if new_captain.id in avail_ids:
+                avail_ids.remove(new_captain.id)
+                avail_ids.append(old_captain.id)
+                if old_captain.id in t2_ids:
+                    t2_ids.remove(old_captain.id)
+                if new_captain.id not in t2_ids:
+                    t2_ids.insert(0, new_captain.id)
+            elif new_captain.id in t1_ids:
+                t1_ids.remove(new_captain.id)
+                t1_ids.append(old_captain.id)
+                if old_captain.id in t2_ids:
+                    t2_ids.remove(old_captain.id)
+                if new_captain.id not in t2_ids:
+                    t2_ids.insert(0, new_captain.id)
+            elif new_captain.id in t2_ids:
+                t2_ids = [new_captain.id] + [p for p in t2_ids if p != new_captain.id]
+                if old_captain.id not in t2_ids:
+                    t2_ids.append(old_captain.id)
+            else:
+                t2_ids = [new_captain.id] + [p for p in t2_ids if p not in (new_captain.id, old_captain.id)] + [old_captain.id]
+
+        turn_id = match.get("current_turn_captain_id")
+        if turn_id == old_captain.id:
+            turn_id = new_captain.id
+
+        updated_match = await db.update_solo_match_captains(
+            match_id=match["id"],
+            captain1_id=new_c1,
+            captain2_id=new_c2,
+            team1_player_ids=t1_ids,
+            team2_player_ids=t2_ids,
+            available_player_ids=avail_ids,
+            current_turn_captain_id=turn_id,
+        )
+        if not updated_match:
+            updated_match = dict(match)
+            updated_match["captain1_id"] = new_c1
+            updated_match["captain2_id"] = new_c2
+            updated_match["team1_player_ids"] = t1_ids
+            updated_match["team2_player_ids"] = t2_ids
+            updated_match["available_player_ids"] = avail_ids
+            updated_match["current_turn_captain_id"] = turn_id
+
+        # Update lobby panel embed/view if active
+        try:
+            panel_msg_id = updated_match.get("panel_message_id")
+            if panel_msg_id and interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+                panel_msg = await interaction.channel.fetch_message(panel_msg_id)
+                match_pids = list(set(t1_ids + t2_ids + avail_ids + [new_c1, new_c2]))
+                fetched = await db.get_players_bulk(match_pids)
+                players_by_id = {p["discord_id"]: p for p in fetched}
+                colour = await get_solo_embed_colour()
+                status = updated_match.get("status")
+
+                if status == "DRAFTING":
+                    embed = build_solo_draft_embed(updated_match, players_by_id, colour=colour)
+                    avail_players = [players_by_id[pid] for pid in avail_ids if pid in players_by_id]
+                    draft_mode = await get_solo_draft_mode()
+                    view = PlayerDraftView(updated_match, avail_players, players_by_id=players_by_id, colour=colour, draft_mode=draft_mode)
+                    await panel_msg.edit(embed=embed, view=view)
+                elif status == "MAP_VETO":
+                    embed = build_solo_map_veto_embed(updated_match, players_by_id, colour=colour)
+                    veto_mode = await get_solo_veto_mode()
+                    if veto_mode not in ("MAP_VOTE", "VOTE"):
+                        view = SoloMapVetoView(updated_match, players_by_id, veto_mode=veto_mode, colour=colour)
+                        await panel_msg.edit(embed=embed, view=view)
+                    else:
+                        await panel_msg.edit(embed=embed)
+                elif status == "VOICE_CHECKIN":
+                    v_lobby_id = updated_match.get("voice_lobby_id")
+                    lobby_vc = interaction.guild.get_channel(v_lobby_id) if (v_lobby_id and interaction.guild) else None
+                    connected_pids = {m.id for m in lobby_vc.members if m.id in match_pids} if isinstance(lobby_vc, discord.VoiceChannel) else set()
+                    embed = build_solo_checkin_embed(updated_match, players_by_id, connected_pids, v_lobby_id or 0, colour=colour)
+                    await panel_msg.edit(embed=embed)
+                elif status == "IN_PROGRESS":
+                    embed = build_solo_map_veto_embed(updated_match, players_by_id, colour=colour)
+                    await panel_msg.edit(embed=embed)
+        except Exception as e:
+            log.debug("Failed to update panel message on captain change: %s", e)
+
+        await interaction.response.send_message(
+            f"Captain updated: <@{new_captain.id}> has replaced <@{old_captain.id}> as captain."
+        )
+
 
 async def setup(bot: commands.Bot) -> None:
     cog = SoloQueueCog(bot)
