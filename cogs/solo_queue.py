@@ -379,23 +379,29 @@ def build_solo_queue_embed(
     queued_players: list[dict],
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Minimalist 10-man solo queue panel embed."""
+    """Queue panel embed with numbered player list, ELO, region, and join time."""
     count = len(queued_players)
-    if queued_players:
-        names = " • ".join(
-            p.get("ign") or p.get("discord_username") or "Player"
-            for p in queued_players
-        )
-        body = f"`[ {count} / 10 ]`\n{names}"
-    else:
-        body = "`[ 0 / 10 ]`\n*Waiting for players...*"
 
     embed = discord.Embed(
         title="VEGA QUEUE",
-        description=body,
+        description=f"`[ {count} / 10 ]`",
         colour=colour or EMBED_COLOUR,
     )
-    embed.set_footer(text="Click Join Queue or Leave Queue below")
+
+    if queued_players:
+        lines: list[str] = []
+        for idx, p in enumerate(queued_players, 1):
+            ign = p.get("ign") or p.get("discord_username") or "Player"
+            elo = p.get("elo", 1000)
+            region = p.get("region") or "Global"
+            ts = int(p["joined_at"].timestamp()) if p.get("joined_at") else 0
+            time_str = f" • <t:{ts}:R>" if ts else ""
+            lines.append(f"`{idx}.` **{ign}** — `{elo} ELO` `[{region}]`{time_str}")
+        embed.add_field(name="Players", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="Players", value="*No players in queue yet*", inline=False)
+
+    embed.set_footer(text="Vega Esports • 10-Man Queue")
     return embed
 
 
