@@ -809,6 +809,37 @@ class PlayerDraftSelect(discord.ui.Select):
             await interaction.response.send_message("That player is no longer available in the pool.", ephemeral=True)
             return
 
+        # Acknowledge the interaction immediately to prevent Discord's 3-second 10062 Unknown Interaction timeout
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer()
+            except Exception as e:
+                log.debug("Could not defer interaction in PlayerDraftSelect: %s", e)
+
+        async def _safe_edit_draft_message(*, content=None, embed=None, view=None):
+            # 1. Edit via interaction.message directly using bot token (immune to 10062 expiration)
+            if interaction.message:
+                try:
+                    return await interaction.message.edit(content=content, embed=embed, view=view)
+                except Exception as e:
+                    log.debug("interaction.message.edit failed in PlayerDraftSelect: %s", e)
+            # 2. Try editing via interaction response/webhook
+            try:
+                if not interaction.response.is_done():
+                    return await interaction.response.edit_message(content=content, embed=embed, view=view)
+                else:
+                    return await interaction.edit_original_response(content=content, embed=embed, view=view)
+            except Exception as e:
+                log.debug("interaction edit response failed in PlayerDraftSelect: %s", e)
+            # 3. Fallback: fetch from channel using match panel_message_id
+            panel_id = match.get("panel_message_id")
+            if interaction.channel and panel_id:
+                try:
+                    msg = await interaction.channel.fetch_message(panel_id)
+                    return await msg.edit(content=content, embed=embed, view=view)
+                except Exception as e:
+                    log.error("Fallback msg.edit failed in PlayerDraftSelect: %s", e)
+
         avail_ids.remove(picked_id)
         c1_id = match["captain1_id"]
         c2_id = match["captain2_id"]
@@ -864,10 +895,7 @@ class PlayerDraftSelect(discord.ui.Select):
                     updated_match["status"] = "IN_PROGRESS"
                 updated_match["selected_map"] = existing_map
                 embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
-                if not interaction.response.is_done():
-                    await interaction.response.edit_message(view=None)
-                else:
-                    await interaction.edit_original_response(view=None)
+                await _safe_edit_draft_message(view=None)
                 if interaction.channel:
                     ready_msg = await interaction.channel.send(
                         content=f"**MATCH READY • MAP: {existing_map.upper()}**\nCaptains: <@{c1_id}> and <@{c2_id}>",
@@ -890,10 +918,7 @@ class PlayerDraftSelect(discord.ui.Select):
                     status="IN_PROGRESS",
                 )
                 embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
-                if not interaction.response.is_done():
-                    await interaction.response.edit_message(view=None)
-                else:
-                    await interaction.edit_original_response(view=None)
+                await _safe_edit_draft_message(view=None)
                 if interaction.channel:
                     ready_msg = await interaction.channel.send(
                         content=f"**MATCH READY • MAP: {final_map.upper()}**\nCaptains: <@{c1_id}> and <@{c2_id}>",
@@ -936,10 +961,7 @@ class PlayerDraftSelect(discord.ui.Select):
                     colour=colour,
                 )
                 vote_content = "**TEAMS DRAFTED • MAP VOTING ACTIVE**\nVote for the map below (1 min). Map with the highest votes will be played!"
-                if not interaction.response.is_done():
-                    await interaction.response.edit_message(content=vote_content, embed=embed, view=vote_view)
-                else:
-                    await interaction.edit_original_response(content=vote_content, embed=embed, view=vote_view)
+                await _safe_edit_draft_message(content=vote_content, embed=embed, view=vote_view)
                 if interaction.message:
                     vote_view.message = interaction.message
                     await db.update_solo_match_panel(self.match_id, interaction.message.id)
@@ -972,11 +994,7 @@ class PlayerDraftSelect(discord.ui.Select):
 
             embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
             veto_view = SoloMapVetoView(updated_match, self.players_by_id, veto_mode=veto_mode, colour=colour)
-
-            if not interaction.response.is_done():
-                await interaction.response.edit_message(embed=embed, view=veto_view)
-            else:
-                await interaction.edit_original_response(embed=embed, view=veto_view)
+            await _safe_edit_draft_message(content=None, embed=embed, view=veto_view)
 
             if interaction.channel:
                 await interaction.channel.send(
@@ -1016,10 +1034,7 @@ class PlayerDraftSelect(discord.ui.Select):
             draft_mode=draft_mode,
         )
 
-        if not interaction.response.is_done():
-            await interaction.response.edit_message(embed=embed, view=view)
-        else:
-            await interaction.edit_original_response(embed=embed, view=view)
+        await _safe_edit_draft_message(content=None, embed=embed, view=view)
 
 
 class SoloDraftView(discord.ui.View):
