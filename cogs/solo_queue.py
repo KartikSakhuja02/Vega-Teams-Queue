@@ -379,32 +379,23 @@ def build_solo_queue_embed(
     queued_players: list[dict],
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Construct an elevated, zero-emoji 10-man solo queue embed."""
+    """Minimalist 10-man solo queue panel embed."""
     count = len(queued_players)
+    if queued_players:
+        names = " • ".join(
+            p.get("ign") or p.get("discord_username") or "Player"
+            for p in queued_players
+        )
+        body = f"`[ {count} / 10 ]`\n{names}"
+    else:
+        body = "`[ 0 / 10 ]`\n*Waiting for players...*"
+
     embed = discord.Embed(
         title="VEGA QUEUE",
-        description=(
-            "> VEGA Queue\n"
-            "> JOIN QUEUE BY CLICKING ON \"JOIN QUEUE\" BUTTON BELOW\n\n"
-            f"> **Lobby Status:** `[ {count} / 10 Players Waiting ]`"
-        ),
+        description=body,
         colour=colour or EMBED_COLOUR,
     )
-
-    if queued_players:
-        lines: list[str] = []
-        for idx, p in enumerate(queued_players, 1):
-            ign = p.get("ign") or p.get("discord_username") or "Player"
-            elo = p.get("elo", 1000)
-            reg = f" `[{p.get('region', 'Global')}]`"
-            ts = int(p["joined_at"].timestamp()) if p.get("joined_at") else 0
-            time_str = f" • <t:{ts}:R>" if ts else ""
-            lines.append(f"> `{idx}.` **{ign}** • ELO: `{elo}`{reg}{time_str}")
-        embed.add_field(name="Queued Players", value="\n".join(lines), inline=False)
-    else:
-        embed.add_field(name="Queued Players", value="> *No players currently in queue*", inline=False)
-
-    embed.set_footer(text="Vega Matchmaking • Click buttons below to queue")
+    embed.set_footer(text="Click Join Queue or Leave Queue below")
     return embed
 
 
@@ -415,42 +406,29 @@ def build_solo_checkin_embed(
     lobby_vc_id: int,
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Construct an ultra-clean, minimalist voice check-in embed."""
-    all_pids = (
+    """Minimalist voice check-in embed."""
+    all_pids = list(dict.fromkeys(
         match.get("team1_player_ids", [])
         + match.get("team2_player_ids", [])
         + match.get("available_player_ids", [])
-    )
-    all_pids = list(dict.fromkeys(all_pids))
+    ))
     checked_count = sum(1 for pid in all_pids if pid in connected_pids)
+
+    lines = []
+    for pid in all_pids:
+        ign = players_by_id.get(pid, {}).get("ign") or f"Player"
+        icon = "🟢" if pid in connected_pids else "🔴"
+        lines.append(f"{icon} {ign}")
 
     embed = discord.Embed(
         title=f"MATCH #{match['id']} — VOICE CHECK-IN",
         description=(
-            f"> Connect to <#{lobby_vc_id}> to check in.\n"
-            f"> **Status:** `[ {checked_count} / {len(all_pids)} Players in Voice ]`"
+            f"`[ {checked_count} / {len(all_pids)} in Voice ]` — <#{lobby_vc_id}>\n\n"
+            + "  ".join(lines)
         ),
         colour=colour or EMBED_COLOUR,
     )
-
-    col1 = []
-    col2 = []
-    mid = (len(all_pids) + 1) // 2
-    for idx, pid in enumerate(all_pids):
-        p_data = players_by_id.get(pid, {})
-        ign = p_data.get("ign") or p_data.get("discord_username") or f"Player {pid}"
-        is_in = pid in connected_pids
-        icon = "🟢" if is_in else "🔴"
-        tag = "`In Voice`" if is_in else "`Waiting`"
-        entry = f"{icon} **{ign}** {tag}"
-        if idx < mid:
-            col1.append(entry)
-        else:
-            col2.append(entry)
-
-    embed.add_field(name="Lobby Players", value="\n".join(col1) if col1 else "—", inline=True)
-    embed.add_field(name="Lobby Players", value="\n".join(col2) if col2 else "—", inline=True)
-    embed.set_footer(text="Team draft begins automatically once all 10 players are in voice.")
+    embed.set_footer(text="Draft starts when all 10 are in voice.")
     return embed
 
 
@@ -459,7 +437,7 @@ def build_solo_draft_embed(
     players_by_id: dict[int, dict],
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Construct a sleek, minimalist player draft embed."""
+    """Minimalist player draft embed."""
     c1_id = match["captain1_id"]
     c2_id = match["captain2_id"]
     turn_id = match["current_turn_captain_id"]
@@ -469,49 +447,32 @@ def build_solo_draft_embed(
     t2_ids = match.get("team2_player_ids", [])
     avail_ids = match.get("available_player_ids", [])
 
+    def _name(pid: int) -> str:
+        return players_by_id.get(pid, {}).get("ign") or "?"
+
+    c1_ign = _name(c1_id)
+    c2_ign = _name(c2_id)
+
+    t1_body = f"👑 {c1_ign}\n" + "\n".join(
+        f"• {_name(p)}" for p in t1_ids if p != c1_id
+    ) + ("\n" + "\n".join("• —" for _ in range(5 - len(t1_ids))) if len(t1_ids) < 5 else "")
+
+    t2_body = f"👑 {c2_ign}\n" + "\n".join(
+        f"• {_name(p)}" for p in t2_ids if p != c2_id
+    ) + ("\n" + "\n".join("• —" for _ in range(5 - len(t2_ids))) if len(t2_ids) < 5 else "")
+
     embed = discord.Embed(
-        title=f"MATCH #{match['id']} — PLAYER DRAFT",
-        description=f"> **Turn:** <@{turn_id}> to pick • **Step:** `[ {step} / 7 ]`",
+        title=f"MATCH #{match['id']} — DRAFT  `{step}/7`",
+        description=f"<@{turn_id}> picks",
         colour=colour or EMBED_COLOUR,
     )
+    embed.add_field(name=f"Team A [{len(t1_ids)}/5]", value=t1_body.strip() or "—", inline=True)
+    embed.add_field(name=f"Team B [{len(t2_ids)}/5]", value=t2_body.strip() or "—", inline=True)
 
-    # Team 1 Roster (Minimalist)
-    c1_ign = players_by_id.get(c1_id, {}).get("ign", "Cap")
-    t1_lines = [f"👑 **{c1_ign}** *(Cap)*"]
-    for pid in t1_ids:
-        if pid != c1_id:
-            ign = players_by_id.get(pid, {}).get("ign", "Player")
-            elo = players_by_id.get(pid, {}).get("elo", 1000)
-            t1_lines.append(f"• **{ign}** `({elo})`")
-    while len(t1_lines) < 5:
-        t1_lines.append("• *Slot open*")
-    embed.add_field(name=f"Team 1 `[{len(t1_ids)}/5]`", value="\n".join(t1_lines), inline=True)
-
-    # Team 2 Roster (Minimalist)
-    c2_ign = players_by_id.get(c2_id, {}).get("ign", "Cap")
-    t2_lines = [f"👑 **{c2_ign}** *(Cap)*"]
-    for pid in t2_ids:
-        if pid != c2_id:
-            ign = players_by_id.get(pid, {}).get("ign", "Player")
-            elo = players_by_id.get(pid, {}).get("elo", 1000)
-            t2_lines.append(f"• **{ign}** `({elo})`")
-    while len(t2_lines) < 5:
-        t2_lines.append("• *Slot open*")
-    embed.add_field(name=f"Team 2 `[{len(t2_ids)}/5]`", value="\n".join(t2_lines), inline=True)
-
-    # Remaining Available Players (Minimalist inline pill row)
     if avail_ids:
-        avail_pills = [
-            f"`{players_by_id.get(pid, {}).get('ign', 'Player')}`"
-            for pid in avail_ids
-        ]
-        embed.add_field(
-            name=f"Available Pool `[{len(avail_ids)} left]`",
-            value=" • ".join(avail_pills),
-            inline=False,
-        )
+        pool = " • ".join(_name(p) for p in avail_ids)
+        embed.add_field(name=f"Pool [{len(avail_ids)}]", value=pool, inline=False)
 
-    embed.set_footer(text="Select a player from the dropdown below to draft.")
     return embed
 
 
@@ -520,47 +481,42 @@ def build_solo_map_veto_embed(
     players_by_id: dict[int, dict],
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Construct an ultra-clean, minimalist map veto embed."""
+    """Minimalist map veto embed."""
     status = match.get("status", "MAP_VETO")
     turn_id = match.get("current_turn_captain_id")
     selected_map = match.get("selected_map")
     avail_maps = match.get("available_maps", [])
     banned_maps = match.get("banned_maps", [])
-
     c1_id = match["captain1_id"]
     c2_id = match["captain2_id"]
 
+    def _names(ids: list) -> str:
+        return " • ".join(
+            players_by_id.get(pid, {}).get("ign") or "?" for pid in ids
+        ) or "—"
+
     if status == "IN_PROGRESS":
-        embed = discord.Embed(
-            title=f"MATCH #{match['id']} — READY",
-            description=(
-                f"> **Decided Map:** **{selected_map}**\n"
-                "> Veto complete. Join team voice channels and start the match."
-            ),
-            colour=colour or EMBED_COLOUR,
-        )
+        desc = f"**Map:** {selected_map}\nMatch is live — join your team VC!"
     else:
-        is_pick_turn = len(avail_maps) == 2
-        action_text = "Pick decider map" if is_pick_turn else "Ban a map"
-        embed = discord.Embed(
-            title=f"MATCH #{match['id']} — MAP VETO",
-            description=f"> **Turn:** <@{turn_id}> • **Action:** {action_text}",
-            colour=colour or EMBED_COLOUR,
+        action = "PICK" if len(avail_maps) == 2 else "BAN"
+        avail_str = " • ".join(f"`{m}`" for m in avail_maps)
+        banned_str = (" • ".join(f"~~{m}~~" for m in banned_maps)) if banned_maps else ""
+        desc = (
+            f"<@{turn_id}> → **{action}**\n"
+            f"Available: {avail_str}\n"
+            + (f"Banned: {banned_str}" if banned_str else "")
         )
 
-    # Minimalist rosters
-    t1_names = [players_by_id.get(pid, {}).get("ign", "Player") for pid in match.get("team1_player_ids", [])]
-    t2_names = [players_by_id.get(pid, {}).get("ign", "Player") for pid in match.get("team2_player_ids", [])]
+    t1_names = _names(match.get("team1_player_ids", []))
+    t2_names = _names(match.get("team2_player_ids", []))
 
-    embed.add_field(name=f"Team 1 (<@{c1_id}>)", value=" • ".join(t1_names) if t1_names else "—", inline=False)
-    embed.add_field(name=f"Team 2 (<@{c2_id}>)", value=" • ".join(t2_names) if t2_names else "—", inline=False)
-
-    if status != "IN_PROGRESS" and avail_maps:
-        embed.add_field(name="Available Maps", value=" • ".join(f"`{m}`" for m in avail_maps), inline=False)
-    if banned_maps:
-        embed.add_field(name="Banned", value=" • ".join(f"~~`{m}`~~" for m in banned_maps), inline=False)
-
-    embed.set_footer(text="Click a button below to ban/pick.")
+    embed = discord.Embed(
+        title=f"MATCH #{match['id']} — MAP VETO",
+        description=desc,
+        colour=colour or EMBED_COLOUR,
+    )
+    embed.add_field(name=f"Team A", value=t1_names, inline=True)
+    embed.add_field(name=f"Team B", value=t2_names, inline=True)
     return embed
 
 
@@ -1345,6 +1301,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         self._refresh_lock: asyncio.Lock = asyncio.Lock()
         self._match_lock: asyncio.Lock = asyncio.Lock()
         self._refresh_task: Optional[asyncio.Task] = None
+        # Cache panel message ID in memory to avoid a DB round-trip on every refresh
+        self._panel_message_id: Optional[int] = None
 
     def _schedule_queue_panel_refresh(self, delay: float = 0.5) -> None:
         """Schedule a debounced refresh of the queue panel to minimize Discord API latency."""
@@ -1388,7 +1346,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         return None
 
     async def refresh_queue_message(self) -> None:
-        """Fetch latest solo queue data from database and update or post the persistent queue message."""
+        """Update or post the persistent queue panel, using an in-memory message ID cache."""
         async with self._refresh_lock:
             channel = await self._get_channel()
             if not channel:
@@ -1403,27 +1361,35 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             embed = build_solo_queue_embed(queued_players)
             view = SoloQueueView(self)
 
-            stored_id_str = await db.get_config(SOLO_QUEUE_MESSAGE_CONFIG_KEY)
-            if stored_id_str:
+            # Fast-path: use in-memory cached ID (avoids DB round-trip)
+            panel_id = self._panel_message_id
+            if panel_id is None:
+                stored = await db.get_config(SOLO_QUEUE_MESSAGE_CONFIG_KEY)
+                if stored:
+                    panel_id = int(stored)
+                    self._panel_message_id = panel_id
+
+            if panel_id:
                 try:
-                    stored_id = int(stored_id_str)
-                    existing_msg = await channel.fetch_message(stored_id)
+                    existing_msg = await channel.fetch_message(panel_id)
                     await existing_msg.edit(content=None, embed=embed, view=view, attachments=[])
-                    log.info("Refreshed solo queue panel message (ID: %d).", stored_id)
+                    log.info("Refreshed solo queue panel message (ID: %d).", panel_id)
                     return
                 except discord.NotFound:
-                    log.warning("Stored solo queue message %s was deleted. Sending new message.", stored_id_str)
+                    log.warning("Panel message %d was deleted. Posting new one.", panel_id)
+                    self._panel_message_id = None
                 except Exception as e:
-                    log.error("Error editing existing solo queue message %s: %s", stored_id_str, e)
+                    log.error("Error editing solo queue message %d: %s", panel_id, e)
 
             try:
                 msg = await channel.send(embed=embed, view=view)
                 try:
                     await msg.pin()
                 except discord.Forbidden:
-                    log.warning("Missing Manage Messages permission — could not pin solo queue message.")
+                    pass
+                self._panel_message_id = msg.id
                 await db.set_config(SOLO_QUEUE_MESSAGE_CONFIG_KEY, str(msg.id))
-                log.info("Sent and stored new solo queue panel message (ID: %d).", msg.id)
+                log.info("Sent new solo queue panel message (ID: %d).", msg.id)
             except Exception as e:
                 log.error("Failed to post solo queue panel message: %s", e)
 
@@ -1432,57 +1398,65 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     # =========================================================================
 
     async def handle_join_queue(self, interaction: discord.Interaction) -> None:
-        """Handle player joining 10-man solo queue."""
+        """Handle player joining 10-man solo queue — fully optimised for instant response."""
         await interaction.response.defer(ephemeral=True)
 
         user_id = interaction.user.id
-        player = await db.get_player(user_id)
+
+        # Parallel: fetch player record and current queue in one round-trip
+        player, queued_players = await asyncio.gather(
+            db.get_player(user_id),
+            db.get_solo_queue(),
+        )
+
         if not player:
             b_reg_id = int(os.environ.get("SERVER_B_REGISTRATION_CHANNEL_ID", "0") or "0")
             ch_hint = f" in <#{b_reg_id}>" if b_reg_id else ""
             await interaction.followup.send(
-                f"You must register your player profile first using `/register`{ch_hint}.",
+                f"You must register first using `/register`{ch_hint}.",
                 ephemeral=True,
             )
             return
 
         if player.get("is_banned"):
-            await interaction.followup.send("You are currently banned from competitive queues.", ephemeral=True)
+            await interaction.followup.send("You are banned from queues.", ephemeral=True)
             return
 
         if player.get("status") == "IN_MATCH":
-            await interaction.followup.send("You are currently listed as in an active match.", ephemeral=True)
+            await interaction.followup.send("You are currently in an active match.", ephemeral=True)
             return
 
-        queued_players = await db.get_solo_queue()
         if any(p["discord_id"] == user_id for p in queued_players):
-            await interaction.followup.send("You are already in the 10-man queue.", ephemeral=True)
+            await interaction.followup.send("You are already in queue.", ephemeral=True)
             return
 
-        await db.add_player_to_solo_queue(user_id)
-        await db.set_player_status(user_id, "IN_QUEUE")
+        # Write to DB, then immediately reply — refresh runs in background
+        await asyncio.gather(
+            db.add_player_to_solo_queue(user_id),
+            db.set_player_status(user_id, "IN_QUEUE"),
+        )
         self._schedule_queue_panel_refresh()
-
-        await interaction.followup.send("You have joined the 10-man queue.", ephemeral=True)
+        await interaction.followup.send("Joined queue.", ephemeral=True)
         log.info("Player %s (%d) joined 10-man solo queue.", interaction.user.name, user_id)
 
-        # Check if 10 players reached
         if interaction.guild:
             asyncio.create_task(self._check_and_create_solo_match(interaction.guild))
 
     async def handle_leave_queue(self, interaction: discord.Interaction) -> None:
-        """Handle player leaving 10-man solo queue."""
+        """Handle player leaving 10-man solo queue — optimised for instant response."""
         await interaction.response.defer(ephemeral=True)
 
         user_id = interaction.user.id
         removed = await db.remove_player_from_solo_queue(user_id)
         if removed:
-            await db.set_player_status(user_id, "IDLE")
+            await asyncio.gather(
+                db.set_player_status(user_id, "IDLE"),
+                interaction.followup.send("Left queue.", ephemeral=True),
+            )
             self._schedule_queue_panel_refresh()
-            await interaction.followup.send("You have left the 10-man queue.", ephemeral=True)
             log.info("Player %s (%d) left 10-man solo queue.", interaction.user.name, user_id)
         else:
-            await interaction.followup.send("You were not in the 10-man queue.", ephemeral=True)
+            await interaction.followup.send("You are not in the queue.", ephemeral=True)
 
     # =========================================================================
     # Match Creation & Channel Automation (10 Players)
