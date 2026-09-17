@@ -62,6 +62,7 @@ async def _apply_schema() -> None:
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS submitted_by BIGINT;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS screenshot_url TEXT;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS mvp_player_id BIGINT;
+                ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS voice_lobby_id BIGINT;
                 """
             )
         except Exception as e:
@@ -1958,6 +1959,10 @@ async def create_solo_match(
     captain2_id: int,
     available_player_ids: list[int],
     available_maps: list[str],
+    status: str = "VOICE_CHECKIN",
+    voice_lobby_id: Optional[int] = None,
+    voice_team1_id: Optional[int] = None,
+    voice_team2_id: Optional[int] = None,
 ) -> Optional[dict]:
     """Create a new 10-man solo match record."""
     row = await get_pool().fetchrow(
@@ -1973,16 +1978,23 @@ async def create_solo_match(
             current_turn_captain_id,
             draft_step,
             available_maps,
+            voice_lobby_id,
+            voice_team1_id,
+            voice_team2_id,
             created_at
         )
-        VALUES ($1, 'DRAFTING', $2, $3, ARRAY[$2]::BIGINT[], ARRAY[$3]::BIGINT[], $4::BIGINT[], $2, 1, $5::TEXT[], NOW())
+        VALUES ($1, $2, $3, $4, ARRAY[$3]::BIGINT[], ARRAY[$4]::BIGINT[], $5::BIGINT[], $3, 1, $6::TEXT[], $7, $8, $9, NOW())
         RETURNING *
         """,
         channel_id,
+        status,
         captain1_id,
         captain2_id,
         available_player_ids,
         available_maps,
+        voice_lobby_id,
+        voice_team1_id,
+        voice_team2_id,
     )
     return dict(row) if row else None
 
@@ -2080,17 +2092,48 @@ async def update_solo_match_map_veto(
 
 async def update_solo_match_voices(
     match_id: int,
-    voice_team1_id: int,
-    voice_team2_id: int,
+    voice_team1_id: Optional[int] = None,
+    voice_team2_id: Optional[int] = None,
+    voice_lobby_id: Optional[int] = None,
 ) -> bool:
     """Save the created voice channel IDs for the match."""
     res = await get_pool().execute(
-        "UPDATE solo_matches SET voice_team1_id = $1, voice_team2_id = $2 WHERE id = $3",
+        """
+        UPDATE solo_matches
+        SET voice_team1_id = COALESCE($1, voice_team1_id),
+            voice_team2_id = COALESCE($2, voice_team2_id),
+            voice_lobby_id = COALESCE($3, voice_lobby_id)
+        WHERE id = $4
+        """,
         voice_team1_id,
         voice_team2_id,
+        voice_lobby_id,
         match_id,
     )
     return not res.endswith(" 0")
+
+
+async def set_solo_match_status(match_id: int, status: str) -> bool:
+    """Update solo match status."""
+    res = await get_pool().execute(
+        "UPDATE solo_matches SET status = $1 WHERE id = $2",
+        status,
+        match_id,
+    )
+    return not res.endswith(" 0")
+
+
+async def get_solo_match_by_voice_channel(voice_channel_id: int) -> Optional[dict]:
+    """Fetch solo match details by any of its voice channel IDs."""
+    row = await get_pool().fetchrow(
+        """
+        SELECT * FROM solo_matches
+        WHERE (voice_lobby_id = $1 OR voice_team1_id = $1 OR voice_team2_id = $1)
+          AND status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS')
+        """,
+        voice_channel_id,
+    )
+    return dict(row) if row else None
 
 
 async def cancel_solo_match(match_id: int) -> Optional[dict]:
