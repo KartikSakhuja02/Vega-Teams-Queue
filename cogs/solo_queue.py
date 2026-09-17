@@ -22,6 +22,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 from typing import Callable, Optional
 
 import discord
@@ -117,7 +118,7 @@ async def get_solo_draft_mode() -> str:
 
 async def get_solo_veto_mode() -> str:
     val = await db.get_config(CONFIG_KEY_VETO_MODE)
-    if val and val.upper() in ("ALTERNATING_BAN", "BAN_BAN_PICK", "RANDOM_MAP", "CAPTAIN_PICK"):
+    if val and val.upper() in ("ALTERNATING_BAN", "BAN_BAN_PICK", "RANDOM_MAP", "CAPTAIN_PICK", "MAP_VOTE", "VOTE"):
         return val.upper()
     return VETO_MODE
 
@@ -532,6 +533,47 @@ def build_solo_map_veto_embed(
     return embed
 
 
+def build_solo_map_vote_embed(
+    match: dict,
+    players_by_id: dict[int, dict],
+    map_options: list[str],
+    votes_by_user: dict[int, str],
+    end_time: float,
+    colour: Optional[discord.Colour] = None,
+) -> discord.Embed:
+    """Minimalist map voting embed — 4 random maps, 1-minute countdown, live vote counts."""
+    t1_ids = match.get("team1_player_ids", [])
+    t2_ids = match.get("team2_player_ids", [])
+
+    def _names(ids: list) -> str:
+        parts = [players_by_id.get(pid, {}).get("ign") or str(pid) for pid in ids]
+        return ",  ".join(parts) or "-"
+
+    t1 = _names(t1_ids)
+    t2 = _names(t2_ids)
+
+    counts = {m: 0 for m in map_options}
+    for m in votes_by_user.values():
+        if m in counts:
+            counts[m] += 1
+
+    total_voted = len(votes_by_user)
+    lines = [
+        f"Voting ends <t:{int(end_time)}:R>  ({total_voted}/10 voted)\n",
+    ]
+    for m in map_options:
+        lines.append(f"**{m}** — {counts[m]} votes")
+
+    lines.append(f"\nTeam A — {t1}")
+    lines.append(f"Team B — {t2}")
+
+    return discord.Embed(
+        title=f"Queue {match['id']}  —  Map Vote",
+        description="\n".join(lines),
+        colour=colour or EMBED_COLOUR,
+    )
+
+
 def build_solo_config_embed(
     captain_mode: str,
     draft_mode: str,
@@ -563,7 +605,7 @@ def build_solo_config_embed(
     )
     embed.add_field(
         name="🗺️ Map Veto Template",
-        value=f"`{veto_mode}`\n*(Alternating Bans, Ban-Ban-Pick, Random Map, or Captain Pick)*",
+        value=f"`{veto_mode}`\n*(Alternating Bans, Ban-Ban-Pick, Random Map, Captain Pick, or 4-Map Vote)*",
         inline=True,
     )
     scoring_desc = (
@@ -810,6 +852,41 @@ class PlayerDraftSelect(discord.ui.Select):
                     await interaction.channel.send(
                         f"Queue ready on **{final_map}**. Use `/submit-result` when done."
                     )
+                return
+            elif veto_mode in ("MAP_VOTE", "VOTE"):
+                pool_copy = list(map_pool) if map_pool else ["Bind", "Haven", "Split", "Ascent"]
+                selected_4 = random.sample(pool_copy, min(4, len(pool_copy)))
+                await db.update_solo_match_draft(
+                    match_id=self.match_id,
+                    team1_player_ids=t1_ids,
+                    team2_player_ids=t2_ids,
+                    available_player_ids=[],
+                    current_turn_captain_id=c1_id,
+                    draft_step=next_step,
+                    status="MAP_VETO",
+                )
+                updated_match = await db.get_solo_match_by_id(self.match_id)
+                vote_view = SoloMapVoteView(
+                    updated_match,
+                    self.players_by_id,
+                    selected_4,
+                    colour=colour,
+                    timeout=60.0,
+                )
+                embed = build_solo_map_vote_embed(
+                    updated_match,
+                    self.players_by_id,
+                    selected_4,
+                    {},
+                    vote_view.end_time,
+                    colour=colour,
+                )
+                if not interaction.response.is_done():
+                    await interaction.response.edit_message(embed=embed, view=vote_view)
+                    vote_view.message = await interaction.original_response()
+                else:
+                    await interaction.edit_original_response(embed=embed, view=vote_view)
+                    vote_view.message = await interaction.original_response()
                 return
 
             # Move to MAP_VETO
@@ -1065,6 +1142,152 @@ class SoloMapVetoView(discord.ui.View):
         return callback
 
 
+class SoloMapVoteView(discord.ui.View):
+    """
+    1-minute voting view for 4 randomly selected maps.
+    All 10 players vote; the map with the highest votes is selected.
+    """
+
+    def __init__(
+        self,
+        match: dict,
+        players_by_id: dict[int, dict],
+        map_options: list[str],
+        colour: Optional[discord.Colour] = None,
+        timeout: float = 60.0,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.match = match
+        self.players_by_id = players_by_id
+        self.map_options = map_options
+        self.colour = colour
+        self.end_time = time.time() + timeout
+        self.votes: dict[int, str] = {}
+        self.all_player_ids = set(match.get("team1_player_ids", []) + match.get("team2_player_ids", []))
+        self.is_finalized: bool = False
+        self.message: Optional[discord.Message] = None
+
+        self._build_buttons()
+
+    def _build_buttons(self) -> None:
+        self.clear_items()
+        counts = {m: 0 for m in self.map_options}
+        for m in self.votes.values():
+            if m in counts:
+                counts[m] += 1
+
+        for m in self.map_options:
+            cnt = counts[m]
+            label = f"{m} ({cnt})" if cnt > 0 else m
+            btn = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.primary if cnt > 0 else discord.ButtonStyle.secondary,
+                custom_id=f"solo_map_vote:{m}",
+            )
+            btn.callback = self._make_vote_callback(m)
+            self.add_item(btn)
+
+    def _make_vote_callback(self, map_name: str):
+        async def callback(interaction: discord.Interaction) -> None:
+            if self.is_finalized:
+                await interaction.response.send_message("Voting has already concluded.", ephemeral=True)
+                return
+
+            if interaction.user.id not in self.all_player_ids:
+                await interaction.response.send_message("Only players in this queue can vote.", ephemeral=True)
+                return
+
+            if self.message is None and interaction.message:
+                self.message = interaction.message
+
+            prev = self.votes.get(interaction.user.id)
+            if prev == map_name:
+                await interaction.response.send_message(f"You already voted for **{map_name}**.", ephemeral=True)
+                return
+
+            self.votes[interaction.user.id] = map_name
+            self._build_buttons()
+            embed = build_solo_map_vote_embed(
+                self.match,
+                self.players_by_id,
+                self.map_options,
+                self.votes,
+                self.end_time,
+                colour=self.colour,
+            )
+
+            # If all players have voted, conclude immediately
+            if len(self.votes) >= len(self.all_player_ids) and len(self.all_player_ids) >= 10:
+                self.message = interaction.message or self.message
+                if not interaction.response.is_done():
+                    await interaction.response.defer()
+                await self._finalize(interaction.channel)
+                return
+
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.edit_original_response(embed=embed, view=self)
+        return callback
+
+    async def on_timeout(self) -> None:
+        if not self.is_finalized:
+            await self._finalize(None)
+
+    async def _finalize(self, channel: Optional[discord.abc.Messageable]) -> None:
+        if self.is_finalized:
+            return
+        self.is_finalized = True
+        self.stop()
+
+        counts = {m: 0 for m in self.map_options}
+        for m in self.votes.values():
+            if m in counts:
+                counts[m] += 1
+
+        max_votes = max(counts.values()) if counts else 0
+        if max_votes > 0:
+            top_maps = [m for m, c in counts.items() if c == max_votes]
+            final_map = random.choice(top_maps)
+        else:
+            final_map = random.choice(self.map_options) if self.map_options else "Default Map"
+
+        banned = [m for m in self.map_options if m != final_map]
+        updated_match = await db.update_solo_match_map_veto(
+            match_id=self.match["id"],
+            available_maps=[],
+            banned_maps=banned,
+            selected_map=final_map,
+            current_turn_captain_id=None,
+            status="IN_PROGRESS",
+        )
+        if not updated_match:
+            updated_match = dict(self.match)
+            updated_match["selected_map"] = final_map
+            updated_match["status"] = "IN_PROGRESS"
+
+        embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=self.colour)
+        final_view = discord.ui.View()
+
+        if self.message:
+            try:
+                await self.message.edit(embed=embed, view=final_view)
+            except Exception as e:
+                log.debug("Failed to edit map vote message on finalize: %s", e)
+        elif channel:
+            try:
+                await channel.send(embed=embed, view=final_view)
+            except Exception as e:
+                log.debug("Failed to send map vote finalize embed: %s", e)
+
+        target_ch = channel or (self.message.channel if self.message else None)
+        if target_ch:
+            try:
+                await target_ch.send(f"Queue ready on **{final_map}**. Use `/submit-result` when done.")
+            except Exception as e:
+                log.debug("Failed to send queue ready message: %s", e)
+
+
 class MatchResultVoteView(discord.ui.View):
     """
     Voting view to confirm match results. Requires 6 confirm votes from match participants.
@@ -1293,6 +1516,12 @@ class SoloConfigVetoSelect(discord.ui.Select):
                 value="CAPTAIN_PICK",
                 description="Captains ban, then Captain 1 picks from remaining 2",
                 default=(current_mode == "CAPTAIN_PICK"),
+            ),
+            discord.SelectOption(
+                label="4-Map Player Vote (1 Min)",
+                value="MAP_VOTE",
+                description="4 random maps voted on by all players for 1 min",
+                default=(current_mode in ("MAP_VOTE", "VOTE")),
             ),
         ]
         super().__init__(
@@ -1957,6 +2186,42 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     embed=embed,
                 )
                 await db.update_solo_match_panel(current_match["id"], panel_msg.id)
+            elif veto_mode in ("MAP_VOTE", "VOTE"):
+                pool_copy = list(map_pool) if map_pool else ["Bind", "Haven", "Split", "Ascent"]
+                selected_4 = random.sample(pool_copy, min(4, len(pool_copy)))
+                await db.update_solo_match_draft(
+                    match_id=current_match["id"],
+                    team1_player_ids=t1_ids,
+                    team2_player_ids=t2_ids,
+                    available_player_ids=[],
+                    current_turn_captain_id=c1_id,
+                    draft_step=8,
+                    status="MAP_VETO",
+                )
+                updated = await db.get_solo_match_by_id(current_match["id"])
+                vote_view = SoloMapVoteView(
+                    updated,
+                    players_by_id,
+                    selected_4,
+                    colour=colour,
+                    timeout=60.0,
+                )
+                embed = build_solo_map_vote_embed(
+                    updated,
+                    players_by_id,
+                    selected_4,
+                    {},
+                    vote_view.end_time,
+                    colour=colour,
+                )
+                panel_msg = await channel.send(
+                    embed=embed,
+                    view=vote_view,
+                )
+                vote_view.message = panel_msg
+                await db.update_solo_match_panel(current_match["id"], panel_msg.id)
+                log.info("Match #%d started after checkin with AUTO_BALANCE and MAP_VOTE.", current_match["id"])
+                return
             else:
                 await db.update_solo_match_draft(
                     match_id=current_match["id"],
@@ -2112,6 +2377,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         app_commands.Choice(name="Ban-Ban-Pick (Decider Pick)", value="BAN_BAN_PICK"),
         app_commands.Choice(name="Random Map (Skip Veto)", value="RANDOM_MAP"),
         app_commands.Choice(name="Captain Pick", value="CAPTAIN_PICK"),
+        app_commands.Choice(name="4-Map Player Vote (1 Min)", value="MAP_VOTE"),
     ])
     async def solo_config_veto_cmd(self, interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
         await interaction.response.defer(ephemeral=True)
