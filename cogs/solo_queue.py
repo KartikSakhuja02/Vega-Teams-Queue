@@ -3328,7 +3328,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     embed = build_solo_draft_embed(updated_match, players_by_id, colour=colour)
                     avail_players = [players_by_id[pid] for pid in avail_ids if pid in players_by_id]
                     draft_mode = await get_solo_draft_mode()
-                    view = PlayerDraftView(updated_match, avail_players, players_by_id=players_by_id, colour=colour, draft_mode=draft_mode)
+                    view = SoloDraftView(updated_match, avail_players, players_by_id=players_by_id, colour=colour, draft_mode=draft_mode)
                     await panel_msg.edit(embed=embed, view=view)
                 elif status == "MAP_VETO":
                     embed = build_solo_map_veto_embed(updated_match, players_by_id, colour=colour)
