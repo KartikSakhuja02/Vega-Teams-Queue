@@ -3199,6 +3199,48 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             f"Captain updated: <@{new_captain.id}> has replaced <@{old_captain.id}> as captain."
         )
 
+    @app_commands.command(
+        name="set-elo-template",
+        description="Set the matchmaking ELO scoring template (Staff only).",
+    )
+    @app_commands.choices(template=[
+        app_commands.Choice(name="Default Flat ELO (+25 Win / -20 Loss / +5 MVP)", value="DEFAULT"),
+        app_commands.Choice(name="Performance Combat-Based ELO (Stats Scaling)", value="PERFORMANCE"),
+    ])
+    @app_commands.default_permissions(manage_guild=True)
+    async def set_elo_template_command(
+        self,
+        interaction: discord.Interaction,
+        template: app_commands.Choice[str],
+    ) -> None:
+        """Change the global ELO template."""
+        await interaction.response.defer(ephemeral=True)
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send("You do not have staff permissions.", ephemeral=True)
+            return
+        await db.set_config(CONFIG_KEY_SCORING_MODE, template.value)
+        await interaction.followup.send(
+            f"ELO scoring template updated to **`{template.value}`** ({template.name}).",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="set-elo-system",
+        description="Set the matchmaking ELO scoring template (Staff only).",
+    )
+    @app_commands.choices(template=[
+        app_commands.Choice(name="Default Flat ELO (+25 Win / -20 Loss / +5 MVP)", value="DEFAULT"),
+        app_commands.Choice(name="Performance Combat-Based ELO (Stats Scaling)", value="PERFORMANCE"),
+    ])
+    @app_commands.default_permissions(manage_guild=True)
+    async def set_elo_system_command(
+        self,
+        interaction: discord.Interaction,
+        template: app_commands.Choice[str],
+    ) -> None:
+        """Alias for set-elo-template."""
+        await self.set_elo_template_command(interaction, template)
+
 
 async def setup(bot: commands.Bot) -> None:
     cog = SoloQueueCog(bot)
