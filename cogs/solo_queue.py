@@ -437,7 +437,7 @@ def build_solo_draft_embed(
     players_by_id: dict[int, dict],
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Minimalist player draft embed."""
+    """Ultra-minimalist draft embed — no emojis, plain text only."""
     c1_id = match["captain1_id"]
     c2_id = match["captain2_id"]
     turn_id = match["current_turn_captain_id"]
@@ -448,31 +448,29 @@ def build_solo_draft_embed(
     avail_ids = match.get("available_player_ids", [])
 
     def _name(pid: int) -> str:
-        return players_by_id.get(pid, {}).get("ign") or "?"
+        return players_by_id.get(pid, {}).get("ign") or str(pid)
 
-    c1_ign = _name(c1_id)
-    c2_ign = _name(c2_id)
+    # Build team columns: captain first, then picks, then empty slots
+    def _team_col(cap_id: int, ids: list[int]) -> str:
+        rows = [f"{_name(cap_id)} (cap)"]
+        rows += [_name(p) for p in ids if p != cap_id]
+        rows += ["-" for _ in range(5 - len(ids))]
+        return "\n".join(rows)
 
-    t1_body = f"👑 {c1_ign}\n" + "\n".join(
-        f"• {_name(p)}" for p in t1_ids if p != c1_id
-    ) + ("\n" + "\n".join("• —" for _ in range(5 - len(t1_ids))) if len(t1_ids) < 5 else "")
-
-    t2_body = f"👑 {c2_ign}\n" + "\n".join(
-        f"• {_name(p)}" for p in t2_ids if p != c2_id
-    ) + ("\n" + "\n".join("• —" for _ in range(5 - len(t2_ids))) if len(t2_ids) < 5 else "")
-
+    picker = _name(turn_id)
     embed = discord.Embed(
-        title=f"MATCH #{match['id']} — DRAFT  `{step}/7`",
-        description=f"<@{turn_id}> picks",
+        title=f"Match {match['id']}  —  Draft  [{step}/7]",
+        description=f"{picker}'s pick",
         colour=colour or EMBED_COLOUR,
     )
-    embed.add_field(name=f"Team A [{len(t1_ids)}/5]", value=t1_body.strip() or "—", inline=True)
-    embed.add_field(name=f"Team B [{len(t2_ids)}/5]", value=t2_body.strip() or "—", inline=True)
-
+    embed.add_field(name=f"Team A  {len(t1_ids)}/5", value=_team_col(c1_id, t1_ids), inline=True)
+    embed.add_field(name=f"Team B  {len(t2_ids)}/5", value=_team_col(c2_id, t2_ids), inline=True)
     if avail_ids:
-        pool = " • ".join(_name(p) for p in avail_ids)
-        embed.add_field(name=f"Pool [{len(avail_ids)}]", value=pool, inline=False)
-
+        embed.add_field(
+            name="Available",
+            value=",  ".join(_name(p) for p in avail_ids),
+            inline=False,
+        )
     return embed
 
 
@@ -481,7 +479,7 @@ def build_solo_map_veto_embed(
     players_by_id: dict[int, dict],
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Minimalist map veto embed."""
+    """Ultra-minimalist map veto embed — no emojis, plain text only."""
     status = match.get("status", "MAP_VETO")
     turn_id = match.get("current_turn_captain_id")
     selected_map = match.get("selected_map")
@@ -491,32 +489,40 @@ def build_solo_map_veto_embed(
     c2_id = match["captain2_id"]
 
     def _names(ids: list) -> str:
-        return " • ".join(
-            players_by_id.get(pid, {}).get("ign") or "?" for pid in ids
-        ) or "—"
+        parts = [players_by_id.get(pid, {}).get("ign") or str(pid) for pid in ids]
+        return ",  ".join(parts) or "-"
+
+    t1 = _names(match.get("team1_player_ids", []))
+    t2 = _names(match.get("team2_player_ids", []))
 
     if status == "IN_PROGRESS":
-        desc = f"**Map:** {selected_map}\nMatch is live — join your team VC!"
-    else:
-        action = "PICK" if len(avail_maps) == 2 else "BAN"
-        avail_str = " • ".join(f"`{m}`" for m in avail_maps)
-        banned_str = (" • ".join(f"~~{m}~~" for m in banned_maps)) if banned_maps else ""
         desc = (
-            f"<@{turn_id}> → **{action}**\n"
-            f"Available: {avail_str}\n"
-            + (f"Banned: {banned_str}" if banned_str else "")
+            f"Map: {selected_map}\n\n"
+            f"Team A — {t1}\n"
+            f"Team B — {t2}"
         )
-
-    t1_names = _names(match.get("team1_player_ids", []))
-    t2_names = _names(match.get("team2_player_ids", []))
-
-    embed = discord.Embed(
-        title=f"MATCH #{match['id']} — MAP VETO",
-        description=desc,
-        colour=colour or EMBED_COLOUR,
-    )
-    embed.add_field(name=f"Team A", value=t1_names, inline=True)
-    embed.add_field(name=f"Team B", value=t2_names, inline=True)
+        embed = discord.Embed(
+            title=f"Match {match['id']}  —  Ready",
+            description=desc,
+            colour=colour or EMBED_COLOUR,
+        )
+    else:
+        action = "Pick" if len(avail_maps) == 2 else "Ban"
+        picker = players_by_id.get(turn_id, {}).get("ign") or str(turn_id)
+        avail_str = ",  ".join(avail_maps)
+        banned_str = ",  ".join(f"~~{m}~~" for m in banned_maps) if banned_maps else "-"
+        desc = (
+            f"{picker} — {action}\n\n"
+            f"Maps: {avail_str}\n"
+            f"Banned: {banned_str}\n\n"
+            f"Team A — {t1}\n"
+            f"Team B — {t2}"
+        )
+        embed = discord.Embed(
+            title=f"Match {match['id']}  —  Map Veto",
+            description=desc,
+            colour=colour or EMBED_COLOUR,
+        )
     return embed
 
 
