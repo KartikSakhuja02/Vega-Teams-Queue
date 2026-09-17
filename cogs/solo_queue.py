@@ -1333,8 +1333,10 @@ class SoloMapVoteView(discord.ui.View):
             if not self.is_finalized:
                 log.info("SoloMapVoteView timer completed for match #%s, finalizing now...", self.match.get("id"))
                 await self._finalize(self.channel, None)
+            else:
+                log.info("SoloMapVoteView timer expired for match #%s but already finalized.", self.match.get("id"))
         except asyncio.CancelledError:
-            pass
+            log.info("SoloMapVoteView timer task cancelled for match #%s.", self.match.get("id"))
         except Exception as e:
             log.exception("Error in SoloMapVoteView timer task for match #%s: %s", self.match.get("id"), e)
 
@@ -1418,189 +1420,217 @@ class SoloMapVoteView(discord.ui.View):
             return
         self.is_finalized = True
         self.stop()
+
+        # Only cancel timer task if called from OUTSIDE the timer task itself (e.g. from an interaction)
+        curr_task = asyncio.current_task()
         if hasattr(self, "_timer_task") and self._timer_task and not self._timer_task.done():
-            self._timer_task.cancel()
+            if self._timer_task != curr_task:
+                self._timer_task.cancel()
 
-        counts = {m: 0 for m in self.map_options}
-        for m in self.votes.values():
-            if m in counts:
-                counts[m] += 1
-
-        max_votes = max(counts.values()) if counts else 0
-        if max_votes > 0:
-            top_maps = [m for m, c in counts.items() if c == max_votes]
-            final_map = random.choice(top_maps)
-        else:
-            final_map = random.choice(self.map_options) if self.map_options else "Bind"
-
-        banned = [m for m in self.map_options if m != final_map]
-
-        current_match = await db.get_solo_match_by_id(self.match["id"])
-        if not current_match:
-            current_match = dict(self.match)
-
-        draft_mode = await get_solo_draft_mode()
-        colour = self.colour or await get_solo_embed_colour()
-
-        # Locate channel & panel message reliably
-        ch_id = current_match.get("channel_id")
-        target_ch = None
-        if ch_id and getattr(self, "bot", None):
-            target_ch = self.bot.get_channel(ch_id)
-            if not target_ch:
-                try:
-                    target_ch = await self.bot.fetch_channel(ch_id)
-                    log.info("SoloMapVoteView._finalize: fetched channel %s via API", ch_id)
-                except Exception as e:
-                    log.error("SoloMapVoteView._finalize: could not fetch channel %s: %s", ch_id, e)
-        if not target_ch:
-            target_ch = (
-                channel
-                or getattr(self, "channel", None)
-                or (self.message.channel if self.message else None)
-            )
-
-        log.info(
-            "SoloMapVoteView._finalize for match #%s: target_ch=%s panel_msg_id=%s final_map=%s",
-            current_match.get("id"), target_ch, current_match.get("panel_message_id"), final_map,
-        )
-
-        panel_msg = self.message
-        panel_msg_id = current_match.get("panel_message_id")
-        if target_ch and panel_msg_id and hasattr(target_ch, "fetch_message"):
-            try:
-                panel_msg = await target_ch.fetch_message(panel_msg_id)
-            except Exception as e:
-                log.debug("Could not fetch panel_msg by ID %s: %s", panel_msg_id, e)
-
-        c1_id = current_match["captain1_id"]
-        c2_id = current_match["captain2_id"]
-        avail_ids = list(current_match.get("available_player_ids", []))
-
-        # Ensure all player data is loaded for display
-        all_match_pids = list(dict.fromkeys(
-            current_match.get("team1_player_ids", [])
-            + current_match.get("team2_player_ids", [])
-            + avail_ids
-            + [c1_id, c2_id]
-        ))
         try:
-            fetched = await db.get_players_bulk([pid for pid in all_match_pids if pid])
-            for p in fetched:
-                self.players_by_id[p["discord_id"]] = p
-        except Exception as e:
-            log.debug("SoloMapVoteView._finalize: could not fetch players bulk: %s", e)
+            log.info("SoloMapVoteView._finalize: starting finalization for match #%s", self.match.get("id"))
+            counts = {m: 0 for m in self.map_options}
+            for m in self.votes.values():
+                if m in counts:
+                    counts[m] += 1
 
-        # If drafting is still needed (SNAKE or ALTERNATING with available players)
-        if draft_mode in ("SNAKE", "ALTERNATING") and len(avail_ids) > 0:
-            await db.update_solo_match_map_veto(
-                match_id=current_match["id"],
-                available_maps=[],
-                banned_maps=banned,
-                selected_map=final_map,
-                current_turn_captain_id=c1_id,
-                status="DRAFTING",
-            )
-            updated_match = await db.update_solo_match_draft(
-                match_id=current_match["id"],
-                team1_player_ids=current_match.get("team1_player_ids", [c1_id]),
-                team2_player_ids=current_match.get("team2_player_ids", [c2_id]),
-                available_player_ids=avail_ids,
-                current_turn_captain_id=c1_id,
-                draft_step=1,
-                status="DRAFTING",
-            )
-            if not updated_match:
-                updated_match = dict(current_match)
-                updated_match["status"] = "DRAFTING"
-                updated_match["draft_step"] = 1
-                updated_match["current_turn_captain_id"] = c1_id
-            updated_match["selected_map"] = final_map
+            max_votes = max(counts.values()) if counts else 0
+            if max_votes > 0:
+                top_maps = [m for m, c in counts.items() if c == max_votes]
+                final_map = random.choice(top_maps)
+            else:
+                final_map = random.choice(self.map_options) if self.map_options else "Bind"
 
-            avail_player_dicts = [self.players_by_id[pid] for pid in avail_ids if pid in self.players_by_id]
-            draft_embed = build_solo_draft_embed(updated_match, self.players_by_id, colour=colour)
-            draft_view = SoloDraftView(
-                updated_match,
-                avail_player_dicts,
-                players_by_id=self.players_by_id,
-                colour=colour,
-                draft_mode=draft_mode,
+            banned = [m for m in self.map_options if m != final_map]
+            log.info(
+                "SoloMapVoteView._finalize match #%s: vote counts=%s selected final_map=%s",
+                self.match.get("id"), counts, final_map,
             )
 
-            if panel_msg:
-                try:
-                    await panel_msg.edit(content=None, embed=draft_embed, view=draft_view)
-                except Exception as e:
-                    log.debug("Failed to edit panel to draft: %s", e)
-            elif target_ch and hasattr(target_ch, "send"):
-                new_msg = await target_ch.send(embed=draft_embed, view=draft_view)
-                await db.update_solo_match_panel(current_match["id"], new_msg.id)
+            current_match = await db.get_solo_match_by_id(self.match["id"])
+            if not current_match:
+                current_match = dict(self.match)
 
-            if target_ch and hasattr(target_ch, "send"):
-                await target_ch.send(
-                    f"**MAP SELECTED: {final_map.upper()} • DRAFT COMMENCING**\n"
-                    f"Captains: <@{c1_id}> and <@{c2_id}>.\n"
-                    f"<@{c1_id}> Please make the first draft pick below."
+            draft_mode = await get_solo_draft_mode()
+            colour = self.colour or await get_solo_embed_colour()
+
+            # Locate channel & panel message reliably
+            ch_id = current_match.get("channel_id")
+            target_ch = None
+            if ch_id and getattr(self, "bot", None):
+                target_ch = self.bot.get_channel(ch_id)
+                if not target_ch:
+                    try:
+                        target_ch = await self.bot.fetch_channel(ch_id)
+                        log.info("SoloMapVoteView._finalize: fetched channel %s via API", ch_id)
+                    except Exception as e:
+                        log.error("SoloMapVoteView._finalize: could not fetch channel %s: %s", ch_id, e)
+            if not target_ch:
+                target_ch = (
+                    channel
+                    or getattr(self, "channel", None)
+                    or (self.message.channel if self.message else None)
                 )
-        else:
-            updated_match = await db.update_solo_match_map_veto(
-                match_id=current_match["id"],
-                available_maps=[],
-                banned_maps=banned,
-                selected_map=final_map,
-                current_turn_captain_id=None,
-                status="IN_PROGRESS",
+
+            panel_msg = self.message
+            panel_msg_id = current_match.get("panel_message_id")
+            if target_ch and panel_msg_id and hasattr(target_ch, "fetch_message"):
+                try:
+                    panel_msg = await target_ch.fetch_message(panel_msg_id)
+                except Exception as e:
+                    log.debug("Could not fetch panel_msg by ID %s: %s", panel_msg_id, e)
+
+            log.info(
+                "SoloMapVoteView._finalize for match #%s: target_ch=%s panel_msg_id=%s panel_msg=%s final_map=%s",
+                current_match.get("id"), target_ch, panel_msg_id, panel_msg, final_map,
             )
-            if not updated_match:
-                updated_match = dict(current_match)
+
+            c1_id = current_match["captain1_id"]
+            c2_id = current_match["captain2_id"]
+            avail_ids = list(current_match.get("available_player_ids", []))
+
+            # Ensure all player data is loaded for display
+            all_match_pids = list(dict.fromkeys(
+                current_match.get("team1_player_ids", [])
+                + current_match.get("team2_player_ids", [])
+                + avail_ids
+                + [c1_id, c2_id]
+            ))
+            try:
+                fetched = await db.get_players_bulk([pid for pid in all_match_pids if pid])
+                for p in fetched:
+                    self.players_by_id[p["discord_id"]] = p
+            except Exception as e:
+                log.debug("SoloMapVoteView._finalize: could not fetch players bulk: %s", e)
+
+            # If drafting is still needed (SNAKE or ALTERNATING with available players)
+            if draft_mode in ("SNAKE", "ALTERNATING") and len(avail_ids) > 0:
+                await db.update_solo_match_map_veto(
+                    match_id=current_match["id"],
+                    available_maps=[],
+                    banned_maps=banned,
+                    selected_map=final_map,
+                    current_turn_captain_id=c1_id,
+                    status="DRAFTING",
+                )
+                updated_match = await db.update_solo_match_draft(
+                    match_id=current_match["id"],
+                    team1_player_ids=current_match.get("team1_player_ids", [c1_id]),
+                    team2_player_ids=current_match.get("team2_player_ids", [c2_id]),
+                    available_player_ids=avail_ids,
+                    current_turn_captain_id=c1_id,
+                    draft_step=1,
+                    status="DRAFTING",
+                )
+                if not updated_match:
+                    updated_match = dict(current_match)
+                    updated_match["status"] = "DRAFTING"
+                    updated_match["draft_step"] = 1
+                    updated_match["current_turn_captain_id"] = c1_id
                 updated_match["selected_map"] = final_map
-                updated_match["status"] = "IN_PROGRESS"
-            if not updated_match.get("team1_player_ids"):
-                updated_match["team1_player_ids"] = current_match.get("team1_player_ids", [])
-            if not updated_match.get("team2_player_ids"):
-                updated_match["team2_player_ids"] = current_match.get("team2_player_ids", [])
 
-            # Build the final Match Ready embed with teams and map name
-            embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
+                avail_player_dicts = [self.players_by_id[pid] for pid in avail_ids if pid in self.players_by_id]
+                draft_embed = build_solo_draft_embed(updated_match, self.players_by_id, colour=colour)
+                draft_view = SoloDraftView(
+                    updated_match,
+                    avail_player_dicts,
+                    players_by_id=self.players_by_id,
+                    colour=colour,
+                    draft_mode=draft_mode,
+                )
 
-            # Transition panel message in-place to the Match Ready embed
-            edited_panel = False
-            if interaction and not interaction.is_expired():
-                try:
-                    if not interaction.response.is_done():
-                        await interaction.response.edit_message(content=None, embed=embed, view=None)
-                        edited_panel = True
-                    else:
-                        await interaction.edit_original_response(content=None, embed=embed, view=None)
-                        edited_panel = True
-                except Exception as e:
-                    log.debug("Could not edit via interaction in SoloMapVoteView: %s", e)
+                if panel_msg:
+                    try:
+                        await panel_msg.edit(content=None, embed=draft_embed, view=draft_view)
+                        log.info("SoloMapVoteView._finalize: edited panel to draft embed")
+                    except Exception as e:
+                        log.debug("Failed to edit panel to draft: %s", e)
+                elif target_ch and hasattr(target_ch, "send"):
+                    new_msg = await target_ch.send(embed=draft_embed, view=draft_view)
+                    await db.update_solo_match_panel(current_match["id"], new_msg.id)
+                    log.info("SoloMapVoteView._finalize: sent new draft panel message (ID: %s)", new_msg.id)
 
-            if not edited_panel and panel_msg:
-                try:
-                    await panel_msg.edit(content=None, embed=embed, view=None)
-                    edited_panel = True
-                except Exception as e:
-                    log.debug("Could not edit panel_msg in SoloMapVoteView: %s", e)
-
-            if not edited_panel and target_ch and hasattr(target_ch, "send"):
-                try:
-                    ready_msg = await target_ch.send(embed=embed)
-                    await db.update_solo_match_panel(current_match["id"], ready_msg.id)
-                    edited_panel = True
-                except Exception as e:
-                    log.error("Failed to send Match Ready embed to channel: %s", e)
-
-            # Announce match ready in channel
-            if target_ch and hasattr(target_ch, "send"):
-                try:
+                if target_ch and hasattr(target_ch, "send"):
                     await target_ch.send(
-                        f"**MATCH READY • MAP: {final_map.upper()}**\n"
-                        f"Captains: <@{c1_id}> and <@{c2_id}>\n"
-                        f"Queue ready on **{final_map}**. Use `/submit-result` when done."
+                        f"**MAP SELECTED: {final_map.upper()} • DRAFT COMMENCING**\n"
+                        f"Captains: <@{c1_id}> and <@{c2_id}>.\n"
+                        f"<@{c1_id}> Please make the first draft pick below."
                     )
-                except Exception as e:
-                    log.error("Failed to send ready announcement: %s", e)
+            else:
+                updated_match = await db.update_solo_match_map_veto(
+                    match_id=current_match["id"],
+                    available_maps=[],
+                    banned_maps=banned,
+                    selected_map=final_map,
+                    current_turn_captain_id=None,
+                    status="IN_PROGRESS",
+                )
+                if not updated_match:
+                    updated_match = dict(current_match)
+                    updated_match["selected_map"] = final_map
+                    updated_match["status"] = "IN_PROGRESS"
+                if not updated_match.get("team1_player_ids"):
+                    updated_match["team1_player_ids"] = current_match.get("team1_player_ids", [])
+                if not updated_match.get("team2_player_ids"):
+                    updated_match["team2_player_ids"] = current_match.get("team2_player_ids", [])
+
+                log.info(
+                    "SoloMapVoteView._finalize match #%s: updated to IN_PROGRESS. T1=%s, T2=%s",
+                    current_match["id"], updated_match.get("team1_player_ids"), updated_match.get("team2_player_ids"),
+                )
+
+                # Build the final Match Ready embed with teams and map name
+                embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
+
+                # Transition panel message in-place to the Match Ready embed
+                edited_panel = False
+                if interaction and not interaction.is_expired():
+                    try:
+                        if not interaction.response.is_done():
+                            await interaction.response.edit_message(content=None, embed=embed, view=None)
+                            edited_panel = True
+                            log.info("SoloMapVoteView._finalize: transitioned message via interaction response")
+                        else:
+                            await interaction.edit_original_response(content=None, embed=embed, view=None)
+                            edited_panel = True
+                            log.info("SoloMapVoteView._finalize: transitioned message via interaction original_response")
+                    except Exception as e:
+                        log.debug("Could not edit via interaction in SoloMapVoteView: %s", e)
+
+                if not edited_panel and panel_msg:
+                    try:
+                        await panel_msg.edit(content=None, embed=embed, view=None)
+                        edited_panel = True
+                        log.info("SoloMapVoteView._finalize: transitioned panel_msg (ID: %s) in-place to Match Ready", panel_msg.id)
+                    except Exception as e:
+                        log.warning("Could not edit panel_msg (ID: %s) in SoloMapVoteView: %s", getattr(panel_msg, "id", None), e)
+
+                if not edited_panel and target_ch and hasattr(target_ch, "send"):
+                    try:
+                        ready_msg = await target_ch.send(embed=embed)
+                        await db.update_solo_match_panel(current_match["id"], ready_msg.id)
+                        edited_panel = True
+                        log.info("SoloMapVoteView._finalize: sent new Match Ready embed to target_ch (ID: %s)", ready_msg.id)
+                    except Exception as e:
+                        log.error("Failed to send Match Ready embed to channel: %s", e)
+
+                log.info("SoloMapVoteView._finalize: panel transition done, edited_panel=%s", edited_panel)
+
+                # Announce match ready in channel
+                if target_ch and hasattr(target_ch, "send"):
+                    try:
+                        await target_ch.send(
+                            f"**MATCH READY • MAP: {final_map.upper()}**\n"
+                            f"Captains: <@{c1_id}> and <@{c2_id}>\n"
+                            f"Queue ready on **{final_map}**. Use `/submit-result` when done."
+                        )
+                        log.info("SoloMapVoteView._finalize: sent ready announcement text to channel")
+                    except Exception as e:
+                        log.error("Failed to send ready announcement: %s", e)
+
+            log.info("SoloMapVoteView._finalize: finished successfully for match #%s", self.match.get("id"))
+        except Exception as e:
+            log.exception("CRITICAL ERROR in SoloMapVoteView._finalize for match #%s: %s", self.match.get("id"), e)
 
 
 class MatchResultVoteView(discord.ui.View):
