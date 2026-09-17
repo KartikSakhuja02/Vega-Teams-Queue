@@ -24,6 +24,7 @@ import io
 import logging
 import os
 import random
+import re
 import time
 from typing import Callable, Optional
 
@@ -104,6 +105,46 @@ CONFIG_KEY_SCORING_MODE = "solo_scoring_mode"
 CONFIG_KEY_RESULTS_CHANNEL_ID = "solo_results_channel_id"
 CONFIG_KEY_MAP_POOL = "solo_map_pool"
 CONFIG_KEY_THEME = "solo_embed_colour"
+CONFIG_KEY_QUEUE_PAUSED = "solo_queue_paused"
+CONFIG_KEY_QUEUE_PAUSE_UNTIL = "solo_queue_pause_until"
+
+
+def parse_duration_string(s: str) -> Optional[int]:
+    """Parse duration string like '30m', '1h', '2h30m', '45s', '1d', or raw minutes into seconds."""
+    s = s.strip().lower()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s) * 60
+
+    total_seconds = 0
+    pattern = re.compile(r"(\d+)\s*([dhms])")
+    matches = pattern.findall(s)
+    if not matches:
+        m = re.match(r"^(\d+)\s*(mins?|minutes?|hours?|hrs?|sec|seconds?|days?)?$", s)
+        if m:
+            num = int(m.group(1))
+            unit = (m.group(2) or "m").lower()
+            if "d" in unit:
+                return num * 86400
+            elif "h" in unit:
+                return num * 3600
+            elif "s" in unit:
+                return num
+            else:
+                return num * 60
+        return None
+
+    unit_multipliers = {
+        "d": 86400,
+        "h": 3600,
+        "m": 60,
+        "s": 1,
+    }
+    for val, unit in matches:
+        total_seconds += int(val) * unit_multipliers.get(unit, 60)
+
+    return total_seconds if total_seconds > 0 else None
 
 RESULTS_CHANNEL_ID: int = int(os.environ.get("RESULTS_CHANNEL_ID", os.environ.get("SOLO_RESULTS_CHANNEL_ID", "0")))
 
@@ -394,14 +435,28 @@ def get_draft_active_captain_id(
 def build_solo_queue_embed(
     queued_players: list[dict],
     colour: Optional[discord.Colour] = None,
+    is_paused: bool = False,
+    pause_until: Optional[float] = None,
 ) -> discord.Embed:
     """Queue panel embed with numbered player list, ELO, region, and join time."""
     count = len(queued_players)
 
+    if is_paused:
+        if pause_until:
+            desc = f"`[ {count} / 10 ]`\n\n**Queue Paused** — Reopens <t:{int(pause_until)}:R>"
+        else:
+            desc = f"`[ {count} / 10 ]`\n\n**Queue Paused** — Closed indefinitely by staff"
+        embed_col = discord.Colour(0xE74C3C)
+        title_text = "VEGA QUEUE [PAUSED]"
+    else:
+        desc = f"`[ {count} / 10 ]`"
+        embed_col = colour or EMBED_COLOUR
+        title_text = "VEGA QUEUE"
+
     embed = discord.Embed(
-        title="VEGA QUEUE",
-        description=f"`[ {count} / 10 ]`",
-        colour=colour or EMBED_COLOUR,
+        title=title_text,
+        description=desc,
+        colour=embed_col,
     )
 
     if queued_players:
@@ -766,9 +821,11 @@ class SoloQueueView(discord.ui.View):
     Button labels strictly: 'Join Queue' and 'Leave Queue'.
     """
 
-    def __init__(self, cog: Optional[SoloQueueCog] = None) -> None:
+    def __init__(self, cog: Optional[SoloQueueCog] = None, is_paused: bool = False) -> None:
         super().__init__(timeout=None)
         self.cog = cog
+        if is_paused:
+            self.join_queue_button.disabled = True
 
     def _resolve_cog(self, interaction: discord.Interaction) -> Optional[SoloQueueCog]:
         if self.cog is not None:
@@ -2102,8 +2159,50 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         self._refresh_lock: asyncio.Lock = asyncio.Lock()
         self._match_lock: asyncio.Lock = asyncio.Lock()
         self._refresh_task: Optional[asyncio.Task] = None
+        self._auto_resume_task: Optional[asyncio.Task] = None
         # Cache panel message ID in memory to avoid a DB round-trip on every refresh
         self._panel_message_id: Optional[int] = None
+
+    async def is_queue_paused(self) -> tuple[bool, Optional[float]]:
+        """Check if the queue is paused. Returns (is_paused, pause_until_timestamp)."""
+        paused_val = await db.get_config(CONFIG_KEY_QUEUE_PAUSED)
+        if paused_val != "1":
+            return False, None
+
+        until_val = await db.get_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL)
+        if until_val and until_val != "0":
+            try:
+                until_ts = float(until_val)
+                if time.time() >= until_ts:
+                    # Timer expired! Automatically unpause
+                    await db.set_config(CONFIG_KEY_QUEUE_PAUSED, "0")
+                    await db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0")
+                    self._schedule_queue_panel_refresh()
+                    return False, None
+                return True, until_ts
+            except ValueError:
+                pass
+
+        return True, None
+
+    def _schedule_auto_resume(self, seconds: float) -> None:
+        """Schedule an automatic queue resume after `seconds`."""
+        if self._auto_resume_task and not self._auto_resume_task.done():
+            self._auto_resume_task.cancel()
+
+        async def _sleeper():
+            try:
+                await asyncio.sleep(seconds)
+                await db.set_config(CONFIG_KEY_QUEUE_PAUSED, "0")
+                await db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0")
+                await self.refresh_queue_message()
+                log.info("Solo queue automatically resumed after timer expired.")
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.error("Error in auto-resume task: %s", e)
+
+        self._auto_resume_task = asyncio.create_task(_sleeper())
 
     def _schedule_queue_panel_refresh(self, delay: float = 0.5) -> None:
         """Schedule a debounced refresh of the queue panel to minimize Discord API latency."""
@@ -2125,6 +2224,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         if self._queue_message_posted:
             return
         self._queue_message_posted = True
+        is_paused, pause_until = await self.is_queue_paused()
+        if is_paused and pause_until:
+            rem = pause_until - time.time()
+            if rem > 0:
+                self._schedule_auto_resume(rem)
         await self.refresh_queue_message()
 
     async def _get_channel(self) -> Optional[discord.TextChannel]:
@@ -2159,8 +2263,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 log.error("Failed to query solo queue from database: %s", e)
                 return
 
-            embed = build_solo_queue_embed(queued_players)
-            view = SoloQueueView(self)
+            is_paused, pause_until = await self.is_queue_paused()
+            embed = build_solo_queue_embed(queued_players, is_paused=is_paused, pause_until=pause_until)
+            view = SoloQueueView(self, is_paused=is_paused)
 
             # Fast-path: use in-memory cached ID (avoids DB round-trip)
             panel_id = self._panel_message_id
@@ -2201,6 +2306,20 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     async def handle_join_queue(self, interaction: discord.Interaction) -> None:
         """Handle player joining 10-man solo queue — fully optimised for instant response."""
         await interaction.response.defer(ephemeral=True)
+
+        is_paused, pause_until = await self.is_queue_paused()
+        if is_paused:
+            if pause_until:
+                await interaction.followup.send(
+                    f"The queue is currently paused by staff. It will reopen <t:{int(pause_until)}:R>.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "The queue is currently stopped by staff.",
+                    ephemeral=True,
+                )
+            return
 
         user_id = interaction.user.id
 
@@ -2889,6 +3008,15 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     async def solo_config_clear_cmd(self, interaction: discord.Interaction) -> None:
         await self._handle_clear_solo_queue(interaction)
 
+    @solo_config.command(name="stop", description="Stop/pause the queue (optional duration like 30m, 1h).")
+    @app_commands.describe(timing="Optional duration (e.g., 30m, 1h, 2h, 45m). Leave blank to stop indefinitely.")
+    async def solo_config_stop_cmd(self, interaction: discord.Interaction, timing: Optional[str] = None) -> None:
+        await self._handle_stop_queue(interaction, timing)
+
+    @solo_config.command(name="start", description="Resume/start the queue so players can join again.")
+    async def solo_config_start_cmd(self, interaction: discord.Interaction) -> None:
+        await self._handle_start_queue(interaction)
+
     async def _handle_clear_solo_queue(self, interaction: discord.Interaction) -> None:
         """Internal helper to clear the 10-man solo queue and reset player statuses."""
         await interaction.response.defer(ephemeral=True)
@@ -2980,6 +3108,200 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         await self.refresh_queue_message()
         await interaction.followup.send("10-Man solo queue panel refreshed.", ephemeral=True)
+
+    # ── /stop-queue and /start-queue ──────────────────────────────────────────
+
+    @app_commands.command(
+        name="stop-queue",
+        description="Stop/pause the queue. Provide optional timing (e.g. 30m, 1h) or leave blank for indefinite.",
+    )
+    @app_commands.describe(
+        timing="Optional pause duration (e.g., 30m, 1h, 2h, 45m). Leave blank to stop indefinitely."
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def stop_queue_hyphen_cmd(
+        self,
+        interaction: discord.Interaction,
+        timing: Optional[str] = None,
+    ) -> None:
+        """Stop or pause the queue (hyphen version)."""
+        await self._handle_stop_queue(interaction, timing)
+
+    @app_commands.command(
+        name="stop_queue",
+        description="Stop/pause the queue. Provide optional timing (e.g. 30m, 1h) or leave blank for indefinite.",
+    )
+    @app_commands.describe(
+        timing="Optional pause duration (e.g., 30m, 1h, 2h, 45m). Leave blank to stop indefinitely."
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def stop_queue_underscore_cmd(
+        self,
+        interaction: discord.Interaction,
+        timing: Optional[str] = None,
+    ) -> None:
+        """Stop or pause the queue (underscore version)."""
+        await self._handle_stop_queue(interaction, timing)
+
+    @app_commands.command(
+        name="start-queue",
+        description="Resume/start the queue so players can join again.",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def start_queue_hyphen_cmd(self, interaction: discord.Interaction) -> None:
+        """Resume the queue (hyphen version)."""
+        await self._handle_start_queue(interaction)
+
+    @app_commands.command(
+        name="start_queue",
+        description="Resume/start the queue so players can join again.",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def start_queue_underscore_cmd(self, interaction: discord.Interaction) -> None:
+        """Resume the queue (underscore version)."""
+        await self._handle_start_queue(interaction)
+
+    async def _handle_stop_queue(
+        self,
+        interaction: discord.Interaction,
+        timing: Optional[str] = None,
+    ) -> None:
+        """Handle stopping or pausing the queue."""
+        await interaction.response.defer(ephemeral=True)
+
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send(
+                "You do not have staff/admin permissions to stop the queue.",
+                ephemeral=True,
+            )
+            return
+
+        if timing:
+            seconds = parse_duration_string(timing)
+            if not seconds or seconds <= 0:
+                await interaction.followup.send(
+                    f"Invalid duration format: `{timing}`. Examples: `30m`, `1h`, `2h30m`, `45s`, `1d`, or raw minutes like `15`.",
+                    ephemeral=True,
+                )
+                return
+
+            pause_until = time.time() + seconds
+            await db.set_config(CONFIG_KEY_QUEUE_PAUSED, "1")
+            await db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, str(pause_until))
+            self._schedule_auto_resume(seconds)
+            await self.refresh_queue_message()
+
+            until_int = int(pause_until)
+            log.info(
+                "Staff %s (%d) stopped the queue for %s (resumes at %d).",
+                interaction.user.name,
+                interaction.user.id,
+                timing,
+                until_int,
+            )
+
+            try:
+                await send_log(
+                    self.bot,
+                    title="Queue Stopped (Timed)",
+                    description=f"{interaction.user.mention} stopped the queue for **{timing}**.\nReopens automatically <t:{until_int}:R> (<t:{until_int}:f>).",
+                    colour=COL_WARNING,
+                    fields=[
+                        ("Staff", f"{interaction.user.mention} (`{interaction.user.id}`)", True),
+                        ("Duration", timing, True),
+                        ("Reopens", f"<t:{until_int}:R>", True),
+                    ],
+                    guild_id=interaction.guild_id,
+                )
+            except Exception as e:
+                log.debug("Failed to send stop queue log: %s", e)
+
+            await interaction.followup.send(
+                f"Queue stopped for **{timing}**. It will automatically reopen <t:{until_int}:R>.",
+                ephemeral=True,
+            )
+        else:
+            # Indefinite stop
+            if self._auto_resume_task and not self._auto_resume_task.done():
+                self._auto_resume_task.cancel()
+
+            await db.set_config(CONFIG_KEY_QUEUE_PAUSED, "1")
+            await db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0")
+            await self.refresh_queue_message()
+
+            log.info(
+                "Staff %s (%d) stopped the queue indefinitely.",
+                interaction.user.name,
+                interaction.user.id,
+            )
+
+            try:
+                await send_log(
+                    self.bot,
+                    title="Queue Stopped (Indefinite)",
+                    description=f"{interaction.user.mention} stopped the queue indefinitely.\nUse `/start-queue` to reopen.",
+                    colour=COL_WARNING,
+                    fields=[
+                        ("Staff", f"{interaction.user.mention} (`{interaction.user.id}`)", True),
+                        ("Duration", "Indefinite", True),
+                    ],
+                    guild_id=interaction.guild_id,
+                )
+            except Exception as e:
+                log.debug("Failed to send stop queue log: %s", e)
+
+            await interaction.followup.send(
+                "Queue has been stopped indefinitely. Nobody can join until staff uses `/start-queue`.",
+                ephemeral=True,
+            )
+
+    async def _handle_start_queue(self, interaction: discord.Interaction) -> None:
+        """Handle resuming/starting the queue."""
+        await interaction.response.defer(ephemeral=True)
+
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send(
+                "You do not have staff/admin permissions to start the queue.",
+                ephemeral=True,
+            )
+            return
+
+        is_paused, _ = await self.is_queue_paused()
+        if not is_paused:
+            await interaction.followup.send("The queue is already running and open!", ephemeral=True)
+            return
+
+        if self._auto_resume_task and not self._auto_resume_task.done():
+            self._auto_resume_task.cancel()
+
+        await db.set_config(CONFIG_KEY_QUEUE_PAUSED, "0")
+        await db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0")
+        await self.refresh_queue_message()
+
+        log.info(
+            "Staff %s (%d) resumed the queue.",
+            interaction.user.name,
+            interaction.user.id,
+        )
+
+        try:
+            await send_log(
+                self.bot,
+                title="Queue Resumed",
+                description=f"{interaction.user.mention} resumed the queue. Players can now join.",
+                colour=discord.Colour.green(),
+                fields=[
+                    ("Staff", f"{interaction.user.mention} (`{interaction.user.id}`)", True),
+                ],
+                guild_id=interaction.guild_id,
+            )
+        except Exception as e:
+            log.debug("Failed to send start queue log: %s", e)
+
+        await interaction.followup.send(
+            "Queue has been resumed! Players can now join via the panel.",
+            ephemeral=True,
+        )
 
     # ── /submit-result ────────────────────────────────────────────────────────
 
