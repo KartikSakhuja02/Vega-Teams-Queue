@@ -61,11 +61,10 @@ def clean_mvp_tags(name: str) -> tuple[str, bool, Optional[str]]:
 def resolve_match_mvps(result: MatchOCRResult) -> MatchOCRResult:
     """
     Resolve and validate MVP designations across both teams:
-    - Photo 1 ('敌方-最佳'): Enemy Team MVP (Team 2).
-    - Photo 2 ('我方-最佳'): Our Team MVP (Team 1).
-    - Between the two team MVPs, the one with the highest ACS
-      is designated as the overall Match MVP ('Match MVP').
-    - The opposing team's MVP is labeled 'Team MVP' (Team 1) or 'Enemy MVP' (Team 2).
+    1. Highest ACS player across the entire match is ALWAYS designated Match MVP.
+    2. Team 1 MVP is identified by '我方-最佳' / '我方最佳' (or top ACS on Team 1).
+    3. Team 2 MVP is identified by '敌方-最佳' / '敌方最佳' (or top ACS on Team 2).
+    4. Both Team MVPs and Match MVP have is_mvp = True so their MVP count increments in stats.
     """
     if not result or not result.success:
         return result
@@ -91,46 +90,46 @@ def resolve_match_mvps(result: MatchOCRResult) -> MatchOCRResult:
             p.is_mvp = True
             p.mvp_type = detected_type or "Enemy MVP"
 
-    # 2. Normalize by team
-    # Team 1 is Our Team (我方)
-    # Team 2 is Enemy Team (敌方)
-    t1_mvps = [p for p in team1_players if p.is_mvp]
-    t2_mvps = [p for p in team2_players if p.is_mvp]
-
-    if len(t1_mvps) > 1:
-        t1_mvps.sort(key=lambda x: (x.acs, x.kills), reverse=True)
-        for p in t1_mvps[1:]:
-            p.is_mvp = False
-            p.mvp_type = None
-        t1_mvps = [t1_mvps[0]]
-
-    if len(t2_mvps) > 1:
-        t2_mvps.sort(key=lambda x: (x.acs, x.kills), reverse=True)
-        for p in t2_mvps[1:]:
-            p.is_mvp = False
-            p.mvp_type = None
-        t2_mvps = [t2_mvps[0]]
-
-    t1_mvp = t1_mvps[0] if t1_mvps else None
-    t2_mvp = t2_mvps[0] if t2_mvps else None
-
-    # 3. Designate Match MVP
-    if t1_mvp and t2_mvp:
-        if t1_mvp.acs >= t2_mvp.acs:
-            t1_mvp.mvp_type = "Match MVP"
-            t2_mvp.mvp_type = "Enemy MVP"
-        else:
-            t2_mvp.mvp_type = "Match MVP"
-            t1_mvp.mvp_type = "Team MVP"
-    elif t1_mvp:
-        t1_mvp.mvp_type = "Match MVP"
-    elif t2_mvp:
-        t2_mvp.mvp_type = "Match MVP"
+    # 2. Identify Team 1 MVP (look for tag first, else top ACS on team 1)
+    t1_tagged = [p for p in team1_players if p.is_mvp]
+    if t1_tagged:
+        t1_mvp = max(t1_tagged, key=lambda x: (x.acs, x.kills))
+    elif team1_players:
+        t1_mvp = max(team1_players, key=lambda x: (x.acs, x.kills))
     else:
-        # If OCR missed both tags completely, assign Match MVP to top ACS player
-        top_player = max(all_players, key=lambda x: (x.acs, x.kills))
-        top_player.is_mvp = True
-        top_player.mvp_type = "Match MVP"
+        t1_mvp = None
+
+    for p in team1_players:
+        if p != t1_mvp:
+            p.is_mvp = False
+            p.mvp_type = None
+
+    # 3. Identify Team 2 MVP (look for tag first, else top ACS on team 2)
+    t2_tagged = [p for p in team2_players if p.is_mvp]
+    if t2_tagged:
+        t2_mvp = max(t2_tagged, key=lambda x: (x.acs, x.kills))
+    elif team2_players:
+        t2_mvp = max(team2_players, key=lambda x: (x.acs, x.kills))
+    else:
+        t2_mvp = None
+
+    for p in team2_players:
+        if p != t2_mvp:
+            p.is_mvp = False
+            p.mvp_type = None
+
+    # 4. Highest ACS player across all 10 players is ALWAYS Match MVP
+    overall_top = max(all_players, key=lambda x: (x.acs, x.kills))
+
+    if t1_mvp:
+        t1_mvp.is_mvp = True
+        t1_mvp.mvp_type = "Team MVP"
+    if t2_mvp:
+        t2_mvp.is_mvp = True
+        t2_mvp.mvp_type = "Enemy MVP"
+
+    overall_top.is_mvp = True
+    overall_top.mvp_type = "Match MVP"
 
     return result
 

@@ -1510,6 +1510,36 @@ class AdminCog(commands.Cog, name="Admin"):
         await self._handle_test_ss_ocr(interaction, image)
 
     @app_commands.command(
+        name="test-ocr",
+        description="Test scoreboard OCR parsing on a match end-screen screenshot.",
+    )
+    @app_commands.describe(
+        image="The match scoreboard screenshot image attachment (PNG/JPG/WEBP)."
+    )
+    async def test_ocr_hyphen(
+        self,
+        interaction: discord.Interaction,
+        image: discord.Attachment,
+    ) -> None:
+        """Test OCR extraction on an uploaded match screenshot (/test-ocr)."""
+        await self._handle_test_ss_ocr(interaction, image)
+
+    @app_commands.command(
+        name="test_ocr",
+        description="Test scoreboard OCR parsing on a match end-screen screenshot.",
+    )
+    @app_commands.describe(
+        image="The match scoreboard screenshot image attachment (PNG/JPG/WEBP)."
+    )
+    async def test_ocr_underscore(
+        self,
+        interaction: discord.Interaction,
+        image: discord.Attachment,
+    ) -> None:
+        """Test OCR extraction on an uploaded match screenshot (/test_ocr)."""
+        await self._handle_test_ss_ocr(interaction, image)
+
+    @app_commands.command(
         name="test-ss-ocr",
         description="Test scoreboard OCR parsing on a match end-screen screenshot.",
     )
@@ -1607,24 +1637,31 @@ class AdminCog(commands.Cog, name="Admin"):
             meta_parts.append(f"📅 {result.match_date}")
         meta_str = f" • {' • '.join(meta_parts)}" if meta_parts else ""
 
-        # Extract MVP info for header summary
+        # Extract MVP info for header summary:
+        # 1. Match MVP is the player with the highest ACS across the entire match
         all_p = result.team1_players + result.team2_players
-        m_mvp = next((p for p in all_p if p.is_mvp and p.mvp_type == "Match MVP"), None)
-        if not m_mvp and all_p:
-            mvp_cands = [p for p in all_p if p.is_mvp]
-            if mvp_cands:
-                m_mvp = max(mvp_cands, key=lambda x: (x.acs, x.kills))
+        m_mvp = max(all_p, key=lambda x: (x.acs, x.kills)) if all_p else None
 
+        # 2. Team 1 MVP (我方-最佳)
         t1_mvp = next((p for p in result.team1_players if p.is_mvp), None)
+        if not t1_mvp and result.team1_players:
+            t1_mvp = max(result.team1_players, key=lambda x: (x.acs, x.kills))
+
+        # 3. Team 2 MVP (敌方-最佳)
         t2_mvp = next((p for p in result.team2_players if p.is_mvp), None)
+        if not t2_mvp and result.team2_players:
+            t2_mvp = max(result.team2_players, key=lambda x: (x.acs, x.kills))
 
         mvp_lines = []
         if m_mvp:
-            mvp_lines.append(f"👑 **Match MVP:** **{m_mvp.ign}** (`{m_mvp.acs} ACS` • `{m_mvp.kills}/{m_mvp.deaths}/{m_mvp.assists}`)")
-        if t1_mvp and t1_mvp != m_mvp:
-            mvp_lines.append(f"⭐ **Team 1 MVP (我方最佳):** **{t1_mvp.ign}** (`{t1_mvp.acs} ACS`)")
-        if t2_mvp and t2_mvp != m_mvp:
-            mvp_lines.append(f"⭐ **Team 2 MVP (敌方最佳):** **{t2_mvp.ign}** (`{t2_mvp.acs} ACS`)")
+            m_team = "Team 1" if m_mvp in result.team1_players else "Team 2"
+            mvp_lines.append(f"👑 **Match MVP:** **{m_mvp.ign}** ({m_team} • `{m_mvp.acs} ACS` • `{m_mvp.kills}/{m_mvp.deaths}/{m_mvp.assists}`)")
+        if t1_mvp:
+            t1_extra = " *(Match MVP)*" if t1_mvp == m_mvp else ""
+            mvp_lines.append(f"⭐ **Team 1 MVP (我方最佳):** **{t1_mvp.ign}** (`{t1_mvp.acs} ACS`){t1_extra}")
+        if t2_mvp:
+            t2_extra = " *(Match MVP)*" if t2_mvp == m_mvp else ""
+            mvp_lines.append(f"⭐ **Team 2 MVP (敌方最佳):** **{t2_mvp.ign}** (`{t2_mvp.acs} ACS`){t2_extra}")
 
         mvp_desc = ("\n" + "\n".join(mvp_lines)) if mvp_lines else ""
 

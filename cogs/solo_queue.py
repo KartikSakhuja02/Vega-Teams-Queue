@@ -3595,20 +3595,43 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 "stats_obj": stats,
             })
 
-        # Safeguard: if no overall match MVP was identified by tag, choose top performer
-        if not overall_mvp_pid and player_updates:
-            mvp_candidates = [u for u in player_updates if u.get("is_mvp")]
-            if not mvp_candidates:
-                mvp_candidates = player_updates
-            top_mvp = max(
-                mvp_candidates,
-                key=lambda x: (
-                    x.get("stats_obj").acs if x.get("stats_obj") else 0,
-                    x.get("kills", 0),
-                ),
-            )
-            overall_mvp_pid = top_mvp["discord_id"]
-            top_mvp["is_mvp"] = True
+        # 1. Determine Match MVP: Highest ACS player across all 10 players is ALWAYS Match MVP
+        overall_top_u = max(
+            player_updates,
+            key=lambda x: (
+                x.get("stats_obj").acs if x.get("stats_obj") else 0,
+                x.get("kills", 0),
+            ),
+        ) if player_updates else None
+        overall_mvp_pid = overall_top_u["discord_id"] if overall_top_u else None
+
+        # 2. Determine Team 1 MVP (identified by 我方-最佳 or top ACS on Team 1)
+        t1_updates = [u for u in player_updates if u["discord_id"] in t1_pids]
+        t1_tagged = [u for u in t1_updates if u.get("stats_obj") and u.get("stats_obj").is_mvp]
+        if t1_tagged:
+            t1_mvp_u = max(t1_tagged, key=lambda x: (x.get("stats_obj").acs if x.get("stats_obj") else 0, x.get("kills", 0)))
+        elif t1_updates:
+            t1_mvp_u = max(t1_updates, key=lambda x: (x.get("stats_obj").acs if x.get("stats_obj") else 0, x.get("kills", 0)))
+        else:
+            t1_mvp_u = None
+        t1_mvp_pid = t1_mvp_u["discord_id"] if t1_mvp_u else None
+
+        # 3. Determine Team 2 MVP (identified by 敌方-最佳 or top ACS on Team 2)
+        t2_updates = [u for u in player_updates if u["discord_id"] in t2_pids]
+        t2_tagged = [u for u in t2_updates if u.get("stats_obj") and u.get("stats_obj").is_mvp]
+        if t2_tagged:
+            t2_mvp_u = max(t2_tagged, key=lambda x: (x.get("stats_obj").acs if x.get("stats_obj") else 0, x.get("kills", 0)))
+        elif t2_updates:
+            t2_mvp_u = max(t2_updates, key=lambda x: (x.get("stats_obj").acs if x.get("stats_obj") else 0, x.get("kills", 0)))
+        else:
+            t2_mvp_u = None
+        t2_mvp_pid = t2_mvp_u["discord_id"] if t2_mvp_u else None
+
+        # 4. Mark is_mvp = True for all MVPs (Match MVP and both Team MVPs) so their mvp_count increments in player stats!
+        for u in player_updates:
+            pid = u["discord_id"]
+            if pid in (overall_mvp_pid, t1_mvp_pid, t2_mvp_pid):
+                u["is_mvp"] = True
 
         # 14. Build comprehensive result embed matching the reference UI
         c1_id = match.get("captain1_id")
@@ -3635,17 +3658,14 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 # Rating formula
                 rating = round((k + a * 0.25) / max(1, d), 2)
 
-                stats_obj = u.get("stats_obj")
-                mvp_badge = ""
+                badges = []
                 if pid == overall_mvp_pid:
-                    mvp_badge = " 👑 `Match MVP`"
-                elif u.get("is_mvp") or (stats_obj and stats_obj.is_mvp):
-                    mtype = str((stats_obj.mvp_type if stats_obj else None) or "").lower()
-                    if "enemy" in mtype or (pid in t2_pids and "team" not in mtype):
-                        mvp_badge = " ⭐ `Enemy MVP`"
-                    else:
-                        mvp_badge = " ⭐ `Team MVP`"
+                    badges.append("👑 `Match MVP`")
+                if pid in (t1_mvp_pid, t2_mvp_pid):
+                    if pid != overall_mvp_pid:
+                        badges.append("⭐ `Team MVP`")
 
+                mvp_badge = f" {' '.join(badges)}" if badges else ""
                 lines.append(f"<@{pid}>{mvp_badge}")
                 lines.append(f"└ [{k}/{d}/{a}] {rating:.2f}r {elo_str}")
             return lines
@@ -3660,6 +3680,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         ]
         if overall_mvp_pid:
             desc_parts.append(f"👑 **Match MVP:** <@{overall_mvp_pid}>")
+        if t1_mvp_pid:
+            t1_extra = " *(Match MVP)*" if t1_mvp_pid == overall_mvp_pid else ""
+            desc_parts.append(f"⭐ **{t1_team_name} MVP:** <@{t1_mvp_pid}>{t1_extra}")
+        if t2_mvp_pid:
+            t2_extra = " *(Match MVP)*" if t2_mvp_pid == overall_mvp_pid else ""
+            desc_parts.append(f"⭐ **{t2_team_name} MVP:** <@{t2_mvp_pid}>{t2_extra}")
+
         desc_parts.extend([
             "",
             f"**{t1_team_name}**",
