@@ -115,9 +115,9 @@ def get_emoji_candidate_names(agent_name: Optional[str]) -> list[str]:
 def get_agent_emoji(bot, agent_name: Optional[str], guild=None) -> str:
     """
     Find Discord custom emoji for an agent.
-    Checks guild emojis first (if guild provided), then all bot emojis.
+    Checks guild emojis first (if guild provided).
     Returns '<:Name:ID>' string, or '' if not found.
-    NEVER returns plain text ':agent:' so Discord won't display raw text.
+    NEVER returns external emojis in a guild context that would degrade to ':agent:' raw text.
     """
     if not agent_name or not bot:
         return ""
@@ -139,16 +139,14 @@ def get_agent_emoji(bot, agent_name: Optional[str], guild=None) -> str:
             for cand in candidates:
                 if len(cand) >= 3 and cand in ename:
                     return str(emoji)
+        # If guild was provided and emoji was not found in guild emojis, return ""
+        # DO NOT fall back to external emojis from other servers, because
+        # Discord clients suppress external emojis without Nitro/channel perms,
+        # causing broken literal text like ':cypher:' or ':jett:'.
+        return ""
 
-    # 2. Search in global bot emojis ONLY IF bot has permission to use external emojis
-    can_use_external = False
-    if guild and hasattr(guild, "me") and guild.me:
-        perms = guild.me.guild_permissions
-        can_use_external = getattr(perms, "use_external_emojis", False)
-    elif not guild:
-        can_use_external = True
-
-    if can_use_external and hasattr(bot, "emojis"):
+    # 2. Only if NO guild was provided (e.g. DM), search global bot emojis
+    if hasattr(bot, "emojis"):
         for emoji in bot.emojis:
             ename = emoji.name.lower()
             if ename in candidates:
@@ -202,8 +200,8 @@ def detect_agent_in_row_strip(
     row_strip: np.ndarray,
 ) -> tuple[Optional[str], float]:
     """
-    Detect the agent portrait inside a horizontal row strip.
-    Combines multi-scale normalized cross-correlation with 2D HSV color histogram matching.
+    Detect the agent portrait inside an avatar square strip.
+    Combines normalized cross-correlation with 2D HSV color histogram matching.
     Returns (canonical_agent_name, confidence_score).
     """
     if not _CV2_AVAILABLE or row_strip is None or row_strip.size == 0:
@@ -214,12 +212,10 @@ def detect_agent_in_row_strip(
         return None, 0.0
 
     rh, rw = row_strip.shape[:2]
-    if rh < 12 or rw < 12:
+    if rh < 10 or rw < 10:
         return None, 0.0
 
-    target_size = int(rh * 0.88)
-    if target_size < 12:
-        target_size = rh
+    target_size = min(rh, rw)
 
     scores: list[tuple[float, str]] = []
 
@@ -240,8 +236,8 @@ def detect_agent_in_row_strip(
             else:
                 hist_sim = 0.0
 
-            # 55% structural template match + 45% color palette match
-            combined = 0.55 * max(0.0, float(max_tm)) + 0.45 * max(0.0, hist_sim)
+            # 60% template correlation + 40% color histogram match
+            combined = 0.60 * max(0.0, float(max_tm)) + 0.40 * max(0.0, hist_sim)
             scores.append((combined, name))
         except Exception:
             continue
@@ -254,26 +250,27 @@ def detect_agent_in_row_strip(
     return best_agent, best_score
 
 
-def detect_agents_from_image(img_bgr: np.ndarray) -> list[tuple[Optional[str], float]]:
+def detect_agents_from_image(img_bgr: np.ndarray) -> list[dict]:
     """
-    Detect all 10 players' agents from the full match end-screen screenshot.
-    Returns list of 10 (agent_name, score) tuples.
+    Detect all 10 players' agents and row teams from the match end-screen screenshot.
+    Returns list of 10 dicts: [{'row': r, 'agent': str, 'score': float, 'team': 1|2}, ...].
+    Row team 1 = Green (Team 1), Row team 2 = Red (Team 2).
     """
     if not _CV2_AVAILABLE or img_bgr is None or img_bgr.size == 0:
-        return [(None, 0.0)] * 10
+        return [{"row": r, "agent": None, "score": 0.0, "team": 1 if r < 5 else 2} for r in range(10)]
 
     h, w = img_bgr.shape[:2]
 
     # Calibrated Valorant Mobile scoreboard bounds:
-    # Table rows span ~ 27% to 91% of image height
+    # Table rows span ~ 27% to 91.5% of image height
     y_start = 0.270 * h
     y_end = 0.915 * h
     step = (y_end - y_start) / 10.0
 
-    # Avatar search window: x from 12% to 22% of image width
-    x0, x1 = int(0.120 * w), int(0.225 * w)
+    # Avatar icon horizontal window: 15.0% to 18.6% of image width
+    x0, x1 = int(0.150 * w), int(0.186 * w)
 
-    results: list[tuple[Optional[str], float]] = []
+    results: list[dict] = []
 
     for r in range(10):
         y0 = int(y_start + r * step)
@@ -281,7 +278,21 @@ def detect_agents_from_image(img_bgr: np.ndarray) -> list[tuple[Optional[str], f
         strip = img_bgr[max(0, y0):min(h, y1), max(0, x0):min(w, x1)]
 
         agent_name, score = detect_agent_in_row_strip(strip)
-        results.append((agent_name, score))
+
+        # Detect row team color from table background (greenish = Team 1, reddish = Team 2)
+        sample = img_bgr[max(0, y0 + 4):min(h, y1 - 4), int(0.45 * w):int(0.55 * w)]
+        if sample.size > 0:
+            mean_b, mean_g, mean_r = sample.mean(axis=(0, 1))
+            row_team = 1 if mean_g > mean_r else 2
+        else:
+            row_team = 1 if r < 5 else 2
+
+        results.append({
+            "row": r,
+            "agent": agent_name,
+            "score": score,
+            "team": row_team,
+        })
 
     return results
 
@@ -293,7 +304,9 @@ def resolve_player_agents(
     """
     Resolve agents for all players in MatchOCRResult:
     1. Runs high-precision CV detection if image_bytes is provided.
-    2. Falls back to normalized VLM-extracted agent names if CV score is marginal.
+    2. Maps visual rows 0..9 to players by matching row team background colors
+       and ACS ranks (since scoreboard rows are sorted by ACS descending).
+    3. Falls back to VLM-extracted agent names if CV score is marginal.
     """
     if not result or not result.success:
         return result
@@ -302,7 +315,7 @@ def resolve_player_agents(
     if not all_players:
         return result
 
-    cv_detections: list[tuple[Optional[str], float]] = []
+    cv_detections: list[dict] = []
     if image_bytes and _CV2_AVAILABLE:
         try:
             nparr = np.frombuffer(image_bytes, np.uint8)
@@ -312,20 +325,42 @@ def resolve_player_agents(
         except Exception as exc:
             log.warning("Agent CV detection error: %s", exc)
 
-    for idx, p in enumerate(all_players):
-        cv_agent, cv_score = cv_detections[idx] if idx < len(cv_detections) else (None, 0.0)
-
-        # Clean any existing VLM detection
+    def _apply_agent(p: PlayerRowStats, cv_agent: Optional[str], cv_score: float) -> None:
         vlm_agent = clean_agent_name(p.agent)
-
-        if cv_agent and cv_score >= 0.35:
+        if cv_agent and cv_score >= 0.32:
             p.agent = cv_agent
-            log.debug("Row %d (%s) resolved agent by CV: %s (score=%.3f)", idx, p.ign, cv_agent, cv_score)
+            log.debug("Player %s resolved agent by CV: %s (score=%.3f)", p.ign, cv_agent, cv_score)
         elif vlm_agent:
             p.agent = vlm_agent
-        elif cv_agent and cv_score >= 0.28:
+        elif cv_agent and cv_score >= 0.25:
             p.agent = cv_agent
         else:
             p.agent = vlm_agent or cv_agent
+
+    if cv_detections:
+        t1_rows = [d for d in cv_detections if d.get("team") == 1]
+        t2_rows = [d for d in cv_detections if d.get("team") == 2]
+
+        # Method 1: Row background color match + descending ACS rank within team
+        if len(t1_rows) == len(result.team1_players) and len(t2_rows) == len(result.team2_players):
+            sorted_t1 = sorted(result.team1_players, key=lambda p: (-p.acs, -p.kills, -p.damage))
+            for p, d in zip(sorted_t1, t1_rows):
+                _apply_agent(p, d["agent"], d["score"])
+
+            sorted_t2 = sorted(result.team2_players, key=lambda p: (-p.acs, -p.kills, -p.damage))
+            for p, d in zip(sorted_t2, t2_rows):
+                _apply_agent(p, d["agent"], d["score"])
+
+        else:
+            # Method 2: Global ACS rank across all 10 players (scoreboard is sorted by ACS)
+            sorted_all = sorted(all_players, key=lambda p: (-p.acs, -p.kills, -p.damage))
+            for idx, p in enumerate(sorted_all):
+                if idx < len(cv_detections):
+                    d = cv_detections[idx]
+                    _apply_agent(p, d["agent"], d["score"])
+    else:
+        # Fallback if no CV detection: normalize VLM agent names
+        for p in all_players:
+            p.agent = clean_agent_name(p.agent)
 
     return result

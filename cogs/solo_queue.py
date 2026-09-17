@@ -3669,7 +3669,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 stats_obj = u.get("stats_obj")
                 agent_name = stats_obj.agent if stats_obj else None
                 agent_emoji = get_agent_emoji(self.bot, agent_name, interaction.guild)
-                prefix = f"{agent_emoji} " if agent_emoji else ""
+                prefix = f"{agent_emoji} " if agent_emoji else (f"`[{agent_name}]` " if agent_name else "")
 
                 lines.append(f"{prefix}<@{pid}>{mvp_badge}")
                 lines.append(f"└ [{k}/{d}/{a}] {rating:.2f}r {elo_str}")
