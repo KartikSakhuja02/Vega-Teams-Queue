@@ -1,12 +1,15 @@
 """
 cogs/leaderboard.py
 -------------------
-Interactive leaderboard cog — /leaderboard command to view top players,
-ELO rankings, win rates, and combat statistics with pagination and regional filtering.
+Interactive leaderboard cog — /leaderboard command replicating the NeatQueue UI:
+renders high-definition visual leaderboard cards with player avatars, medals,
+rank movement indicators, pagination buttons, metric/page dropdown menus, and website link.
 """
 
 from __future__ import annotations
 
+import asyncio
+import io
 import logging
 import math
 import os
@@ -15,10 +18,51 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+from PIL import Image
 
 from database import db
+from utils.generate_leaderboard import (
+    render_leaderboard_image,
+    fetch_avatar_image,
+)
 
 log = logging.getLogger(__name__)
+
+# NeatQueue / Vega Embed Colour (Vibrant Red)
+EMBED_COLOUR = discord.Colour(0xE74C3C)
+PAGE_SIZE = 10
+
+REGION_CHOICES = [
+    app_commands.Choice(name="Global / All Regions", value="All"),
+    app_commands.Choice(name="India", value="India"),
+    app_commands.Choice(name="APAC", value="APAC"),
+    app_commands.Choice(name="EMEA", value="EMEA"),
+    app_commands.Choice(name="Americas", value="Americas"),
+]
+
+METRIC_CHOICES = [
+    app_commands.Choice(name="Rating (MMR / ELO)", value="elo"),
+    app_commands.Choice(name="Total Wins", value="wins"),
+    app_commands.Choice(name="Win Rate (%)", value="winrate"),
+    app_commands.Choice(name="K/D Ratio", value="kda"),
+    app_commands.Choice(name="MVP Count", value="mvps"),
+]
+
+METRIC_TITLES = {
+    "elo": "Vega MatchMaking Queue MMR Leaderboard",
+    "wins": "Vega MatchMaking Queue Wins Leaderboard",
+    "winrate": "Vega MatchMaking Queue Win Rate Leaderboard",
+    "kda": "Vega MatchMaking Queue K/D Leaderboard",
+    "mvps": "Vega MatchMaking Queue MVP Leaderboard",
+}
+
+METRIC_LABELS = {
+    "elo": "MMR",
+    "wins": "Wins",
+    "winrate": "Win Rate",
+    "kda": "K/D Ratio",
+    "mvps": "MVPs",
+}
 
 
 def _is_admin(member: discord.Member) -> bool:
@@ -61,213 +105,326 @@ class ClearLeaderboardConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="Cancelled. No changes were made.", embed=None, view=None)
 
 
-EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
-PAGE_SIZE = 10
-
-REGION_CHOICES = [
-    app_commands.Choice(name="Global / All Regions", value="All"),
-    app_commands.Choice(name="India", value="India"),
-    app_commands.Choice(name="APAC", value="APAC"),
-    app_commands.Choice(name="EMEA", value="EMEA"),
-    app_commands.Choice(name="Americas", value="Americas"),
-]
-
-METRIC_CHOICES = [
-    app_commands.Choice(name="Rating (ELO)", value="elo"),
-    app_commands.Choice(name="Total Wins", value="wins"),
-    app_commands.Choice(name="K/D Ratio", value="kda"),
-    app_commands.Choice(name="MVP Count", value="mvps"),
-]
-
-METRIC_LABELS = {
-    "elo": "ELO Rating",
-    "wins": "Total Wins",
-    "kda": "K/D Ratio",
-    "mvps": "MVP Count",
-}
-
-
-def build_leaderboard_embed(
-    players: list[dict],
-    page: int,
-    total_pages: int,
-    total_count: int,
-    region: str,
-    metric: str,
-    caller_rank: Optional[dict] = None,
-) -> discord.Embed:
-    """Construct a clean, rich embed displaying a single leaderboard page."""
-    region_label = "Global (All Regions)" if region in ("All", None) else region
-    metric_label = METRIC_LABELS.get(metric, "ELO Rating")
-
-    desc_header = (
-        f"**Region:** `{region_label}` • **Sorted by:** `{metric_label}`\n"
-        f"**Total Registered Players:** `{total_count}`\n"
-        "────────────────────────────────────────"
-    )
-
-    if not players:
-        body = "\n\n*No active players found for this region/metric filter.*"
-    else:
-        lines: list[str] = []
-        for p in players:
-            rank = p.get("rank_num", 0)
-            if rank == 1:
-                medal = "🥇"
-            elif rank == 2:
-                medal = "🥈"
-            elif rank == 3:
-                medal = "🥉"
-            else:
-                medal = f"`#{rank}`"
-
-            ign = p.get("ign") or p.get("discord_username") or "Player"
-            pid = p.get("discord_id")
-            elo = p.get("elo", 1000)
-            wins = p.get("wins", 0)
-            matches = p.get("matches_played", 0)
-            losses = max(0, matches - wins)
-            win_pct = round((wins / max(1, matches)) * 100, 1)
-            kills = p.get("kills", 0)
-            deaths = p.get("deaths", 0)
-            assists = p.get("assists", 0)
-            kd = round(kills / max(1, deaths), 2)
-            mvps = p.get("mvp_count", 0)
-
-            # Player headline
-            line_top = f"{medal} **{ign}** (<@{pid}>)"
-
-            # Stats pill row
-            pill_parts = [f"⭐ `{elo} ELO`", f"`{wins}W - {losses}L` `({win_pct}%)`", f"`{kd} K/D` `({kills}/{deaths}/{assists})`"]
-            if mvps > 0:
-                pill_parts.append(f"👑 `{mvps} MVP`")
-
-            line_bot = "└ " + " • ".join(pill_parts)
-            lines.append(f"{line_top}\n{line_bot}")
-
-        body = "\n\n" + "\n\n".join(lines)
-
-    full_description = desc_header + body
-    if len(full_description) > 4096:
-        full_description = full_description[:4090] + "..."
-
+def build_leaderboard_embed(metric: str) -> discord.Embed:
+    """Construct embed matching the NeatQueue title and red accent line."""
+    title = METRIC_TITLES.get(metric, "Vega MatchMaking Queue MMR Leaderboard")
     embed = discord.Embed(
-        title="🏆 Vega Scrims — Competitive Leaderboard",
-        description=full_description,
+        title=title,
         colour=EMBED_COLOUR,
     )
-
-    # Footer with caller's personal rank
-    footer_parts = [f"Page {page}/{total_pages}"]
-    if caller_rank:
-        c_rank = caller_rank.get("rank_num")
-        c_elo = caller_rank.get("elo", 1000)
-        footer_parts.insert(0, f"Your Standing: #{c_rank} ({c_elo} ELO)")
-    else:
-        footer_parts.insert(0, "Use /register to join the leaderboard")
-
-    embed.set_footer(text=" • ".join(footer_parts))
+    embed.set_image(url="attachment://leaderboard.png")
+    embed.timestamp = discord.utils.utcnow()
     return embed
 
 
+async def prepare_leaderboard_data(
+    bot: commands.Bot,
+    guild: Optional[discord.Guild],
+    region: str,
+    metric: str,
+    page: int,
+) -> tuple[io.BytesIO, int, list[dict]]:
+    """
+    Fetches the requested page of players, loads avatars and rank movements,
+    and returns (image_bytes_io, total_count, players).
+    """
+    offset = (page - 1) * PAGE_SIZE
+    players, total_count = await db.get_solo_leaderboard(
+        region=region,
+        metric=metric,
+        limit=PAGE_SIZE,
+        offset=offset,
+    )
+
+    # Fetch last match outcomes to determine up/down rank movement triangles
+    pids = [p["discord_id"] for p in players if p.get("discord_id")]
+    outcomes = await db.get_players_last_match_outcomes(pids)
+    for p in players:
+        p["rank_delta"] = outcomes.get(p.get("discord_id"), 0)
+
+    # Fetch avatars asynchronously in parallel
+    avatars: dict[int, Image.Image] = {}
+
+    async def _fetch_avatar(p: dict) -> None:
+        pid = p.get("discord_id")
+        if not pid:
+            return
+        member = guild.get_member(pid) if guild else None
+        user = member or bot.get_user(pid)
+        if not user:
+            try:
+                user = await bot.fetch_user(pid)
+            except Exception:
+                user = None
+
+        url = user.display_avatar.with_format("png").with_size(64).url if user else None
+        av_img = await fetch_avatar_image(url)
+        avatars[pid] = av_img
+
+    if players:
+        await asyncio.gather(*[_fetch_avatar(p) for p in players])
+
+    # Render high-res NeatQueue image
+    img_buf = render_leaderboard_image(players=players, avatars=avatars, metric=metric)
+    return img_buf, total_count, players
+
+
+class MetricSelect(discord.ui.Select):
+    """Dropdown menu to select ranking metric."""
+
+    def __init__(self, current_metric: str) -> None:
+        options = [
+            discord.SelectOption(
+                label="MMR",
+                value="elo",
+                description="Rank by MMR / ELO rating",
+                default=(current_metric == "elo"),
+            ),
+            discord.SelectOption(
+                label="Wins",
+                value="wins",
+                description="Rank by total match wins",
+                default=(current_metric == "wins"),
+            ),
+            discord.SelectOption(
+                label="Win Rate",
+                value="winrate",
+                description="Rank by match win percentage",
+                default=(current_metric == "winrate"),
+            ),
+            discord.SelectOption(
+                label="K/D Ratio",
+                value="kda",
+                description="Rank by kill/death ratio",
+                default=(current_metric == "kda"),
+            ),
+            discord.SelectOption(
+                label="MVPs",
+                value="mvps",
+                description="Rank by MVP awards",
+                default=(current_metric == "mvps"),
+            ),
+        ]
+        placeholder = METRIC_LABELS.get(current_metric, "MMR")
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: LeaderboardPaginationView = self.view  # type: ignore
+        if interaction.user.id != view.author_id:
+            await interaction.response.send_message(
+                "Only the user who ran `/leaderboard` can use these controls. You can run `/leaderboard` yourself!",
+                ephemeral=True,
+            )
+            return
+
+        chosen_metric = self.values[0]
+        if chosen_metric != view.metric:
+            view.metric = chosen_metric
+            view.current_page = 1
+            await view.refresh_and_edit(interaction)
+
+
+class PageSelect(discord.ui.Select):
+    """Dropdown menu to jump directly to a page."""
+
+    def __init__(self, current_page: int, total_pages: int) -> None:
+        max_pages = min(max(1, total_pages), 25)
+        options = [
+            discord.SelectOption(
+                label=f"Page {p}",
+                value=str(p),
+                default=(p == current_page),
+            )
+            for p in range(1, max_pages + 1)
+        ]
+        super().__init__(
+            placeholder=f"Page {current_page}",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: LeaderboardPaginationView = self.view  # type: ignore
+        if interaction.user.id != view.author_id:
+            await interaction.response.send_message(
+                "Only the user who ran `/leaderboard` can use these controls. You can run `/leaderboard` yourself!",
+                ephemeral=True,
+            )
+            return
+
+        chosen_page = int(self.values[0])
+        if chosen_page != view.current_page:
+            view.current_page = chosen_page
+            await view.refresh_and_edit(interaction)
+
+
 class LeaderboardPaginationView(discord.ui.View):
-    """Interactive button pagination for leaderboard pages."""
+    """Interactive NeatQueue UI View with buttons, dropdowns, and website link."""
 
     def __init__(
         self,
+        bot: commands.Bot,
         author_id: int,
         region: str,
         metric: str,
         current_page: int,
         total_pages: int,
         total_count: int,
+        guild: Optional[discord.Guild] = None,
     ) -> None:
         super().__init__(timeout=180)
+        self.bot = bot
         self.author_id = author_id
         self.region = region
         self.metric = metric
         self.current_page = current_page
         self.total_pages = max(1, total_pages)
         self.total_count = total_count
+        self.guild = guild
 
-        self._update_buttons()
+        self._build_components()
 
-    def _update_buttons(self) -> None:
+    def _build_components(self) -> None:
         self.clear_items()
 
-        # Prev button
+        # Row 0: Navigation Buttons (⏮, ◀, 🔄, ▶, ⏭)
+        first_btn = discord.ui.Button(
+            emoji="⏮",
+            style=discord.ButtonStyle.secondary,
+            disabled=(self.current_page <= 1),
+            row=0,
+        )
+        first_btn.callback = self._on_first
+        self.add_item(first_btn)
+
         prev_btn = discord.ui.Button(
-            label="◀ Previous",
-            style=discord.ButtonStyle.primary,
+            emoji="◀",
+            style=discord.ButtonStyle.secondary,
             disabled=(self.current_page <= 1),
             row=0,
         )
         prev_btn.callback = self._on_prev
         self.add_item(prev_btn)
 
-        # Page indicator (disabled)
-        ind_btn = discord.ui.Button(
-            label=f"Page {self.current_page} / {self.total_pages}",
+        refresh_btn = discord.ui.Button(
+            emoji="🔄",
             style=discord.ButtonStyle.secondary,
-            disabled=True,
+            disabled=False,
             row=0,
         )
-        self.add_item(ind_btn)
+        refresh_btn.callback = self._on_refresh
+        self.add_item(refresh_btn)
 
-        # Next button
         next_btn = discord.ui.Button(
-            label="Next ▶",
-            style=discord.ButtonStyle.primary,
+            emoji="▶",
+            style=discord.ButtonStyle.secondary,
             disabled=(self.current_page >= self.total_pages),
             row=0,
         )
         next_btn.callback = self._on_next
         self.add_item(next_btn)
 
-    async def _render_page(self, interaction: discord.Interaction) -> None:
-        offset = (self.current_page - 1) * PAGE_SIZE
-        players, total_count = await db.get_solo_leaderboard(
-            region=self.region,
-            metric=self.metric,
-            limit=PAGE_SIZE,
-            offset=offset,
+        last_btn = discord.ui.Button(
+            emoji="⏭",
+            style=discord.ButtonStyle.secondary,
+            disabled=(self.current_page >= self.total_pages),
+            row=0,
         )
-        caller_rank = await db.get_player_leaderboard_rank(
-            discord_id=self.author_id,
-            region=self.region,
-            metric=self.metric,
-        )
+        last_btn.callback = self._on_last
+        self.add_item(last_btn)
 
+        # Row 1: Metric Select Menu
+        self.add_item(MetricSelect(current_metric=self.metric))
+
+        # Row 2: Page Select Menu
+        self.add_item(PageSelect(current_page=self.current_page, total_pages=self.total_pages))
+
+        # Row 3: Website Leaderboard Link Button
+        website_url = os.environ.get("LEADERBOARD_URL", "https://discord.com")
+        web_btn = discord.ui.Button(
+            label="Website Leaderboard",
+            emoji="📊",
+            style=discord.ButtonStyle.link,
+            url=website_url,
+            row=3,
+        )
+        self.add_item(web_btn)
+
+    async def refresh_and_edit(self, interaction: discord.Interaction) -> None:
+        """Fetch fresh data, update components, and edit interaction response."""
+        await interaction.response.defer()
+
+        img_buf, total_count, _ = await prepare_leaderboard_data(
+            bot=self.bot,
+            guild=self.guild or interaction.guild,
+            region=self.region,
+            metric=self.metric,
+            page=self.current_page,
+        )
         self.total_count = total_count
         self.total_pages = max(1, math.ceil(total_count / PAGE_SIZE))
-        self._update_buttons()
+        if self.current_page > self.total_pages:
+            self.current_page = self.total_pages
 
-        embed = build_leaderboard_embed(
-            players=players,
-            page=self.current_page,
-            total_pages=self.total_pages,
-            total_count=self.total_count,
-            region=self.region,
-            metric=self.metric,
-            caller_rank=caller_rank,
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
+        self._build_components()
+
+        embed = build_leaderboard_embed(metric=self.metric)
+        file = discord.File(img_buf, filename="leaderboard.png")
+
+        try:
+            await interaction.edit_original_response(
+                embed=embed,
+                view=self,
+                attachments=[file],
+            )
+        except Exception as exc:
+            log.warning("Failed to edit leaderboard response: %s", exc)
+
+    async def _on_first(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the command caller can use pagination.", ephemeral=True)
+            return
+        if self.current_page > 1:
+            self.current_page = 1
+            await self.refresh_and_edit(interaction)
 
     async def _on_prev(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the command caller can use pagination buttons.", ephemeral=True)
+            await interaction.response.send_message("Only the command caller can use pagination.", ephemeral=True)
             return
         if self.current_page > 1:
             self.current_page -= 1
-            await self._render_page(interaction)
+            await self.refresh_and_edit(interaction)
+
+    async def _on_refresh(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the command caller can use pagination.", ephemeral=True)
+            return
+        await self.refresh_and_edit(interaction)
 
     async def _on_next(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the command caller can use pagination buttons.", ephemeral=True)
+            await interaction.response.send_message("Only the command caller can use pagination.", ephemeral=True)
             return
         if self.current_page < self.total_pages:
             self.current_page += 1
-            await self._render_page(interaction)
+            await self.refresh_and_edit(interaction)
+
+    async def _on_last(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the command caller can use pagination.", ephemeral=True)
+            return
+        if self.current_page < self.total_pages:
+            self.current_page = self.total_pages
+            await self.refresh_and_edit(interaction)
 
 
 class LeaderboardCog(commands.Cog, name="Leaderboard"):
@@ -278,7 +435,7 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
 
     @app_commands.command(
         name="leaderboard",
-        description="View the competitive leaderboard rankings, ELO ratings, and player stats.",
+        description="View the competitive matchmaking leaderboard, MMR ratings, and player stats.",
     )
     @app_commands.describe(
         region="Filter leaderboard by regional matchmaking zone.",
@@ -299,41 +456,31 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
         reg_val = region.value if region else "All"
         metric_val = metric.value if metric else "elo"
 
-        players, total_count = await db.get_solo_leaderboard(
+        img_buf, total_count, _ = await prepare_leaderboard_data(
+            bot=self.bot,
+            guild=interaction.guild,
             region=reg_val,
             metric=metric_val,
-            limit=PAGE_SIZE,
-            offset=0,
-        )
-
-        caller_rank = await db.get_player_leaderboard_rank(
-            discord_id=interaction.user.id,
-            region=reg_val,
-            metric=metric_val,
+            page=1,
         )
 
         total_pages = max(1, math.ceil(total_count / PAGE_SIZE))
 
-        embed = build_leaderboard_embed(
-            players=players,
-            page=1,
-            total_pages=total_pages,
-            total_count=total_count,
-            region=reg_val,
-            metric=metric_val,
-            caller_rank=caller_rank,
-        )
+        embed = build_leaderboard_embed(metric=metric_val)
+        file = discord.File(img_buf, filename="leaderboard.png")
 
         view = LeaderboardPaginationView(
+            bot=self.bot,
             author_id=interaction.user.id,
             region=reg_val,
             metric=metric_val,
             current_page=1,
             total_pages=total_pages,
             total_count=total_count,
+            guild=interaction.guild,
         )
 
-        await interaction.followup.send(embed=embed, view=view, ephemeral=hide)
+        await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=hide)
 
     # -------------------------------------------------------------------------
     # /clear-leaderboard  (admin only)

@@ -2601,6 +2601,8 @@ async def get_solo_leaderboard(
     metric = (metric or "elo").lower()
     if metric == "wins":
         order_sql = "wins DESC, elo DESC, kills DESC"
+    elif metric in ("winrate", "win_rate"):
+        order_sql = "(CAST(wins AS FLOAT) / GREATEST(1, matches_played)) DESC, wins DESC, elo DESC"
     elif metric == "kda":
         order_sql = "(CAST(kills AS FLOAT) / GREATEST(1, deaths)) DESC, kills DESC"
     elif metric in ("mvp", "mvps"):
@@ -2637,6 +2639,37 @@ async def get_solo_leaderboard(
     return [dict(r) for r in rows], total_count
 
 
+async def get_players_last_match_outcomes(discord_ids: list[int]) -> dict[int, int]:
+    """
+    Returns a dict mapping discord_id -> outcome (1 for win, -1 for loss, 0 for neutral)
+    based on each player's most recent completed solo match.
+    """
+    if not discord_ids:
+        return {}
+    pool = get_pool()
+    try:
+        query = """
+            SELECT DISTINCT ON (p_id) p_id,
+                   CASE 
+                       WHEN (winning_team = 1 AND p_id = ANY(team1_player_ids)) OR (winning_team = 2 AND p_id = ANY(team2_player_ids)) THEN 1
+                       WHEN winning_team IN (1, 2) THEN -1
+                       ELSE 0
+                   END as outcome
+            FROM (
+                SELECT winning_team, team1_player_ids, team2_player_ids, UNNEST(team1_player_ids || team2_player_ids) as p_id, completed_at
+                FROM solo_matches
+                WHERE status = 'COMPLETED' AND winning_team IN (1, 2)
+            ) sub
+            WHERE p_id = ANY($1::BIGINT[])
+            ORDER BY p_id, completed_at DESC NULLS LAST
+        """
+        rows = await pool.fetch(query, discord_ids)
+        return {r["p_id"]: r["outcome"] for r in rows}
+    except Exception as e:
+        log.warning("Could not fetch players last match outcomes: %s", e)
+        return {}
+
+
 async def get_player_leaderboard_rank(
     discord_id: int,
     region: Optional[str] = None,
@@ -2656,6 +2689,8 @@ async def get_player_leaderboard_rank(
     metric = (metric or "elo").lower()
     if metric == "wins":
         order_sql = "wins DESC, elo DESC, kills DESC"
+    elif metric in ("winrate", "win_rate"):
+        order_sql = "(CAST(wins AS FLOAT) / GREATEST(1, matches_played)) DESC, wins DESC, elo DESC"
     elif metric == "kda":
         order_sql = "(CAST(kills AS FLOAT) / GREATEST(1, deaths)) DESC, kills DESC"
     elif metric in ("mvp", "mvps"):
