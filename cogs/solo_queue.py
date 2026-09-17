@@ -1447,6 +1447,7 @@ class SoloConfigCaptainSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
         view: SoloConfigPanelView = self.view  # type: ignore[assignment]
         new_mode = self.values[0]
         await db.set_config(CONFIG_KEY_CAPTAIN_MODE, new_mode)
@@ -1484,6 +1485,7 @@ class SoloConfigDraftSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
         view: SoloConfigPanelView = self.view  # type: ignore[assignment]
         new_mode = self.values[0]
         await db.set_config(CONFIG_KEY_DRAFT_MODE, new_mode)
@@ -1533,6 +1535,7 @@ class SoloConfigVetoSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
         view: SoloConfigPanelView = self.view  # type: ignore[assignment]
         new_mode = self.values[0]
         await db.set_config(CONFIG_KEY_VETO_MODE, new_mode)
@@ -1564,6 +1567,7 @@ class SoloConfigScoringSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
         view: SoloConfigPanelView = self.view  # type: ignore[assignment]
         new_mode = self.values[0]
         await db.set_config(CONFIG_KEY_SCORING_MODE, new_mode)
@@ -1613,10 +1617,11 @@ class SoloConfigThemeSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
         view: SoloConfigPanelView = self.view  # type: ignore[assignment]
         new_theme = self.values[0]
         await db.set_config(CONFIG_KEY_THEME, new_theme)
-        await view.cog.refresh_queue_message()
+        asyncio.create_task(view.cog.refresh_queue_message())
         await view.refresh(interaction)
 
 
@@ -1641,18 +1646,33 @@ class SoloConfigPanelView(discord.ui.View):
         self.add_item(SoloConfigThemeSelect(theme))
 
     async def refresh(self, interaction: discord.Interaction) -> None:
-        captain_mode = await get_solo_captain_mode()
-        draft_mode = await get_solo_draft_mode()
-        veto_mode = await get_solo_veto_mode()
-        scoring_mode = await get_solo_scoring_mode()
-        results_ch_id = await get_solo_results_channel_id()
-        theme_val = (await db.get_config(CONFIG_KEY_THEME)) or "PURPLE"
-        map_pool = await get_solo_map_pool()
-        colour = await get_solo_embed_colour()
+        (
+            captain_mode,
+            draft_mode,
+            veto_mode,
+            scoring_mode,
+            results_ch_id,
+            theme_val,
+            map_pool,
+            colour,
+        ) = await asyncio.gather(
+            get_solo_captain_mode(),
+            get_solo_draft_mode(),
+            get_solo_veto_mode(),
+            get_solo_scoring_mode(),
+            get_solo_results_channel_id(),
+            db.get_config(CONFIG_KEY_THEME),
+            get_solo_map_pool(),
+            get_solo_embed_colour(),
+        )
+        theme_val = theme_val or "PURPLE"
 
         new_view = SoloConfigPanelView(self.cog, captain_mode, draft_mode, veto_mode, scoring_mode, theme_val)
         embed = build_solo_config_embed(captain_mode, draft_mode, veto_mode, scoring_mode, results_ch_id, theme_val, map_pool, colour)
-        await interaction.response.edit_message(embed=embed, view=new_view)
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=new_view)
+        else:
+            await interaction.edit_original_response(embed=embed, view=new_view)
 
 
 # =============================================================================
@@ -3199,6 +3219,22 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             f"Captain updated: <@{new_captain.id}> has replaced <@{old_captain.id}> as captain."
         )
 
+    async def _handle_set_elo_template(
+        self,
+        interaction: discord.Interaction,
+        template: app_commands.Choice[str],
+    ) -> None:
+        """Helper to update the global ELO scoring template."""
+        await interaction.response.defer(ephemeral=True)
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send("You do not have staff permissions.", ephemeral=True)
+            return
+        await db.set_config(CONFIG_KEY_SCORING_MODE, template.value)
+        await interaction.followup.send(
+            f"ELO scoring template updated to **`{template.value}`** ({template.name}).",
+            ephemeral=True,
+        )
+
     @app_commands.command(
         name="set-elo-template",
         description="Set the matchmaking ELO scoring template (Staff only).",
@@ -3214,15 +3250,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         template: app_commands.Choice[str],
     ) -> None:
         """Change the global ELO template."""
-        await interaction.response.defer(ephemeral=True)
-        if not _is_admin(interaction.user):  # type: ignore[arg-type]
-            await interaction.followup.send("You do not have staff permissions.", ephemeral=True)
-            return
-        await db.set_config(CONFIG_KEY_SCORING_MODE, template.value)
-        await interaction.followup.send(
-            f"ELO scoring template updated to **`{template.value}`** ({template.name}).",
-            ephemeral=True,
-        )
+        await self._handle_set_elo_template(interaction, template)
 
     @app_commands.command(
         name="set-elo-system",
@@ -3239,7 +3267,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         template: app_commands.Choice[str],
     ) -> None:
         """Alias for set-elo-template."""
-        await self.set_elo_template_command(interaction, template)
+        await self._handle_set_elo_template(interaction, template)
 
 
 async def setup(bot: commands.Bot) -> None:
