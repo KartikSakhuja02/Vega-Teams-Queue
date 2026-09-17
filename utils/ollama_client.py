@@ -218,9 +218,19 @@ def _prepare_image(image_bytes: bytes, max_dim: int = 1920) -> bytes:
 
 async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = False) -> str:
     """Low-level: send image+prompt to Ollama, return raw text content."""
+    async with inference_semaphore:
+        return await _call_ollama_internal(image_bytes, prompt, json_format=json_format)
+
+
+async def _call_ollama_internal(image_bytes: bytes, prompt: str, json_format: bool = False) -> str:
+    """Internal HTTP call to Ollama /api/chat with auto-retry on grammar stack bug."""
     image_bytes = _prepare_image(image_bytes)
     image_b64 = base64.b64encode(image_bytes).decode()
 
+    # Note: With vision models (qwen2.5vl:3b), passing format="json" activates llama.cpp's BNF grammar
+    # parser which can crash with "Unexpected empty grammar stack after accepting piece", aborting
+    # generation and returning empty response (done=False, done_reason=None).
+    # We do not pass format="json" by default as the prompt already requires JSON and _extract_json parses it.
     payload: dict = {
         "model": _MODEL,
         "messages": [
@@ -266,6 +276,12 @@ async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = Fals
 
     msg = data.get("message") or {}
     content = msg.get("content", "").strip()
+
+    # Automatic fallback: if format="json" caused empty response due to llama.cpp grammar bug, retry without it
+    if not content and json_format:
+        log.warning("Ollama returned empty response with format='json' (grammar stack bug) — retrying without grammar constraint...")
+        return await _call_ollama_internal(image_bytes, prompt, json_format=False)
+
     if not content:
         raise RuntimeError(
             f"Ollama returned empty response. "
@@ -521,7 +537,7 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
         raise RuntimeError("OLLAMA_BASE_URL / OLLAMA_MODEL not configured")
 
     t0 = time.monotonic()
-    raw_text = await _call_ollama(image_bytes, _SCOREBOARD_PROMPT, json_format=True)
+    raw_text = await _call_ollama(image_bytes, _SCOREBOARD_PROMPT, json_format=False)
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
     log.debug("Ollama scoreboard raw (first 400): %s", raw_text[:400])
