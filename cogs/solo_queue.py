@@ -794,10 +794,7 @@ class PlayerDraftSelect(discord.ui.Select):
                 if interaction.channel:
                     await interaction.edit_original_response(embed=embed, view=final_view)
                     await interaction.channel.send(
-                        f"**DRAFT COMPLETE • MAP RANDOMLY SELECTED: {final_map.upper()}**\n"
-                        f"Teams have been finalized and moved to Team A & B voice channels!\n"
-                        f"The match will be played on **{final_map}**!\n\n"
-                        f"Captains <@{c1_id}> and <@{c2_id}>: Please set up the custom lobby and invite all players."
+                        f"Match ready on **{final_map}**. Use `/submit-result` when done."
                     )
                 return
 
@@ -817,12 +814,6 @@ class PlayerDraftSelect(discord.ui.Select):
 
             if interaction.channel:
                 await interaction.edit_original_response(embed=embed, view=veto_view)
-                await interaction.channel.send(
-                    f"**DRAFT COMPLETE**\n"
-                    f"Teams have been finalized and moved to Team A & B voice channels!\n"
-                    f"Starting Map Veto phase.\n"
-                    f"<@{c1_id}> Click a button below to BAN your first map."
-                )
             return
 
         # Advance draft step
@@ -852,11 +843,6 @@ class PlayerDraftSelect(discord.ui.Select):
 
         if interaction.channel:
             await interaction.edit_original_response(embed=embed, view=view)
-            picked_p = players_by_id.get(picked_id, {})
-            await interaction.channel.send(
-                f"<@{interaction.user.id}> drafted **{picked_p.get('ign', 'Player')}**.\n"
-                f"<@{next_turn_id}> It is your turn to pick."
-            )
 
 
 class SoloDraftView(discord.ui.View):
@@ -945,12 +931,7 @@ class SoloMapVetoView(discord.ui.View):
 
             if interaction.channel:
                 await interaction.edit_original_response(embed=embed, view=final_view)
-                await interaction.channel.send(
-                    f"**MAP DECIDED: {chosen_map.upper()}**\n"
-                    f"<@{interaction.user.id}> picked **{chosen_map}**!\n\n"
-                    f"Captains <@{c1_id}> and <@{c2_id}>: Please set up the custom lobby and invite all players.\n\n"
-                    f"📸 **Submit Result:** When the match concludes, any player in this channel can submit the scoreboard screenshot using `/submit-result`!"
-                )
+                await interaction.channel.send("Match ready. Use `/submit-result` when done.")
         return callback
 
     def _create_map_ban_callback(self, map_to_ban: str):
@@ -996,10 +977,6 @@ class SoloMapVetoView(discord.ui.View):
 
                 if interaction.channel:
                     await interaction.edit_original_response(embed=embed, view=next_view)
-                    await interaction.channel.send(
-                        f"<@{interaction.user.id}> banned **{map_to_ban}**.\n"
-                        f"<@{picker_id}> It is your turn to **PICK** the decider map."
-                    )
                 return
 
             # If only 1 map remains, it is the selected map!
@@ -1019,13 +996,7 @@ class SoloMapVetoView(discord.ui.View):
 
                 if interaction.channel:
                     await interaction.edit_original_response(embed=embed, view=final_view)
-                    await interaction.channel.send(
-                        f"**MAP DECIDED: {final_map.upper()}**\n"
-                        f"<@{interaction.user.id}> banned **{map_to_ban}**.\n"
-                        f"The match will be played on **{final_map}**!\n\n"
-                        f"Captains <@{c1_id}> and <@{c2_id}>: Please set up the custom lobby and invite all players.\n\n"
-                        f"📸 **Submit Result:** When the match concludes, any player in this channel can submit the scoreboard screenshot using `/submit-result`!"
-                    )
+                    await interaction.channel.send("Match ready. Use `/submit-result` when done.")
                 return
 
             # Continue veto
@@ -1043,10 +1014,6 @@ class SoloMapVetoView(discord.ui.View):
 
             if interaction.channel:
                 await interaction.edit_original_response(embed=embed, view=next_view)
-                await interaction.channel.send(
-                    f"<@{interaction.user.id}> banned **{map_to_ban}**.\n"
-                    f"<@{next_turn_id}> It is your turn to ban a map."
-                )
 
         return callback
 
