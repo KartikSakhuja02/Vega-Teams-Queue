@@ -227,6 +227,31 @@ async def get_player(discord_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def reset_all_player_stats() -> int:
+    """
+    Reset every active player's ELO back to 1000 and zero all combat/match stats.
+    Returns the number of rows updated.
+    """
+    result = await get_pool().execute(
+        """
+        UPDATE players
+        SET elo            = 1000,
+            matches_played = 0,
+            wins           = 0,
+            kills          = 0,
+            deaths         = 0,
+            assists        = 0,
+            mvp_count      = 0
+        WHERE is_active = TRUE
+        """
+    )
+    # asyncpg returns e.g. "UPDATE 42" — parse the count
+    try:
+        return int(result.split()[-1])
+    except (IndexError, ValueError):
+        return 0
+
+
 async def deactivate_player(discord_id: int) -> Optional[dict]:
     """
     Soft-delete a player by setting is_active = FALSE.

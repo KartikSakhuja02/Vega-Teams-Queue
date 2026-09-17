@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import Optional
 
 import discord
@@ -18,6 +19,47 @@ from discord.ext import commands
 from database import db
 
 log = logging.getLogger(__name__)
+
+
+def _is_admin(member: discord.Member) -> bool:
+    """Check administrator/manage_guild perms or configured admin role IDs."""
+    if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
+        return True
+    raw = os.environ.get("HELP_ADMIN_ROLE_IDS", "")
+    admin_ids: list[int] = []
+    for chunk in raw.split(","):
+        try:
+            admin_ids.append(int(chunk.strip()))
+        except ValueError:
+            pass
+    return any(role.id in admin_ids for role in member.roles)
+
+
+class ClearLeaderboardConfirmView(discord.ui.View):
+    """Two-button confirmation so admins can't reset stats by accident."""
+
+    def __init__(self, author_id: int) -> None:
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the command invoker can confirm.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Yes, reset everything", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.confirmed = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled. No changes were made.", embed=None, view=None)
+
 
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 PAGE_SIZE = 10
@@ -292,6 +334,53 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
         )
 
         await interaction.followup.send(embed=embed, view=view, ephemeral=hide)
+
+    # -------------------------------------------------------------------------
+    # /clear-leaderboard  (admin only)
+    # -------------------------------------------------------------------------
+
+    @app_commands.command(
+        name="clear-leaderboard",
+        description="[Admin] Reset all player ELO and stats back to default.",
+    )
+    async def clear_leaderboard_cmd(self, interaction: discord.Interaction) -> None:
+        """Admin-only: wipe every active player's ELO and combat stats."""
+        if not isinstance(interaction.user, discord.Member) or not _is_admin(interaction.user):
+            await interaction.response.send_message(
+                "You need Staff or Administrator permissions to use this command.",
+                ephemeral=True,
+            )
+            return
+
+        confirm_embed = discord.Embed(
+            title="Reset Leaderboard",
+            description=(
+                "This will reset **all active players** to:\n"
+                "- ELO → `1000`\n"
+                "- Matches played → `0`\n"
+                "- Wins, Kills, Deaths, Assists, MVPs → `0`\n\n"
+                "**This cannot be undone.** Are you sure?"
+            ),
+            colour=discord.Colour.red(),
+        )
+
+        view = ClearLeaderboardConfirmView(author_id=interaction.user.id)
+        await interaction.response.send_message(embed=confirm_embed, view=view, ephemeral=True)
+
+        await view.wait()
+
+        if not view.confirmed:
+            return  # cancel button already edited the message
+
+        count = await db.reset_all_player_stats()
+
+        done_embed = discord.Embed(
+            title="Leaderboard Cleared",
+            description=f"Reset **{count} player(s)** — ELO set to `1000`, all stats zeroed.",
+            colour=discord.Colour.green(),
+        )
+        await interaction.edit_original_response(embed=done_embed, view=None)
+        log.info("Admin %s (%d) cleared leaderboard — %d players reset.", interaction.user.name, interaction.user.id, count)
 
 
 async def setup(bot: commands.Bot) -> None:
