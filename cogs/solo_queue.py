@@ -1655,12 +1655,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     return
 
                 # Send DMs in non-blocking background task so match lobby posts immediately
-                dm_content = (
-                    f"⚔️ **Your 10-Man Match #{match['id']} is Ready!**\n"
-                    f"Text Lobby: {text_channel.mention}\n"
-                    f"Voice Lobby: {lobby_vc.mention}\n\n"
-                    f"Please join the **Voice Lobby** now. Team selection will begin once all 10 players join voice."
-                )
+                dm_content = f"Match {match['id']} is ready! {text_channel.mention}"
 
                 async def _send_dms_background():
                     async def _send_one(m):
