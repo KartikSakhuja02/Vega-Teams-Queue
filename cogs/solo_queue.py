@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import io
 import logging
 import os
 import random
@@ -3268,33 +3269,15 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             })
 
         # 14. Build comprehensive result embed
-        if t1_score > t2_score:
-            outcome_text = "🟢 Team 1 Victory"
-            sidebar_color = discord.Colour.from_rgb(46, 204, 113)
-        elif t2_score > t1_score:
-            outcome_text = "🔴 Team 2 Victory"
-            sidebar_color = discord.Colour.from_rgb(235, 66, 85)
-        else:
-            outcome_text = "🤝 Match Draw"
-            sidebar_color = discord.Colour.gold()
+        # 14. Build comprehensive result embed matching the reference UI
+        c1_id = match.get("captain1_id")
+        c2_id = match.get("captain2_id")
+        c1_name = lobby_player_records.get(c1_id, {}).get("ign") or lobby_player_records.get(c1_id, {}).get("discord_username") or "1"
+        c2_name = lobby_player_records.get(c2_id, {}).get("ign") or lobby_player_records.get(c2_id, {}).get("discord_username") or "2"
+        t1_team_name = f"Team {c1_name}"
+        t2_team_name = f"Team {c2_name}"
 
-        meta_parts = []
-        if result.duration and result.duration != "Unknown":
-            meta_parts.append(f"⏱️ {result.duration}")
-        if result.match_date and result.match_date != "Unknown":
-            meta_parts.append(f"📅 {result.match_date}")
-        meta_str = f" • {' • '.join(meta_parts)}" if meta_parts else ""
-
-        result_embed = discord.Embed(
-            title=f"Queue {match['id']} Results — {map_name}",
-            description=(
-                f"**Score:** 🟢 Team 1 **[{t1_score}]** — 🔴 Team 2 **[{t2_score}]**\n"
-                f"**Outcome:** {outcome_text}{meta_str}"
-            ),
-            colour=sidebar_color,
-        )
-
-        def _format_team_lines(team_pids: list[int]) -> str:
+        def _format_team_lines(team_pids: list[int]) -> list[str]:
             lines = []
             t_updates = [u for u in player_updates if u["discord_id"] in team_pids]
             t_updates.sort(
@@ -3304,47 +3287,45 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
             for u in t_updates:
                 pid = u["discord_id"]
-                prec = lobby_player_records.get(pid, {})
-                ign = prec.get("ign") or prec.get("discord_username") or f"Player {pid}"
-                stats = u.get("stats_obj")
-
-                mvp_badge = ""
-                if stats and (stats.mvp_type == "Match MVP" or "match" in str(stats.mvp_type).lower()):
-                    mvp_badge = " 👑 `Match MVP`"
-                elif stats and (stats.mvp_type == "Team MVP" or stats.is_mvp):
-                    mvp_badge = " ⭐ `Team MVP`"
-
-                delta = u["elo_delta"]
-                delta_str = f"`(+{delta} ELO)`" if delta > 0 else (f"`({delta} ELO)`" if delta < 0 else "`(= ELO)`")
-
-                lines.append(f"**{ign}**{mvp_badge}")
-
                 k, d, a = u["kills"], u["deaths"], u["assists"]
-                parts = [f"`{k}/{d}/{a} KDA`"]
-                if stats and stats.acs > 0:
-                    parts.append(f"`{stats.acs} ACS`")
-                if stats and stats.damage > 0:
-                    parts.append(f"`{stats.damage:,} DMG`")
-                if stats and stats.first_bloods > 0:
-                    parts.append(f"`{stats.first_bloods} FB`")
-                if stats and stats.plants > 0:
-                    parts.append(f"`{stats.plants} PL`")
-                if stats and stats.defuses > 0:
-                    parts.append(f"`{stats.defuses} DF`")
-                parts.append(delta_str)
+                delta = u["elo_delta"]
+                elo_str = f"+{delta} Elo" if delta >= 0 else f"{delta} Elo"
 
-                lines.append(f"└ {' • '.join(parts)}")
-            return "\n".join(lines)[:1024] if lines else "*No players detected*"
+                # Rating formula
+                rating = round((k + a * 0.25) / max(1, d), 2)
 
-        t1_header = f"🟢 Team 1 — {t1_score} Rounds" + (" 🏆" if t1_score > t2_score else "")
-        t2_header = f"🔴 Team 2 — {t2_score} Rounds" + (" 🏆" if t2_score > t1_score else "")
+                lines.append(f"<@{pid}>")
+                lines.append(f"└ [{k}/{d}/{a}] {rating:.2f}r {elo_str}")
+            return lines
 
-        result_embed.add_field(name=t1_header, value=_format_team_lines(t1_pids), inline=False)
-        result_embed.add_field(name=t2_header, value=_format_team_lines(t2_pids), inline=False)
-        result_embed.set_footer(
-            text=f"Scoring: {scoring_mode} • ACS: Combat Score • KDA: K/D/A • DMG: Damage • FB: First Bloods • PL/DF: Plants/Defuses"
+        t1_player_lines = _format_team_lines(t1_pids)
+        t2_player_lines = _format_team_lines(t2_pids)
+
+        desc_parts = [
+            "**Score**",
+            f"{t1_team_name} [{t1_score}]",
+            f"{t2_team_name} [{t2_score}]",
+            "",
+            f"**{t1_team_name}**",
+            "\n".join(t1_player_lines) if t1_player_lines else "*No players detected*",
+            "",
+            f"**{t2_team_name}**",
+            "\n".join(t2_player_lines) if t2_player_lines else "*No players detected*",
+        ]
+
+        result_embed = discord.Embed(
+            title=f"Match {match['id']} Results",
+            description="\n".join(desc_parts),
+            colour=discord.Colour(0xE74C3C),
         )
-        result_embed.set_thumbnail(url=screenshot.url)
+
+        clean_map = (map_name or "").strip().lower()
+        if clean_map:
+            map_path = os.path.join(MAPS_DIR, f"{clean_map}.png")
+            if os.path.exists(map_path):
+                result_embed.set_thumbnail(url=f"attachment://{clean_map}.png")
+
+        result_embed.set_image(url="attachment://scoreboard.png")
 
         # 15. Handlers for voting resolution
         async def _on_confirmed(btn_interaction: discord.Interaction) -> None:
@@ -3368,7 +3349,10 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 results_channel = interaction.guild.get_channel(results_ch_id)
                 if isinstance(results_channel, discord.TextChannel):
                     try:
-                        await results_channel.send(embed=result_embed)
+                        f_map_res = get_solo_map_file(map_name)
+                        f_sc_res = discord.File(io.BytesIO(image_bytes), filename="scoreboard.png")
+                        res_files = [f for f in [f_map_res, f_sc_res] if f]
+                        await results_channel.send(embed=result_embed, files=res_files)
                         log.info("Posted match #%d result to results channel #%s.", match["id"], results_channel.name)
                     except Exception as e:
                         log.warning("Could not post match result to results channel %d: %s", results_ch_id, e)
@@ -3418,11 +3402,36 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             on_declined_callback=_on_declined,
         )
 
-        await interaction.edit_original_response(
-            content="**Result Verification Vote** — 6 confirm votes needed to finalize results.",
-            embed=result_embed,
-            view=vote_view,
-        )
+        f_map = get_solo_map_file(map_name)
+        f_sc = discord.File(io.BytesIO(image_bytes), filename="scoreboard.png")
+        files_to_send = [f for f in [f_map, f_sc] if f]
+
+        edited = False
+        try:
+            await interaction.edit_original_response(
+                content="**Result Verification Vote** — 6 confirm votes needed to finalize results.",
+                embed=result_embed,
+                view=vote_view,
+                attachments=files_to_send,
+            )
+            edited = True
+        except Exception as e:
+            log.warning("Could not edit_original_response with attachments in _handle_submit_result: %s", e)
+
+        if not edited and interaction.channel and hasattr(interaction.channel, "send"):
+            try:
+                await interaction.edit_original_response(content="Result calculated. Vote below:")
+            except Exception:
+                pass
+            f_map2 = get_solo_map_file(map_name)
+            f_sc2 = discord.File(io.BytesIO(image_bytes), filename="scoreboard.png")
+            files_to_send2 = [f for f in [f_map2, f_sc2] if f]
+            await interaction.channel.send(
+                content="**Result Verification Vote** — 6 confirm votes needed to finalize results.",
+                embed=result_embed,
+                view=vote_view,
+                files=files_to_send2,
+            )
 
     @app_commands.command(
         name="cancel",
