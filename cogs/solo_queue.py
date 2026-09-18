@@ -1988,6 +1988,129 @@ class SubConfirmationView(discord.ui.View):
                 item.disabled = True
 
 
+class MatchCancelVoteView(discord.ui.View):
+    """Interactive 1-minute voting view allowing match participants to cancel an active match when management is not active."""
+
+    def __init__(
+        self,
+        match: dict,
+        all_player_ids: list[int],
+        deadline: int,
+        on_resolved_callback,
+        timeout: float = 60.0,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.match = match
+        self.all_player_ids = set(all_player_ids)
+        self.deadline = deadline
+        self.on_resolved_callback = on_resolved_callback
+        self.yes_voters: set[int] = set()
+        self.no_voters: set[int] = set()
+        self.resolved = False
+        self.message: Optional[discord.Message] = None
+
+    def build_embed(self) -> discord.Embed:
+        yes_count = len(self.yes_voters)
+        no_count = len(self.no_voters)
+        embed = discord.Embed(
+            title=f"MATCH #{self.match['id']} — VOTE TO CANCEL",
+            description=(
+                f"A vote to cancel the match is currently in progress.\n\n"
+                f"**Voting Deadline:** <t:{self.deadline}:R> (<t:{self.deadline}:T>)\n\n"
+                f"**Current Votes:**\n"
+                f"• Yes: **{yes_count}**\n"
+                f"• No: **{no_count}**\n\n"
+                f"*Only players in this match can vote. If Yes receives the highest number of votes after 1 minute, the match will be cancelled.*"
+            ),
+            colour=discord.Colour(0xE74C3C),
+        )
+        return embed
+
+    def _update_button_labels(self) -> None:
+        self.yes_button.label = f"Yes ({len(self.yes_voters)})"
+        self.no_button.label = f"No ({len(self.no_voters)})"
+
+    async def _handle_vote(self, interaction: discord.Interaction, is_yes: bool) -> None:
+        if self.resolved:
+            await interaction.response.send_message("Voting has already concluded.", ephemeral=True)
+            return
+
+        user_id = interaction.user.id
+        is_staff = isinstance(interaction.user, discord.Member) and _is_admin(interaction.user)
+        if user_id not in self.all_player_ids and not is_staff:
+            await interaction.response.send_message("You are not a participant in this match.", ephemeral=True)
+            return
+
+        if is_yes:
+            if user_id in self.yes_voters:
+                await interaction.response.send_message("You have already voted Yes.", ephemeral=True)
+                return
+            self.no_voters.discard(user_id)
+            self.yes_voters.add(user_id)
+            feedback = "You voted **Yes** to cancel the match."
+        else:
+            if user_id in self.no_voters:
+                await interaction.response.send_message("You have already voted No.", ephemeral=True)
+                return
+            self.yes_voters.discard(user_id)
+            self.no_voters.add(user_id)
+            feedback = "You voted **No** to keep playing."
+
+        self._update_button_labels()
+        embed = self.build_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.followup.send(feedback, ephemeral=True)
+
+        # Early termination if all match participants have voted
+        if len(self.all_player_ids) > 0 and (len(self.yes_voters) + len(self.no_voters) >= len(self.all_player_ids)):
+            self.stop()
+            await self._finalize_vote()
+
+    @discord.ui.button(label="Yes (0)", style=discord.ButtonStyle.danger, custom_id="cancel_vote_yes")
+    async def yes_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._handle_vote(interaction, is_yes=True)
+
+    @discord.ui.button(label="No (0)", style=discord.ButtonStyle.secondary, custom_id="cancel_vote_no")
+    async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._handle_vote(interaction, is_yes=False)
+
+    async def on_timeout(self) -> None:
+        await self._finalize_vote()
+
+    async def _finalize_vote(self) -> None:
+        if self.resolved:
+            return
+        self.resolved = True
+
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+
+        yes_count = len(self.yes_voters)
+        no_count = len(self.no_voters)
+        should_cancel = yes_count > no_count
+
+        if should_cancel:
+            status_text = f"**Vote Concluded:** Cancel approved (Yes: {yes_count}, No: {no_count}). Cancelling match..."
+        else:
+            status_text = f"**Vote Concluded:** Cancel declined (Yes: {yes_count}, No: {no_count}). The match will continue."
+
+        if self.message:
+            try:
+                final_embed = self.build_embed()
+                final_embed.description = (
+                    f"{status_text}\n\n"
+                    f"**Final Votes:**\n"
+                    f"• Yes: **{yes_count}**\n"
+                    f"• No: **{no_count}**"
+                )
+                await self.message.edit(embed=final_embed, view=self)
+            except Exception:
+                pass
+
+        if self.on_resolved_callback:
+            await self.on_resolved_callback(should_cancel, yes_count, no_count)
+
+
 # =============================================================================
 # Interactive Admin Configuration Panel Components
 # =============================================================================
@@ -2276,6 +2399,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         # Track 5-minute check-in timeout tasks and deadlines
         self._checkin_timers: dict[int, asyncio.Task] = {}
         self._checkin_deadlines: dict[int, int] = {}
+        # Track active 1-minute cancellation votes
+        self._active_cancel_votes: dict[int, MatchCancelVoteView] = {}
 
     async def is_queue_paused(self) -> tuple[bool, Optional[float]]:
         """Check if the queue is paused. Returns (is_paused, pause_until_timestamp)."""
@@ -4035,12 +4160,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
     @app_commands.command(
         name="cancel",
-        description="Cancel the current queue match and release all players to IDLE (Staff only).",
+        description="Cancel the current queue match (starts a 1-minute vote if management is not active).",
     )
     @app_commands.describe(
         match_id="Optional match ID to cancel if running outside the match channel"
     )
-    @app_commands.default_permissions(manage_channels=True)
     async def cancel_command(
         self,
         interaction: discord.Interaction,
@@ -4050,12 +4174,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
     @app_commands.command(
         name="cancel-match",
-        description="Cancel the current queue match and release all players to IDLE (Staff only).",
+        description="Cancel the current queue match (starts a 1-minute vote if management is not active).",
     )
     @app_commands.describe(
         match_id="Optional match ID to cancel if running outside the match channel"
     )
-    @app_commands.default_permissions(manage_channels=True)
     async def cancel_match_command(
         self,
         interaction: discord.Interaction,
@@ -4065,12 +4188,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
     @app_commands.command(
         name="cancel-queue",
-        description="Cancel the current queue match and release all players to IDLE (Staff only).",
+        description="Cancel the current queue match (starts a 1-minute vote if management is not active).",
     )
     @app_commands.describe(
         match_id="Optional match ID to cancel if running outside the match channel"
     )
-    @app_commands.default_permissions(manage_channels=True)
     async def cancel_queue_command(
         self,
         interaction: discord.Interaction,
@@ -4098,23 +4220,28 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         interaction: discord.Interaction,
         match_id: Optional[int] = None,
     ) -> None:
-        """Cancel an active queue match or scrim match, clean database, and release players."""
+        """Cancel an active queue match or scrim match, or start a 1-minute vote if initiated by players."""
         await interaction.response.defer(ephemeral=True)
 
-        if not _is_admin(interaction.user):  # type: ignore[arg-type]
-            await interaction.followup.send("You do not have staff permissions to cancel matches.", ephemeral=True)
-            return
+        is_staff = isinstance(interaction.user, discord.Member) and _is_admin(interaction.user)
 
         match = None
         if match_id is not None:
             match = await db.get_solo_match_by_id(match_id)
         else:
             match = await db.get_solo_match_by_channel(interaction.channel_id)
+            if not match:
+                active_m = await db.get_active_solo_match_by_player(interaction.user.id)
+                if active_m:
+                    match = active_m
 
         if not match:
             # Check if this is a team scrim match channel
             scrim = await db.get_scrim_match_by_channel(interaction.channel_id)
             if scrim:
+                if not is_staff:
+                    await interaction.followup.send("You do not have staff permissions to cancel scrim matches.", ephemeral=True)
+                    return
                 await db.cancel_scrim_match(scrim["id"])
                 await interaction.followup.send(
                     f"Scrim match #{scrim['id']} cancelled in database. Deleting channel in 5 seconds...",
@@ -4122,7 +4249,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 )
                 if isinstance(interaction.channel, discord.TextChannel):
                     try:
-                        await interaction.channel.send("⚠️ **This scrim match has been cancelled by staff.** Deleting channel in 5 seconds...")
+                        await interaction.channel.send("This scrim match has been cancelled by staff. Deleting channel in 5 seconds...")
                     except Exception:
                         pass
                 await asyncio.sleep(5)
@@ -4149,72 +4276,154 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         ))
         all_pids = [pid for pid in all_pids if pid]
 
-        for pid in all_pids:
-            try:
-                await db.set_player_status(pid, "IDLE")
-                await db.remove_player_from_solo_queue(pid)
-            except Exception as e:
-                log.debug("Error resetting player %s status: %s", pid, e)
+        if not is_staff and interaction.user.id not in all_pids:
+            await interaction.followup.send("Only players in this match (or staff) can cancel this match.", ephemeral=True)
+            return
 
-        # Cancel match in database
-        await db.cancel_solo_match(match["id"])
+        # If staff member runs the command, cancel directly!
+        if is_staff:
+            await interaction.followup.send(
+                f"Queue #{match['id']} cancelled by staff. All players returned to IDLE.",
+                ephemeral=True,
+            )
+            await self._execute_cancel_solo_match(
+                match=match,
+                guild=interaction.guild,
+                reason=f"Queue #{match['id']} has been cancelled by staff member {interaction.user.mention}.",
+            )
+            return
 
-        # Cancel and cleanup check-in timer if running
-        timer = self._checkin_timers.pop(match["id"], None)
-        if timer and not timer.done():
-            timer.cancel()
-        self._checkin_deadlines.pop(match["id"], None)
+        # If management is not active, match players start a 1-minute vote!
+        m_id = match["id"]
+        if m_id in self._active_cancel_votes:
+            await interaction.followup.send(
+                f"A cancel vote is already in progress for Match #{m_id}.",
+                ephemeral=True,
+            )
+            return
 
-        # Delete voice channels if created
-        v_lobby_id = match.get("voice_lobby_id")
-        v1_id = match.get("voice_team1_id")
-        v2_id = match.get("voice_team2_id")
-        for vid in (v_lobby_id, v1_id, v2_id):
-            if vid and interaction.guild:
-                vch = interaction.guild.get_channel(vid)
-                if isinstance(vch, discord.VoiceChannel):
-                    try:
-                        await vch.delete(reason=f"Queue #{match['id']} cancelled by {interaction.user.name}")
-                    except Exception as e:
-                        log.debug("Failed to delete temporary match voice channel: %s", e)
-
-        # Refresh the main queue embed to show updated counts/states
-        asyncio.create_task(self.refresh_queue_message())
-
-        # Locate the match text channel to announce & delete
         match_ch_id = match.get("channel_id")
         target_ch = interaction.guild.get_channel(match_ch_id) if (interaction.guild and match_ch_id) else None
         if not target_ch and isinstance(interaction.channel, discord.TextChannel):
             target_ch = interaction.channel
 
-        await interaction.followup.send(
-            f"Queue #{match['id']} cancelled in database. All {len(all_pids)} players returned to IDLE.",
-            ephemeral=True,
-        )
+        if not isinstance(target_ch, discord.TextChannel):
+            await interaction.followup.send("Could not locate the match text channel to conduct the vote.", ephemeral=True)
+            return
 
+        await interaction.followup.send("Cancel vote started in the match channel.", ephemeral=True)
+
+        deadline = int(time.time()) + 60
+
+        async def _on_vote_finished(should_cancel: bool, yes_count: int, no_count: int) -> None:
+            self._active_cancel_votes.pop(m_id, None)
+            if should_cancel:
+                curr_m = await db.get_solo_match_by_id(m_id) or match
+                await self._execute_cancel_solo_match(
+                    match=curr_m,
+                    guild=interaction.guild,
+                    reason=f"Match #{m_id} cancelled by majority player vote (Yes: {yes_count}, No: {no_count}).",
+                )
+            else:
+                try:
+                    await target_ch.send(
+                        f"**Cancel Vote Concluded:** Vote failed (Yes: {yes_count}, No: {no_count}). The match will continue."
+                    )
+                except Exception:
+                    pass
+
+        vote_view = MatchCancelVoteView(
+            match=match,
+            all_player_ids=all_pids,
+            deadline=deadline,
+            on_resolved_callback=_on_vote_finished,
+            timeout=60.0,
+        )
+        self._active_cancel_votes[m_id] = vote_view
+
+        vote_msg = await target_ch.send(
+            content=f"**Vote to Cancel Match #{m_id}** initiated by {interaction.user.mention} (1 minute to vote).",
+            embed=vote_view.build_embed(),
+            view=vote_view,
+        )
+        vote_view.message = vote_msg
+
+    async def _execute_cancel_solo_match(
+        self,
+        match: dict,
+        guild: Optional[discord.Guild],
+        reason: str,
+    ) -> None:
+        """Core execution for cancelling a solo match, resetting players to IDLE, and deleting channels."""
+        match_id = match["id"]
+        # Cancel and cleanup check-in timer if running
+        timer = self._checkin_timers.pop(match_id, None)
+        if timer and not timer.done():
+            timer.cancel()
+        self._checkin_deadlines.pop(match_id, None)
+        self._active_cancel_votes.pop(match_id, None)
+
+        # Release players to IDLE and remove from queue
+        all_pids = list(dict.fromkeys(
+            match.get("team1_player_ids", [])
+            + match.get("team2_player_ids", [])
+            + match.get("available_player_ids", [])
+            + [match.get("captain1_id"), match.get("captain2_id")]
+        ))
+        all_pids = [pid for pid in all_pids if pid]
+
+        if all_pids:
+            try:
+                await db.set_players_status_bulk(all_pids, "IDLE")
+                await db.clear_solo_queue(all_pids)
+            except Exception as e:
+                log.warning("Error resetting players on match cancel: %s", e)
+
+        # Cancel match in database
+        await db.cancel_solo_match(match_id)
+
+        # Refresh queue panel
+        self._schedule_queue_panel_refresh()
+
+        # Delete voice channels if created
+        if guild:
+            for vid_key in ("voice_lobby_id", "voice_team1_id", "voice_team2_id"):
+                vid = match.get(vid_key)
+                if vid:
+                    vch = guild.get_channel(vid)
+                    if isinstance(vch, discord.VoiceChannel):
+                        try:
+                            await vch.delete(reason=f"Queue #{match_id} cancelled")
+                        except Exception:
+                            pass
+
+        # Text channel & category
+        match_ch_id = match.get("channel_id")
+        target_ch = guild.get_channel(match_ch_id) if (guild and match_ch_id) else None
         cat_to_delete: Optional[discord.CategoryChannel] = None
-        if target_ch and target_ch.category and target_ch.category.id != SOLO_MATCH_CATEGORY_ID and f"#{match['id']}" in target_ch.category.name:
+        if target_ch and target_ch.category and target_ch.category.id != SOLO_MATCH_CATEGORY_ID and f"#{match_id}" in target_ch.category.name:
             cat_to_delete = target_ch.category
 
         if target_ch and isinstance(target_ch, discord.TextChannel):
             try:
                 await target_ch.send(
-                    f"⚠️ **Queue #{match['id']} has been cancelled by {interaction.user.mention}.**\n"
-                    "Match cancelled in database and players returned to IDLE. Deleting channel in 5 seconds..."
+                    f"**Match #{match_id} Cancelled**\n"
+                    f"{reason}\n"
+                    f"This channel will be deleted in 10 seconds."
                 )
             except Exception:
                 pass
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
             try:
-                await target_ch.delete(reason=f"Queue #{match['id']} cancelled by {interaction.user.name}")
-            except Exception as e:
-                log.error("Failed to delete match channel: %s", e)
+                await target_ch.delete(reason=f"Queue #{match_id} cancelled")
+            except Exception:
+                pass
 
         if cat_to_delete:
             try:
-                await cat_to_delete.delete(reason=f"Queue #{match['id']} cancelled by {interaction.user.name}")
-            except Exception as e:
-                log.debug("Failed to delete match category: %s", e)
+                await cat_to_delete.delete(reason=f"Queue #{match_id} cancelled")
+            except Exception:
+                pass
 
     @app_commands.command(
         name="admin-change-command",
