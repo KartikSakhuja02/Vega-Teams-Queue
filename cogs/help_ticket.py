@@ -99,64 +99,7 @@ FALLBACK_MODELS = [
 
 
 async def _query_openrouter_messages(messages: list[dict]) -> Optional[str]:
-    """
-    Query OpenRouter chat completion API with a list of messages.
-    Tries user-configured model first, then falls back to reliable models if 404 or errors occur.
-    """
-    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not api_key:
-        log.info("OPENROUTER_API_KEY not configured — skipping AI response.")
-        return None
-
-    models_to_try = []
-    env_model = os.environ.get("OPENROUTER_MODEL", "").strip()
-    if env_model:
-        models_to_try.append(env_model)
-
-    for fallback in FALLBACK_MODELS:
-        if fallback not in models_to_try:
-            models_to_try.append(fallback)
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "HTTP-Referer": "https://github.com/KartikSakhuja02/Vega-Teams-Queue",
-        "X-Title": "Vega Scrims Bot",
-        "Content-Type": "application/json",
-    }
-
-    timeout = aiohttp.ClientTimeout(total=15)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        for model in models_to_try:
-            payload = {
-                "model": model,
-                "messages": messages,
-                "max_tokens": 600,
-                "temperature": 0.3,
-            }
-            try:
-                async with session.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        choices = data.get("choices", [])
-                        if choices and "message" in choices[0]:
-                            content = choices[0]["message"].get("content", "").strip()
-                            if content:
-                                return content
-                    else:
-                        err_text = await resp.text()
-                        log.warning(
-                            "OpenRouter API with model '%s' returned status %d: %s. Trying next model...",
-                            model,
-                            resp.status,
-                            err_text,
-                        )
-            except Exception as e:
-                log.warning("OpenRouter request failed for model %s: %s", model, e)
-
+    """AI ticket answering is disabled."""
     return None
 
 
@@ -238,11 +181,11 @@ def _build_ticket_embed(opener: discord.Member, initial_question: Optional[str] 
     )
     embed.description = (
         f"Welcome to your private support channel, {opener.mention}!\n\n"
-        "💬 **Ask our AI Assistant anything** by typing in this channel.\n"
-        "🙋 If you need human staff, click **Request Staff** below."
+        "💬 Please describe your issue or question below and our staff will assist you.\n"
+        "🙋 If you need urgent assistance, click **Request Staff** below."
     )
     embed.add_field(name="Opened By", value=opener.mention, inline=True)
-    embed.add_field(name="Status",    value="🟢 Active (AI Support)", inline=True)
+    embed.add_field(name="Status",    value="🟢 Active (Staff Support)", inline=True)
     if initial_question:
         embed.add_field(name="Initial Question", value=initial_question[:1024], inline=False)
     embed.set_footer(text="Vega Queue Support • Close ticket below when finished")
@@ -473,10 +416,9 @@ class HelpTicketCog(commands.Cog, name="HelpTicket"):
                 return_exceptions=True,
             )
 
-        # 6. If user provided an issue right away, post it and generate initial AI answer
+        # 6. If user provided an issue right away, post it for staff
         if issue:
             await ticket_channel.send(f"**{interaction.user.mention} asked:**\n> {issue}")
-            await self._answer_ticket_with_ai(ticket_channel, interaction.user, issue)
 
     async def _answer_ticket_with_ai(
         self,
@@ -484,50 +426,13 @@ class HelpTicketCog(commands.Cog, name="HelpTicket"):
         user: discord.abc.User,
         latest_question: str,
     ) -> None:
-        """Fetch channel conversation history and reply via OpenRouter AI."""
-        async with channel.typing():
-            messages_payload = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-            # Fetch recent message history (up to last 6 messages)
-            history_msgs = []
-            async for h in channel.history(limit=8, oldest_first=True):
-                if not h.content and h.embeds:
-                    continue
-                if h.content.startswith("🔔") or h.content.startswith("🔒"):
-                    continue
-                role = "assistant" if h.author == self.bot.user else "user"
-                history_msgs.append({"role": role, "content": h.clean_content})
-
-            for hm in history_msgs:
-                messages_payload.append(hm)
-
-            # Query AI
-            ai_reply = await _query_openrouter_messages(messages_payload)
-
-            if ai_reply:
-                if len(ai_reply) > 2000:
-                    ai_reply = ai_reply[:1990] + "…"
-                await channel.send(ai_reply)
+        """AI ticket answering is disabled — tickets are handled directly by staff."""
+        return
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """Listen for messages inside ticket channels to trigger AI assistance."""
-        if message.author.bot or not message.guild:
-            return
-
-        if not isinstance(message.channel, discord.TextChannel):
-            return
-
-        opener_id = _get_opener_id(message.channel)
-        if opener_id is None:
-            return
-
-        # Ignore slash commands or bot commands
-        if message.content.startswith("/") or message.content.startswith("!"):
-            return
-
-        # AI responds to chat in the ticket channel
-        await self._answer_ticket_with_ai(message.channel, message.author, message.clean_content)
+        """AI ticket answering is disabled."""
+        return
 
     def _get_admin_members(self, guild: discord.Guild, role_ids: Iterable[int]) -> list[discord.Member]:
         members: list[discord.Member] = []
