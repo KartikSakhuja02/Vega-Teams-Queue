@@ -249,26 +249,30 @@ async def reset_all_player_stats() -> int:
     Reset every active player's ELO back to 1000 and zero all combat/match stats.
     Returns the number of rows updated.
     """
-    result = await get_pool().execute(
-        """
-        UPDATE players
-        SET elo            = 1000,
-            matches_played = 0,
-            wins           = 0,
-            kills          = 0,
-            deaths         = 0,
-            assists        = 0,
-            mvp_count      = 0
-        WHERE is_active = TRUE;
-        DELETE FROM solo_matches WHERE status != 'IN_PROGRESS';
-        ALTER SEQUENCE IF EXISTS solo_matches_id_seq RESTART WITH 1;
-        """
-    )
-    # asyncpg returns e.g. "UPDATE 42" — parse the count
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            res = await conn.execute(
+                """
+                UPDATE players
+                SET elo            = 1000,
+                    matches_played = 0,
+                    wins           = 0,
+                    kills          = 0,
+                    deaths         = 0,
+                    assists        = 0,
+                    mvp_count      = 0
+                WHERE is_active = TRUE
+                """
+            )
+            await conn.execute("DELETE FROM solo_matches WHERE status != 'IN_PROGRESS'")
+            await conn.execute("SELECT setval('solo_matches_id_seq', COALESCE((SELECT MAX(id) FROM solo_matches), 1), false)")
+
     try:
-        return int(result.split()[-1])
+        return int(res.split()[-1])
     except (IndexError, ValueError):
         return 0
+
 
 
 async def deactivate_player(discord_id: int) -> Optional[dict]:

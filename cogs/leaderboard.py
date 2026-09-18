@@ -114,10 +114,10 @@ def _get_leaderboard_cog(interaction: discord.Interaction) -> Optional[Leaderboa
 class ClearLeaderboardConfirmView(discord.ui.View):
     """Two-button confirmation so admins can't reset stats by accident."""
 
-    def __init__(self, author_id: int) -> None:
-        super().__init__(timeout=30)
+    def __init__(self, cog: LeaderboardCog, author_id: int) -> None:
+        super().__init__(timeout=60)
+        self.cog = cog
         self.author_id = author_id
-        self.confirmed = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -127,9 +127,21 @@ class ClearLeaderboardConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Yes, reset everything", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        self.confirmed = True
-        self.stop()
         await interaction.response.defer()
+        try:
+            count = await db.reset_all_player_stats()
+            done_embed = discord.Embed(
+                title="Leaderboard Cleared",
+                description=f"Reset **{count} player(s)** — ELO set to `1000`, all stats zeroed.",
+                colour=discord.Colour.green(),
+            )
+            await interaction.edit_original_response(embed=done_embed, view=None)
+            log.info("Admin %s (%d) cleared leaderboard — %d players reset.", interaction.user.name, interaction.user.id, count)
+            asyncio.create_task(self.cog.refresh_all_leaderboards())
+        except Exception as e:
+            log.error("Failed to reset leaderboard: %s", e)
+            await interaction.followup.send(f"Failed to reset leaderboard: {e}", ephemeral=True)
+        self.stop()
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -916,15 +928,11 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
         )
 
     # -------------------------------------------------------------------------
-    # /clear-leaderboard  (admin only)
+    # /clear-leaderboard & /reset-leaderboard  (admin only)
     # -------------------------------------------------------------------------
 
-    @app_commands.command(
-        name="clear-leaderboard",
-        description="[Admin] Reset all player ELO and stats back to default.",
-    )
-    async def clear_leaderboard_cmd(self, interaction: discord.Interaction) -> None:
-        """Admin-only: wipe every active player's ELO and combat stats."""
+    async def _handle_clear_leaderboard(self, interaction: discord.Interaction) -> None:
+        """Shared confirmation flow for /clear-leaderboard and /reset-leaderboard."""
         if not isinstance(interaction.user, discord.Member) or not _is_admin(interaction.user):
             await interaction.response.send_message(
                 "You need Staff or Administrator permissions to use this command.",
@@ -944,24 +952,24 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
             colour=discord.Colour.red(),
         )
 
-        view = ClearLeaderboardConfirmView(author_id=interaction.user.id)
+        view = ClearLeaderboardConfirmView(cog=self, author_id=interaction.user.id)
         await interaction.response.send_message(embed=confirm_embed, view=view, ephemeral=True)
 
-        await view.wait()
+    @app_commands.command(
+        name="clear-leaderboard",
+        description="[Admin] Reset all player ELO and stats back to default.",
+    )
+    async def clear_leaderboard_cmd(self, interaction: discord.Interaction) -> None:
+        """Admin-only: wipe every active player's ELO and combat stats."""
+        await self._handle_clear_leaderboard(interaction)
 
-        if not view.confirmed:
-            return  # cancel button already edited the message
-
-        count = await db.reset_all_player_stats()
-
-        done_embed = discord.Embed(
-            title="Leaderboard Cleared",
-            description=f"Reset **{count} player(s)** — ELO set to `1000`, all stats zeroed.",
-            colour=discord.Colour.green(),
-        )
-        await interaction.edit_original_response(embed=done_embed, view=None)
-        log.info("Admin %s (%d) cleared leaderboard — %d players reset.", interaction.user.name, interaction.user.id, count)
-        asyncio.create_task(self.refresh_all_leaderboards())
+    @app_commands.command(
+        name="reset-leaderboard",
+        description="[Admin] Reset all player ELO and stats back to default (alias for clear-leaderboard).",
+    )
+    async def reset_leaderboard_cmd(self, interaction: discord.Interaction) -> None:
+        """Admin-only: alias for clear-leaderboard."""
+        await self._handle_clear_leaderboard(interaction)
 
 
 async def setup(bot: commands.Bot) -> None:
