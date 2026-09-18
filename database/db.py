@@ -2292,6 +2292,20 @@ async def get_solo_match_by_voice_channel(voice_channel_id: int) -> Optional[dic
     return dict(row) if row else None
 
 
+async def get_active_solo_match_by_player(discord_id: int) -> Optional[dict]:
+    """Fetch any active in-game match (VOICE_CHECKIN, DRAFTING, MAP_VETO, IN_PROGRESS) the player belongs to."""
+    row = await get_pool().fetchrow(
+        """
+        SELECT * FROM solo_matches
+        WHERE ($1 = ANY(team1_player_ids) OR $1 = ANY(team2_player_ids) OR $1 = ANY(available_player_ids))
+          AND status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS')
+        ORDER BY id DESC LIMIT 1
+        """,
+        discord_id,
+    )
+    return dict(row) if row else None
+
+
 async def cancel_solo_match(match_id: int) -> Optional[dict]:
     """Cancel a solo match."""
     row = await get_pool().fetchrow(
@@ -2548,7 +2562,7 @@ async def complete_solo_match_with_stats(
                         wins = wins + (CASE WHEN $4::BOOLEAN THEN 1 ELSE 0 END),
                         mvp_count = mvp_count + (CASE WHEN $5::BOOLEAN THEN 1 ELSE 0 END),
                         elo = GREATEST(100, elo + $6),
-                        status = 'IDLE',
+                        status = CASE WHEN status = 'IN_MATCH' THEN 'IDLE' ELSE status END,
                         status_since = NOW()
                     WHERE discord_id = $7
                     """,

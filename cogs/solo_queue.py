@@ -1766,7 +1766,8 @@ class SoloMapVoteView(discord.ui.View):
 
 class MatchResultVoteView(discord.ui.View):
     """
-    Voting view to confirm match results. Requires 6 confirm votes from match participants.
+    Voting view to confirm match results. Requires 4 confirm votes from match participants,
+    or instant confirmation by admins/staff.
     """
 
     def __init__(
@@ -1792,11 +1793,11 @@ class MatchResultVoteView(discord.ui.View):
         self._update_labels()
 
     def _update_labels(self) -> None:
-        self.confirm_btn.label = f"Confirm ({len(self.confirms)}/6)"
-        self.decline_btn.label = f"Decline ({len(self.declines)}/5)" if self.declines else "Decline"
+        self.confirm_btn.label = f"Confirm ({len(self.confirms)}/4)"
+        self.decline_btn.label = f"Decline ({len(self.declines)}/4)" if self.declines else "Decline"
 
     @discord.ui.button(
-        label="Confirm (0/6)",
+        label="Confirm (0/4)",
         style=discord.ButtonStyle.success,
         custom_id="solo_result_vote:confirm",
     )
@@ -1809,9 +1810,10 @@ class MatchResultVoteView(discord.ui.View):
             await interaction.response.send_message("Voting has already concluded.", ephemeral=True)
             return
 
-        if interaction.user.id not in self.all_player_ids and not _is_admin(interaction.user):  # type: ignore[arg-type]
+        is_admin_or_staff = isinstance(interaction.user, discord.Member) and _is_admin(interaction.user)
+        if interaction.user.id not in self.all_player_ids and not is_admin_or_staff:
             await interaction.response.send_message(
-                "Only players who participated in this match can vote.",
+                "Only players who participated in this match (or staff) can vote/confirm.",
                 ephemeral=True,
             )
             return
@@ -1821,12 +1823,14 @@ class MatchResultVoteView(discord.ui.View):
         self.confirms.add(uid)
         self._update_labels()
 
-        if len(self.confirms) >= 6:
+        # Confirmed if 4 players confirm, OR if an admin/staff member confirms
+        if is_admin_or_staff or len(self.confirms) >= 4:
             self.is_resolved = True
             for child in self.children:
                 child.disabled = True  # type: ignore[attr-defined]
+            by_str = "Staff/Admin" if is_admin_or_staff else f"Match Players ({len(self.confirms)}/4 votes)"
             await interaction.response.edit_message(
-                content="✅ **Result Confirmed by Match Players!** Updating ELO and posting to results channel...",
+                content=f"✅ **Result Confirmed by {by_str}!** Updating ELO and posting to results channel...",
                 embed=self.result_embed,
                 view=self,
             )
@@ -1848,9 +1852,10 @@ class MatchResultVoteView(discord.ui.View):
             await interaction.response.send_message("Voting has already concluded.", ephemeral=True)
             return
 
-        if interaction.user.id not in self.all_player_ids and not _is_admin(interaction.user):  # type: ignore[arg-type]
+        is_admin_or_staff = isinstance(interaction.user, discord.Member) and _is_admin(interaction.user)
+        if interaction.user.id not in self.all_player_ids and not is_admin_or_staff:
             await interaction.response.send_message(
-                "Only players who participated in this match can vote.",
+                "Only players who participated in this match (or staff) can decline.",
                 ephemeral=True,
             )
             return
@@ -1860,12 +1865,13 @@ class MatchResultVoteView(discord.ui.View):
         self.declines.add(uid)
         self._update_labels()
 
-        if len(self.declines) >= 5:
+        if is_admin_or_staff or len(self.declines) >= 4:
             self.is_resolved = True
             for child in self.children:
                 child.disabled = True  # type: ignore[attr-defined]
+            by_str = "Staff/Admin" if is_admin_or_staff else "Match Players"
             await interaction.response.edit_message(
-                content="❌ **Result Declined by Match Players.** Submission has been cancelled. Please take a clear screenshot and try again.",
+                content=f"❌ **Result Declined by {by_str}.** Submission has been cancelled. Please take a clear screenshot and try again.",
                 embed=self.result_embed,
                 view=self,
             )
@@ -2348,8 +2354,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             return
 
         if player.get("status") == "IN_MATCH":
-            await interaction.followup.send("You are currently in an active match.", ephemeral=True)
-            return
+            active_m = await db.get_active_solo_match_by_player(user_id)
+            if active_m:
+                await interaction.followup.send("You are currently in an active match.", ephemeral=True)
+                return
+            else:
+                # Previous match has finished or submitted results — clear stale IN_MATCH status
+                await db.set_player_status(user_id, "IDLE")
 
         if any(p["discord_id"] == user_id for p in queued_players):
             await interaction.followup.send("You are already in queue.", ephemeral=True)
@@ -3806,10 +3817,16 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         f_sc = discord.File(io.BytesIO(image_bytes), filename="scoreboard.png")
         files_to_send = [f for f in [f_map, f_sc] if f]
 
+        # Release all match players to IDLE immediately so they can join another queue
+        try:
+            await db.set_players_status_bulk(all_match_pids, "IDLE")
+        except Exception as e:
+            log.warning("Could not set lobby players to IDLE on /submit-result: %s", e)
+
         edited = False
         try:
             await interaction.edit_original_response(
-                content="**Result Verification Vote** — 6 confirm votes needed to finalize results.",
+                content="**Result Verification Vote** — 4 confirm votes (or staff confirmation) needed to finalize results.",
                 embed=result_embed,
                 view=vote_view,
                 attachments=files_to_send,
@@ -3827,7 +3844,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             f_sc2 = discord.File(io.BytesIO(image_bytes), filename="scoreboard.png")
             files_to_send2 = [f for f in [f_map2, f_sc2] if f]
             await interaction.channel.send(
-                content="**Result Verification Vote** — 6 confirm votes needed to finalize results.",
+                content="**Result Verification Vote** — 4 confirm votes (or staff confirmation) needed to finalize results.",
                 embed=result_embed,
                 view=vote_view,
                 files=files_to_send2,
