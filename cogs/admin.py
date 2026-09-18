@@ -132,6 +132,146 @@ def _build_admin_commands_embed() -> discord.Embed:
     return embed
 
 
+def _get_queue_ban_channel_id() -> int:
+    """Retrieve the designated Discord channel ID for matchmaking ban announcements."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except Exception:
+        pass
+    raw = (
+        os.environ.get("QUEUE_BAN_CHANNEL_ID")
+        or os.environ.get("BAN_CHANNEL_ID")
+        or os.environ.get("BAN_LOG_CHANNEL_ID")
+        or os.environ.get("QUEUE_BAN_LOG_CHANNEL_ID")
+        or "0"
+    )
+    try:
+        clean = raw.strip().split(",")[0].strip()
+        return int(clean)
+    except (ValueError, IndexError):
+        return 0
+
+
+def _build_queue_ban_embed(
+    user: discord.User,
+    player_record: dict,
+    reason: str,
+    duration_hours: Optional[int],
+    banned_until_dt: Optional[datetime],
+    banned_at_dt: Optional[datetime],
+    admin: discord.User | discord.Member,
+    guild: Optional[discord.Guild] = None,
+) -> discord.Embed:
+    """Build a rich, real-time updated announcement embed for a banned player."""
+    embed = discord.Embed(
+        title="🔨 Matchmaking Ban Enacted",
+        description=(
+            f"> **A queue ban has been issued for {user.mention}.**\n"
+            f"> Access to 10-man matchmaking, live queues, and team scrims has been revoked."
+        ),
+        colour=discord.Colour.from_str("#FF4655"),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
+
+    ign = player_record.get("ign") or "N/A"
+    elo = player_record.get("elo", 1000)
+    region = player_record.get("region") or "Global"
+
+    embed.add_field(
+        name="👤 Banned Player",
+        value=f"{user.mention}\n**IGN:** `{ign}`\n**Rating:** `{elo} ELO` `[{region}]`\n**User ID:** `{user.id}`",
+        inline=False,
+    )
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    banned_at_ts = int(banned_at_dt.timestamp()) if isinstance(banned_at_dt, datetime) else now_ts
+
+    if isinstance(banned_until_dt, datetime):
+        banned_until_ts = int(banned_until_dt.timestamp())
+        dur_label = _fmt_duration(duration_hours) if duration_hours else "Temporary"
+        time_display = (
+            f"• **Duration:** `{dur_label}`\n"
+            f"• **Time Remaining:** <t:{banned_until_ts}:R>\n"
+            f"• **Ban Expiration:** <t:{banned_until_ts}:F>"
+        )
+    else:
+        dur_label = "Permanent"
+        time_display = (
+            f"• **Duration:** `Permanent`\n"
+            f"• **Time Remaining:** `Indefinite (Never)`\n"
+            f"• **Ban Expiration:** `Never`"
+        )
+
+    embed.add_field(
+        name="⏳ Ban Duration & Time",
+        value=time_display,
+        inline=False,
+    )
+
+    embed.add_field(
+        name="📝 Reason",
+        value=f"```{reason.strip()}```",
+        inline=False,
+    )
+
+    embed.add_field(
+        name="🛡️ Staff Information",
+        value=(
+            f"• **Moderator:** {admin.mention} (`{admin.id}`)\n"
+            f"• **Issued At:** <t:{banned_at_ts}:F> (<t:{banned_at_ts}:R>)"
+        ),
+        inline=False,
+    )
+
+    icon_url = guild.icon.url if guild and guild.icon else None
+    embed.set_footer(text="Vega Esports • Queue Moderation System", icon_url=icon_url)
+    return embed
+
+
+def _build_queue_unban_embed(
+    user: discord.User,
+    player_record: dict,
+    admin: discord.User | discord.Member,
+    guild: Optional[discord.Guild] = None,
+) -> discord.Embed:
+    """Build a rich announcement embed when a player's ban is lifted."""
+    embed = discord.Embed(
+        title="🔓 Matchmaking Ban Revoked",
+        description=(
+            f"> **Matchmaking ban has been lifted for {user.mention}.**\n"
+            f"> Normal queue and matchmaking access has been fully restored."
+        ),
+        colour=COL_SUCCESS,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
+
+    ign = player_record.get("ign") or "N/A"
+    elo = player_record.get("elo", 1000)
+    region = player_record.get("region") or "Global"
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    embed.add_field(
+        name="👤 Player",
+        value=f"{user.mention}\n**IGN:** `{ign}`\n**Rating:** `{elo} ELO` `[{region}]`\n**User ID:** `{user.id}`",
+        inline=False,
+    )
+    embed.add_field(
+        name="🛡️ Staff Information",
+        value=(
+            f"• **Unbanned By:** {admin.mention} (`{admin.id}`)\n"
+            f"• **Lifted At:** <t:{now_ts}:F> (<t:{now_ts}:R>)"
+        ),
+        inline=False,
+    )
+
+    icon_url = guild.icon.url if guild and guild.icon else None
+    embed.set_footer(text="Vega Esports • Queue Moderation System", icon_url=icon_url)
+    return embed
+
+
 
 class AdminCog(commands.Cog, name="Admin"):
     """Handles staff administration, moderation commands, and the admin command center."""
@@ -203,25 +343,62 @@ class AdminCog(commands.Cog, name="Admin"):
         except Exception as e:
             log.error("Failed to send admin commands panel: %s", e)
 
-    # ── /admin player_ban ───────────────────────────────────────────────────
+    # ── Helpers for Queue & Moderation Channels ─────────────────────────────
 
-    @admin_group.command(
-        name="player_ban",
-        description="Ban a player from matchmaking and live queues.",
-    )
-    @app_commands.describe(
-        user="The player to ban from matchmaking.",
-        reason="The infraction reason for this ban.",
-        duration_hours="Optional ban duration in hours (leave empty for permanent).",
-    )
-    async def player_ban(
+    async def _send_ban_channel_ui(
+        self,
+        guild: discord.Guild,
+        embed: discord.Embed,
+    ) -> Optional[discord.Message]:
+        """Send the ban/unban UI card to the channel configured in .env."""
+        ch_id = _get_queue_ban_channel_id()
+        if not ch_id:
+            return None
+
+        channel = guild.get_channel(ch_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(ch_id)
+            except Exception as e:
+                log.warning("Could not fetch queue ban channel %d: %s", ch_id, e)
+                return None
+
+        if isinstance(channel, (discord.TextChannel, discord.Thread)):
+            try:
+                msg = await channel.send(embed=embed)
+                return msg
+            except Exception as e:
+                log.error("Failed to post ban announcement to channel %d: %s", ch_id, e)
+        return None
+
+    async def _refresh_solo_queue(self) -> None:
+        """Helper to notify SoloQueueCog to refresh its persistent channel message."""
+        solo_queue_cog = self.bot.get_cog("SoloQueueCog") or self.bot.get_cog("SoloQueue")
+        if solo_queue_cog and hasattr(solo_queue_cog, "refresh_queue_message"):
+            try:
+                await solo_queue_cog.refresh_queue_message()
+            except Exception as e:
+                log.warning("Could not refresh solo queue message: %s", e)
+
+    async def _refresh_team_queue(self) -> None:
+        """Helper to notify TeamQueueCog to refresh its persistent channel message."""
+        team_queue_cog = self.bot.get_cog("TeamQueue")
+        if team_queue_cog and hasattr(team_queue_cog, "refresh_queue_message"):
+            try:
+                await team_queue_cog.refresh_queue_message()
+            except Exception as e:
+                log.warning("Could not refresh team queue message: %s", e)
+
+    # ── Ban & Unban Handlers ────────────────────────────────────────────────
+
+    async def _handle_player_ban(
         self,
         interaction: discord.Interaction,
         user: discord.User,
         reason: str,
         duration_hours: Optional[int] = None,
     ) -> None:
-        """Ban a player from queues and matches."""
+        """Core logic for banning a player and posting the real-time UI card."""
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
@@ -274,7 +451,23 @@ class AdminCog(commands.Cog, name="Admin"):
             await interaction.followup.send("Failed to ban player due to a database error.", ephemeral=True)
             return
 
+        # Evict player from active queues immediately
+        try:
+            await db.clear_solo_queue([user.id])
+            await self._refresh_solo_queue()
+            await self._refresh_team_queue()
+        except Exception as e:
+            log.debug("Error during queue eviction for banned user %d: %s", user.id, e)
+
         dur_text = f"`{_fmt_duration(duration_hours)}`" if duration_hours else "`Permanent`"
+        banned_until_dt = updated.get("banned_until")
+        banned_at_dt = updated.get("banned_at")
+
+        if isinstance(banned_until_dt, datetime):
+            banned_until_ts = int(banned_until_dt.timestamp())
+            dm_dur_str = f"{dur_text} (Expires: <t:{banned_until_ts}:F> • <t:{banned_until_ts}:R>)"
+        else:
+            dm_dur_str = "`Permanent`"
 
         # 6. Send DM to banned user
         try:
@@ -283,7 +476,7 @@ class AdminCog(commands.Cog, name="Admin"):
                 description=(
                     f"You have been banned from Vega Scrims matchmaking queues.\n\n"
                     f"**Reason:** {reason.strip()}\n"
-                    f"**Duration:** {dur_text}\n\n"
+                    f"**Duration:** {dm_dur_str}\n\n"
                     "If you believe this is an error or wish to appeal, please contact server staff."
                 ),
                 colour=COL_DANGER,
@@ -293,7 +486,20 @@ class AdminCog(commands.Cog, name="Admin"):
         except Exception:
             log.info("Could not send ban DM to user %d (DMs may be closed).", user.id)
 
-        # 7. Audit Log
+        # 7. Post real-time changing UI card to designated ban channel
+        ban_embed = _build_queue_ban_embed(
+            user=user,
+            player_record=player_record,
+            reason=reason,
+            duration_hours=duration_hours,
+            banned_until_dt=banned_until_dt,
+            banned_at_dt=banned_at_dt,
+            admin=interaction.user,
+            guild=interaction.guild,
+        )
+        ban_msg = await self._send_ban_channel_ui(interaction.guild, ban_embed)
+
+        # 8. Audit Log
         fields = [
             ("Player",   f"{user.mention} (`{user.id}`)",       True),
             ("IGN",      player_record.get("ign", "N/A"),       True),
@@ -301,6 +507,9 @@ class AdminCog(commands.Cog, name="Admin"):
             ("Reason",   reason.strip(),                        False),
             ("Staff",    f"{interaction.user.mention} (`{interaction.user.id}`)", False),
         ]
+        if isinstance(banned_until_dt, datetime):
+            fields.append(("Expires", f"<t:{int(banned_until_dt.timestamp())}:R>", True))
+
         await send_log(
             self.bot,
             title="🔨 Player Banned",
@@ -309,28 +518,20 @@ class AdminCog(commands.Cog, name="Admin"):
             fields=fields,
         )
 
+        channel_note = f"\n• **UI Announcement Channel:** {ban_msg.channel.mention}" if ban_msg else ""
         await interaction.followup.send(
             f"✅ Successfully banned {user.mention} ({player_record.get('ign')}).\n"
             f"• **Duration:** {dur_text}\n"
-            f"• **Reason:** {reason.strip()}",
+            f"• **Reason:** {reason.strip()}{channel_note}",
             ephemeral=True,
         )
 
-    # ── /admin player_unban ─────────────────────────────────────────────────
-
-    @admin_group.command(
-        name="player_unban",
-        description="Unban a player and restore queue access.",
-    )
-    @app_commands.describe(
-        user="The player to unban.",
-    )
-    async def player_unban(
+    async def _handle_player_unban(
         self,
         interaction: discord.Interaction,
         user: discord.User,
     ) -> None:
-        """Unban a player and clear ban status."""
+        """Core logic for unbanning a player and posting the lift notice."""
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
@@ -373,7 +574,16 @@ class AdminCog(commands.Cog, name="Admin"):
         except Exception:
             pass
 
-        # 5. Audit Log
+        # 5. Post to the designated ban channel
+        unban_embed = _build_queue_unban_embed(
+            user=user,
+            player_record=player_record,
+            admin=interaction.user,
+            guild=interaction.guild,
+        )
+        unban_msg = await self._send_ban_channel_ui(interaction.guild, unban_embed)
+
+        # 6. Audit Log
         fields = [
             ("Player", f"{user.mention} (`{user.id}`)",       True),
             ("IGN",    player_record.get("ign", "N/A"),       True),
@@ -387,21 +597,81 @@ class AdminCog(commands.Cog, name="Admin"):
             fields=fields,
         )
 
+        channel_note = f" Posted notice to {unban_msg.channel.mention}." if unban_msg else ""
         await interaction.followup.send(
-            f"✅ Successfully unbanned {user.mention} ({player_record.get('ign')}). Queue access has been restored.",
+            f"✅ Successfully unbanned {user.mention} ({player_record.get('ign')}). Queue access has been restored.{channel_note}",
             ephemeral=True,
         )
 
-    # ── Helpers ─────────────────────────────────────────────────────────────
+    # ── Slash Commands (/admin player_ban & /admin_player_ban) ──────────────
 
-    async def _refresh_team_queue(self) -> None:
-        """Helper to notify TeamQueueCog to refresh its persistent channel message."""
-        team_queue_cog = self.bot.get_cog("TeamQueue")
-        if team_queue_cog and hasattr(team_queue_cog, "refresh_queue_message"):
-            try:
-                await team_queue_cog.refresh_queue_message()
-            except Exception as e:
-                log.warning("Could not refresh team queue message: %s", e)
+    @admin_group.command(
+        name="player_ban",
+        description="Ban a player from matchmaking and live queues.",
+    )
+    @app_commands.describe(
+        user="The player to ban from matchmaking.",
+        reason="The infraction reason for this ban.",
+        duration_hours="Optional ban duration in hours (leave empty for permanent).",
+    )
+    async def player_ban(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        reason: str,
+        duration_hours: Optional[int] = None,
+    ) -> None:
+        """Ban a player from queues and matches."""
+        await self._handle_player_ban(interaction, user, reason, duration_hours)
+
+    @app_commands.command(
+        name="admin_player_ban",
+        description="Ban a player from matchmaking and live queues (Realtime UI).",
+    )
+    @app_commands.describe(
+        user="The player to ban from matchmaking.",
+        reason="The infraction reason for this ban.",
+        duration_hours="Optional ban duration in hours (leave empty for permanent).",
+    )
+    async def admin_player_ban_command(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        reason: str,
+        duration_hours: Optional[int] = None,
+    ) -> None:
+        """Top-level command alias for /admin player_ban."""
+        await self._handle_player_ban(interaction, user, reason, duration_hours)
+
+    @admin_group.command(
+        name="player_unban",
+        description="Unban a player and restore queue access.",
+    )
+    @app_commands.describe(
+        user="The player to unban.",
+    )
+    async def player_unban(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Unban a player and clear ban status."""
+        await self._handle_player_unban(interaction, user)
+
+    @app_commands.command(
+        name="admin_player_unban",
+        description="Unban a player and restore queue access.",
+    )
+    @app_commands.describe(
+        user="The player to unban.",
+    )
+    async def admin_player_unban_command(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Top-level command alias for /admin player_unban."""
+        await self._handle_player_unban(interaction, user)
 
     async def _autocomplete_teams(
         self,
