@@ -34,14 +34,18 @@ from utils.ocr.agent_detector import clean_agent_name
 log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_API_KEY  = os.getenv("OPENROUTER_API_KEY_2", "")
-_MODEL    = os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-vl-72b-instruct:free")
+def get_api_key() -> str:
+    return os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY_2") or ""
+
+def get_model() -> str:
+    return os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash"
+
 _TIMEOUT  = int(os.getenv("OPENROUTER_TIMEOUT", "120"))
 _BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def is_configured() -> bool:
-    return bool(_API_KEY)
+    return bool(get_api_key())
 
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
@@ -305,7 +309,12 @@ def _detect_row_teams(image_bytes: bytes) -> list[int]:
     return []
 
 
-def _to_result(data: dict, elapsed_ms: float, image_bytes: Optional[bytes] = None) -> MatchOCRResult:
+def _to_result(
+    data: dict,
+    elapsed_ms: float,
+    image_bytes: Optional[bytes] = None,
+    model: Optional[str] = None,
+) -> MatchOCRResult:
     players_raw = data.get("players") or []
 
     # 1. Ground-truth color-assisted team detection
@@ -382,10 +391,11 @@ def _to_result(data: dict, elapsed_ms: float, image_bytes: Optional[bytes] = Non
     t2_players  = [_make(p, "Team 2") for p in t2]
     conf        = _confidence(players_raw)
     needs_review = conf < 0.60 or len(players_raw) != 10
+    active_model = model or get_model()
 
     return MatchOCRResult(
         success=True,
-        engine=f"OpenRouter/{_MODEL}",
+        engine=f"OpenRouter/{active_model}",
         processing_time_ms=elapsed_ms,
         confidence=conf,
         needs_review=needs_review,
@@ -407,15 +417,17 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
     Fully async — no thread executor needed (aiohttp is already async).
     Raises on failure so match_ocr.py can fall back to Tesseract.
     """
-    if not is_configured():
-        raise RuntimeError("OPENROUTER_API_KEY not set")
+    api_key = get_api_key()
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY (or OPENROUTER_API_KEY_2) not set")
 
+    model   = get_model()
     mime    = _detect_mime(image_bytes)
     b64_img = base64.b64encode(image_bytes).decode()
     data_url = f"data:{mime};base64,{b64_img}"
 
     payload = {
-        "model": _MODEL,
+        "model": model,
         "messages": [
             {
                 "role": "user",
@@ -431,12 +443,12 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
                 ],
             }
         ],
-        "max_tokens": 2048,
+        "max_tokens": 4096,
         "temperature": 0.05,
     }
 
     headers = {
-        "Authorization": f"Bearer {_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/KartikSakhuja02/Vega-Teams-Queue",
         "X-Title": "Vega Esports Scrims Bot",
@@ -504,11 +516,11 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
 
     log.info(
         "OpenRouter %s responded in %.0f ms (tokens: %s, finish: %s)",
-        _MODEL, elapsed_ms,
+        model, elapsed_ms,
         result.get("usage", {}).get("completion_tokens", "?"),
         finish,
     )
     log.debug("Raw response (first 500 chars): %s", raw_content[:500])
 
     parsed = _extract_json(raw_content)
-    return _to_result(parsed, elapsed_ms, image_bytes=image_bytes)
+    return _to_result(parsed, elapsed_ms, image_bytes=image_bytes, model=model)
