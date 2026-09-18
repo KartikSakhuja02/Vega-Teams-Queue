@@ -85,6 +85,7 @@ CONFIG_KEY_QUEUE_PAUSED = "solo_queue_paused"
 CONFIG_KEY_QUEUE_PAUSE_UNTIL = "solo_queue_pause_until"
 CONFIG_KEY_AUTO_CLEAR_MINUTES = "solo_queue_auto_clear_minutes"
 CONFIG_KEY_INACTIVITY_CLEARED = "solo_queue_inactivity_cleared"
+CONFIG_KEY_LAST_PLAYED_MAP = "solo_last_played_map"
 
 
 async def get_solo_auto_clear_minutes() -> int:
@@ -280,6 +281,62 @@ async def get_solo_map_pool() -> list[str]:
         if len(maps) >= 1:
             return maps
     return list(MAP_POOL)
+
+
+async def get_solo_last_played_map() -> Optional[str]:
+    """Return the map played in the previous queue/match to prevent consecutive repetition."""
+    val = await db.get_config(CONFIG_KEY_LAST_PLAYED_MAP)
+    if val and val.strip():
+        return val.strip()
+    try:
+        pool = db.get_pool()
+        if pool:
+            row = await pool.fetchrow(
+                "SELECT selected_map FROM solo_matches WHERE selected_map IS NOT NULL AND selected_map != '' ORDER BY id DESC LIMIT 1"
+            )
+            if row and row.get("selected_map"):
+                return row["selected_map"].strip()
+    except Exception:
+        pass
+    return None
+
+
+async def set_solo_last_played_map(map_name: str) -> None:
+    """Record the map chosen for a match so it won't appear in the next queue's vote options."""
+    if map_name and map_name.strip():
+        await db.set_config(CONFIG_KEY_LAST_PLAYED_MAP, map_name.strip())
+
+
+async def sample_map_vote_options(map_pool: list[str]) -> list[str]:
+    """
+    Select up to 4 maps for the map vote phase.
+    Excludes the previously selected/voted map to reduce consecutive map repetition.
+    """
+    pool_copy = list(map_pool) if map_pool else ["Bind", "Haven", "Split", "Ascent"]
+    last_map = await get_solo_last_played_map()
+
+    candidates = pool_copy
+    if last_map:
+        filtered = [m for m in pool_copy if m.strip().lower() != last_map.strip().lower()]
+        if len(filtered) >= min(4, len(pool_copy)):
+            candidates = filtered
+            log.info("Map vote options: excluded previous map '%s' from 4 voting options", last_map)
+        elif filtered:
+            candidates = filtered
+            log.info("Map vote options: small pool, prioritized non-repeated maps over '%s'", last_map)
+
+    target_count = min(4, len(pool_copy))
+    num_to_sample = min(target_count, len(candidates))
+    selected = random.sample(candidates, num_to_sample)
+
+    # If map pool was very small and we need to fill remaining slots up to target_count
+    if len(selected) < target_count:
+        remaining = [m for m in pool_copy if m not in selected]
+        needed = target_count - len(selected)
+        if remaining:
+            selected.extend(random.sample(remaining, min(needed, len(remaining))))
+
+    return selected
 
 
 async def get_solo_embed_colour() -> discord.Colour:
@@ -1088,7 +1145,11 @@ class PlayerDraftSelect(discord.ui.Select):
                 return
 
             if veto_mode == "RANDOM_MAP":
-                final_map = random.choice(map_pool)
+                pool_copy = list(map_pool) if map_pool else ["Bind", "Haven", "Split", "Ascent"]
+                last_map = await get_solo_last_played_map()
+                filtered = [m for m in pool_copy if m.strip().lower() != (last_map or "").strip().lower()]
+                final_map = random.choice(filtered if filtered else pool_copy)
+                await set_solo_last_played_map(final_map)
                 updated_match = await db.update_solo_match_map_veto(
                     match_id=self.match_id,
                     available_maps=[],
@@ -1115,8 +1176,7 @@ class PlayerDraftSelect(discord.ui.Select):
                     )
                 return
             elif veto_mode in ("MAP_VOTE", "VOTE"):
-                pool_copy = list(map_pool) if map_pool else ["Bind", "Haven", "Split", "Ascent"]
-                selected_4 = random.sample(pool_copy, min(4, len(pool_copy)))
+                selected_4 = await sample_map_vote_options(map_pool)
                 await db.update_solo_match_draft(
                     match_id=self.match_id,
                     team1_player_ids=t1_ids,
@@ -1298,6 +1358,7 @@ class SoloMapVetoView(discord.ui.View):
             c1_id = match["captain1_id"]
             c2_id = match["captain2_id"]
 
+            await set_solo_last_played_map(chosen_map)
             updated_match = await db.update_solo_match_map_veto(
                 match_id=match["id"],
                 available_maps=[],
@@ -1384,6 +1445,7 @@ class SoloMapVetoView(discord.ui.View):
             # If only 1 map remains, it is the selected map!
             if len(avail_maps) <= 1:
                 final_map = avail_maps[0] if avail_maps else map_to_ban
+                await set_solo_last_played_map(final_map)
                 updated_match = await db.update_solo_match_map_veto(
                     match_id=match["id"],
                     available_maps=[],
@@ -1613,6 +1675,7 @@ class SoloMapVoteView(discord.ui.View):
             else:
                 final_map = random.choice(self.map_options) if self.map_options else "Bind"
 
+            await set_solo_last_played_map(final_map)
             banned = [m for m in self.map_options if m != final_map]
             log.info(
                 "SoloMapVoteView._finalize match #%s: vote counts=%s selected final_map=%s",
@@ -3664,7 +3727,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await finalize_teams_and_move(self.bot, current_match, guild, t1_ids, t2_ids)
 
             if veto_mode == "RANDOM_MAP":
-                final_map = random.choice(map_pool)
+                pool_copy = list(map_pool) if map_pool else ["Bind", "Haven", "Split", "Ascent"]
+                last_map = await get_solo_last_played_map()
+                filtered = [m for m in pool_copy if m.strip().lower() != (last_map or "").strip().lower()]
+                final_map = random.choice(filtered if filtered else pool_copy)
+                await set_solo_last_played_map(final_map)
                 await db.update_solo_match_draft(
                     match_id=current_match["id"],
                     team1_player_ids=t1_ids,
@@ -3698,8 +3765,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 panel_msg = await channel.send(**send_kwargs)
                 await db.update_solo_match_panel(current_match["id"], panel_msg.id)
             elif veto_mode in ("MAP_VOTE", "VOTE"):
-                pool_copy = list(map_pool) if map_pool else ["Bind", "Haven", "Split", "Ascent"]
-                selected_4 = random.sample(pool_copy, min(4, len(pool_copy)))
+                selected_4 = await sample_map_vote_options(map_pool)
                 await db.update_solo_match_draft(
                     match_id=current_match["id"],
                     team1_player_ids=t1_ids,
