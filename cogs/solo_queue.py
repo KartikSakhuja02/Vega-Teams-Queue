@@ -2844,7 +2844,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             self._auto_resume_task.cancel()
 
     def _schedule_auto_clear_check(self) -> None:
-        """Schedule a background check to clear the solo queue if no match is formed within limit."""
+        """Schedule a background check to remove players whose queue time exceeds the inactivity limit."""
         if self._auto_clear_task and not self._auto_clear_task.done():
             self._auto_clear_task.cancel()
 
@@ -2858,20 +2858,23 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 if not queued or len(queued) >= 10:
                     return
 
-                oldest_ts: Optional[float] = None
+                now = time.time()
+                timeout_sec = mins * 60
+                next_delay: Optional[float] = None
+
                 for p in queued:
                     jt = p.get("joined_at")
                     if jt:
                         ts = jt.timestamp() if isinstance(jt, datetime) else float(jt)
-                        if oldest_ts is None or ts < oldest_ts:
-                            oldest_ts = ts
+                        delay = (ts + timeout_sec) - now
+                        if next_delay is None or delay < next_delay:
+                            next_delay = delay
 
-                if oldest_ts is None:
+                if next_delay is None:
                     return
 
-                remaining = (oldest_ts + mins * 60) - time.time()
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
+                if next_delay > 0:
+                    await asyncio.sleep(next_delay)
                 await self._check_auto_clear_timeout()
             except asyncio.CancelledError:
                 pass
@@ -2896,7 +2899,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 break
 
     async def _check_auto_clear_timeout(self) -> None:
-        """Check if queued players have exceeded inactivity time and clear the queue if so."""
+        """
+        Check queued players against the inactivity timeout.
+        Only players who have exceeded their individual time in queue are removed.
+        If the queue becomes empty as a result (including when the only 1 person in the queue was removed),
+        the queue UI updates to show the auto-cleared state.
+        """
         mins = await get_solo_auto_clear_minutes()
         if mins <= 0:
             return
@@ -2905,53 +2913,88 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         if not queued or len(queued) >= 10:
             return
 
-        oldest_ts: Optional[float] = None
+        now = time.time()
+        timeout_sec = mins * 60
+        expired_players = []
+
         for p in queued:
             jt = p.get("joined_at")
             if jt:
                 ts = jt.timestamp() if isinstance(jt, datetime) else float(jt)
-                if oldest_ts is None or ts < oldest_ts:
-                    oldest_ts = ts
+                if (now - ts) >= timeout_sec:
+                    expired_players.append(p)
 
-        if oldest_ts is None:
+        if not expired_players:
             return
 
-        elapsed = time.time() - oldest_ts
-        if elapsed >= (mins * 60):
-            log.info(
-                "Solo queue auto-cleared due to inactivity: %d player(s), elapsed %.1fs >= %ds limit.",
-                len(queued),
-                elapsed,
-                mins * 60,
-            )
-            pids = [p["discord_id"] for p in queued]
-            try:
-                await db.set_players_status_bulk(pids, "IDLE")
-            except Exception:
-                for pid in pids:
-                    try:
-                        await db.set_player_status(pid, "IDLE")
-                    except Exception as exc:
-                        log.warning("Failed to reset player %d to IDLE: %s", pid, exc)
-            await db.clear_solo_queue(pids)
+        pids = [p["discord_id"] for p in expired_players]
+        log.info(
+            "Solo queue inactivity: removing %d player(s) whose queue time exceeded %d min limit: %s",
+            len(expired_players),
+            mins,
+            pids,
+        )
+
+        try:
+            await db.set_players_status_bulk(pids, "IDLE")
+        except Exception:
+            for pid in pids:
+                try:
+                    await db.set_player_status(pid, "IDLE")
+                except Exception as exc:
+                    log.warning("Failed to reset player %d to IDLE: %s", pid, exc)
+
+        await db.clear_solo_queue(pids)
+
+        remaining_count = len(queued) - len(expired_players)
+
+        # UI change:
+        # If the queue became completely empty due to inactivity
+        # (e.g. only 1 person was in queue and got removed, or all players expired):
+        if remaining_count <= 0:
             self._inactivity_cleared = True
             await db.set_config(CONFIG_KEY_INACTIVITY_CLEARED, "1")
-            await self.refresh_queue_message()
+        else:
+            self._inactivity_cleared = False
+            await db.set_config(CONFIG_KEY_INACTIVITY_CLEARED, "0")
 
+        await self.refresh_queue_message()
+
+        # DM notification to removed players
+        for p in expired_players:
             try:
-                await send_log(
-                    self.bot,
-                    title="10-Man Solo Queue Auto-Cleared",
-                    description=f"Queue was automatically cleared due to inactivity ({mins} minute limit reached without forming a match).",
-                    colour=COL_WARNING,
-                    fields=[
-                        ("Players Evicted", str(len(queued)), True),
-                        ("Timeout Limit", f"{mins} minute(s)", True),
-                    ],
-                    guild_id=None,
-                )
-            except Exception as e:
-                log.debug("Failed to send auto-clear log: %s", e)
+                user = self.bot.get_user(p["discord_id"])
+                if user:
+                    await user.send(
+                        f"⏰ You have been removed from the 10-man queue due to inactivity ({mins} minute limit reached without a match forming)."
+                    )
+            except Exception:
+                pass
+
+        try:
+            desc = (
+                f"Queue auto-cleared due to inactivity ({len(expired_players)} player(s) removed, 0 remaining)."
+                if remaining_count <= 0
+                else f"Removed {len(expired_players)} inactive player(s) from queue ({remaining_count} remaining)."
+            )
+            await send_log(
+                self.bot,
+                title="Solo Queue Inactivity Removal",
+                description=desc,
+                colour=COL_WARNING,
+                fields=[
+                    ("Removed Players", ", ".join(f"<@{pid}>" for pid in pids), False),
+                    ("Remaining in Queue", f"{remaining_count} / 10", True),
+                    ("Timeout Limit", f"{mins} minute(s)", True),
+                ],
+                guild_id=None,
+            )
+        except Exception as e:
+            log.debug("Failed to send auto-clear log: %s", e)
+
+        # If players still remain in queue, schedule check for the next oldest player
+        if remaining_count > 0:
+            self._schedule_auto_clear_check()
 
     def _invalidate_pause_cache(self) -> None:
         """Invalidate the in-memory pause-state cache so the next call re-reads from DB."""
@@ -3305,7 +3348,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         user_id = interaction.user.id
         removed = await db.remove_player_from_solo_queue(user_id)
         if removed:
+            self._inactivity_cleared = False
             await asyncio.gather(
+                db.set_config(CONFIG_KEY_INACTIVITY_CLEARED, "0"),
                 db.set_player_status(user_id, "IDLE"),
                 interaction.followup.send("Left queue.", ephemeral=True),
             )
@@ -4166,38 +4211,38 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             log.debug("Failed to send auto-clear config log: %s", e)
 
         await interaction.followup.send(
-            f"Auto-clear timer set to **{minutes} minute(s)**. If players join the queue and no match is formed within {minutes} minute(s), the queue will automatically clear due to inactivity.",
+            f"Queue inactivity timer set to **{minutes} minute(s)**. Players who wait in queue for longer than {minutes} minute(s) will be automatically removed due to inactivity. If all players leave or are removed, the queue UI will display the inactivity status.",
             ephemeral=True,
         )
 
     @app_commands.command(
         name="auto-clear-solo-queue",
-        description="Set automatic queue clear timer due to inactivity (Staff only).",
+        description="Set player queue inactivity timeout (Staff only).",
     )
     @app_commands.describe(
-        time_in_minutes="Inactivity time before auto-clearing (e.g. 10, 15, 30m, or 0 to disable)."
+        time_in_minutes="Inactivity time before removing a player (e.g. 10, 15, 30m, or 0 to disable)."
     )
     async def auto_clear_solo_queue_hyphen_cmd(
         self,
         interaction: discord.Interaction,
         time_in_minutes: str,
     ) -> None:
-        """Staff command to set automatic queue clear timer due to inactivity."""
+        """Staff command to set automatic queue inactivity timeout."""
         await self._handle_auto_clear_solo_queue(interaction, time_in_minutes)
 
     @app_commands.command(
         name="auto_clear_solo_queue",
-        description="Set automatic queue clear timer due to inactivity (Staff only).",
+        description="Set player queue inactivity timeout (Staff only).",
     )
     @app_commands.describe(
-        time_in_minutes="Inactivity time before auto-clearing (e.g. 10, 15, 30m, or 0 to disable)."
+        time_in_minutes="Inactivity time before removing a player (e.g. 10, 15, 30m, or 0 to disable)."
     )
     async def auto_clear_solo_queue_underscore_cmd(
         self,
         interaction: discord.Interaction,
         time_in_minutes: str,
     ) -> None:
-        """Staff command to set automatic queue clear timer due to inactivity."""
+        """Staff command to set automatic queue inactivity timeout."""
         await self._handle_auto_clear_solo_queue(interaction, time_in_minutes)
 
     @app_commands.command(
