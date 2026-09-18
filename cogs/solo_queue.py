@@ -4040,6 +4040,35 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         except Exception as e:
             log.warning("Could not set lobby players to IDLE on submission start: %s", e)
 
+        # 4c. Delete all match voice channels immediately; keep only the text channel active while screenshot is processing
+        if interaction.guild:
+            async def _cleanup_vcs_on_submit() -> None:
+                if not interaction.guild:
+                    return
+                vcs_to_delete: set[discord.VoiceChannel] = set()
+                for vid_key in ("voice_lobby_id", "voice_team1_id", "voice_team2_id"):
+                    vid = match.get(vid_key)
+                    if vid:
+                        vch = interaction.guild.get_channel(vid)
+                        if isinstance(vch, discord.VoiceChannel):
+                            vcs_to_delete.add(vch)
+
+                # Also check parent category for any match voice channels
+                if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+                    cat = interaction.channel.category
+                    if cat and cat.id != SOLO_MATCH_CATEGORY_ID and f"#{match['id']}" in cat.name:
+                        for vch in cat.voice_channels:
+                            vcs_to_delete.add(vch)
+
+                for vch in vcs_to_delete:
+                    try:
+                        await vch.delete(reason=f"Queue #{match['id']} /submit-result — cleaning up voice channels")
+                        log.info("Deleted match VC %s (%d) on result submission.", vch.name, vch.id)
+                    except Exception as exc:
+                        log.debug("Failed deleting match VC %d on submit-result: %s", vch.id, exc)
+
+            asyncio.create_task(_cleanup_vcs_on_submit())
+
         # 5. Send public calculating message
         await interaction.response.send_message("Calculating result, please wait...")
 
