@@ -1973,6 +1973,19 @@ async def add_player_to_solo_queue(discord_id: int) -> bool:
     return True
 
 
+async def add_players_to_solo_queue_bulk(discord_ids: list[int]) -> None:
+    """Add multiple players to the 10-man solo queue in bulk, preserving existing queue entries."""
+    if not discord_ids:
+        return
+    query = """
+        INSERT INTO solo_queue (discord_id, joined_at)
+        SELECT pid, NOW() FROM unnest($1::BIGINT[]) AS pid
+        ON CONFLICT (discord_id) DO UPDATE
+            SET joined_at = NOW()
+    """
+    await get_pool().execute(query, discord_ids)
+
+
 async def remove_player_from_solo_queue(discord_id: int) -> bool:
     """Remove a player from the 10-man solo queue."""
     res = await get_pool().execute(

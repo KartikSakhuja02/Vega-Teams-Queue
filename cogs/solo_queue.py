@@ -4959,35 +4959,67 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         except Exception as e:
             log.debug("Failed to update panel message on player replacement: %s", e)
 
-    async def _auto_cancel_match_due_to_timeout(self, match: dict, guild: discord.Guild, reason: str) -> None:
-        """Auto-cancel match when queue is empty or no subs are available."""
+    async def _auto_cancel_match_due_to_timeout(
+        self,
+        match: dict,
+        guild: discord.Guild,
+        reason: str,
+        requeue_player_ids: Optional[list[int]] = None,
+    ) -> None:
+        """Auto-cancel match when queue is empty or no subs are available, automatically re-queuing ready players."""
         match_id = match["id"]
         log.info("Auto-cancelling Queue #%d: %s", match_id, reason)
 
         # 1. Update database
         await db.cancel_solo_match(match_id)
 
-        # 2. Reset all participants to IDLE
+        # 2. Identify participants
         all_pids = list(dict.fromkeys(
             (match.get("team1_player_ids") or [])
             + (match.get("team2_player_ids") or [])
             + (match.get("available_player_ids") or [])
             + [p for p in (match.get("captain1_id"), match.get("captain2_id")) if p]
         ))
-        if all_pids:
+
+        # If requeue_player_ids not provided, discover players who connected to voice lobby
+        if requeue_player_ids is None:
+            v_lobby_id = match.get("voice_lobby_id")
+            if v_lobby_id and guild:
+                vch = guild.get_channel(v_lobby_id)
+                if isinstance(vch, discord.VoiceChannel):
+                    requeue_player_ids = [m.id for m in vch.members if m.id in all_pids]
+
+        requeue_set = set(requeue_player_ids or [])
+        idle_pids = [pid for pid in all_pids if pid not in requeue_set]
+
+        # Reset offline/missing players to IDLE
+        if idle_pids:
             try:
-                await db.set_players_status_bulk(all_pids, "IDLE")
+                await db.set_players_status_bulk(idle_pids, "IDLE")
             except Exception as e:
-                log.warning("Could not set players to IDLE on auto-cancel: %s", e)
+                log.warning("Could not set missing players to IDLE on auto-cancel: %s", e)
+
+        # Automatically re-queue players who were connected to voice so they don't have to re-click
+        if requeue_set:
+            try:
+                await db.add_players_to_solo_queue_bulk(list(requeue_set))
+                await db.set_players_status_bulk(list(requeue_set), "IN_QUEUE")
+                log.info("Auto re-queued %d connected players for Queue #%d: %s", len(requeue_set), match_id, requeue_set)
+            except Exception as e:
+                log.warning("Could not auto re-queue players on cancel: %s", e)
 
         # 3. Post cancellation notice in text channel before deletion
         ch_id = match.get("channel_id")
         match_ch = guild.get_channel(ch_id) if ch_id else None
         if isinstance(match_ch, discord.TextChannel):
             try:
+                requeue_line = ""
+                if requeue_set:
+                    requeue_pings = " ".join(f"<@{pid}>" for pid in requeue_set)
+                    requeue_line = f"\n{len(requeue_set)} active player{'s' if len(requeue_set) > 1 else ''} automatically returned to queue: {requeue_pings}"
                 await match_ch.send(
                     f"**Match #{match_id} Cancelled**\n"
-                    f"{reason}\n"
+                    f"{reason}{requeue_line}\n"
                     f"This channel will be deleted in 10 seconds."
                 )
             except Exception:
@@ -5023,6 +5055,10 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         # Refresh queue panel
         self._schedule_queue_panel_refresh()
+
+        # If players were re-queued, check if queue now has 10 to launch another match
+        if requeue_set and guild:
+            asyncio.create_task(self._check_and_create_solo_match(guild))
 
     async def _find_and_prompt_sub(
         self,
@@ -5183,7 +5219,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 f"{len(missing_pids)} player{'s' if len(missing_pids) > 1 else ''} failed to connect to voice in time, "
                 f"and insufficient substitutes ({len(queued_eligible)}) were available in the queue. Match cancelled."
             )
-            await self._auto_cancel_match_due_to_timeout(current_match, guild, reason=reason)
+            await self._auto_cancel_match_due_to_timeout(
+                current_match,
+                guild,
+                reason=reason,
+                requeue_player_ids=list(connected_pids),
+            )
             return
 
         curr = current_match
@@ -5200,6 +5241,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     curr,
                     guild,
                     reason=f"<@{missing_pid}> failed to connect to voice in time, and there are no replacement substitutes available in the queue.",
+                    requeue_player_ids=list(connected_pids),
                 )
                 return
 
