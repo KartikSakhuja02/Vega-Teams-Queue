@@ -467,12 +467,14 @@ def build_solo_queue_embed(
     if queued_players:
         lines: list[str] = []
         for idx, p in enumerate(queued_players, 1):
+            pid = p.get("discord_id")
             ign = p.get("ign") or p.get("discord_username") or "Player"
             elo = p.get("elo", 1000)
             region = p.get("region") or "Global"
             ts = int(p["joined_at"].timestamp()) if p.get("joined_at") else 0
             time_str = f" • <t:{ts}:R>" if ts else ""
-            lines.append(f"`{idx}.` **{ign}** — `{elo} ELO` `[{region}]`{time_str}")
+            user_part = f"<@{pid}> " if pid else ""
+            lines.append(f"`{idx}.` {user_part}**{ign}** — `{elo} ELO` `[{region}]`{time_str}")
         embed.add_field(name="Players", value="\n".join(lines), inline=False)
     else:
         embed.add_field(name="Players", value="*No players in queue yet*", inline=False)
@@ -501,7 +503,7 @@ def build_solo_checkin_embed(
     for pid in all_pids:
         ign = players_by_id.get(pid, {}).get("ign") or f"Player"
         icon = "🟢" if pid in connected_pids else "🔴"
-        lines.append(f"{icon} {ign}")
+        lines.append(f"{icon} <@{pid}> **{ign}**")
 
     desc = f"`[ {checked_count} / {len(all_pids)} in Voice ]` — <#{lobby_vc_id}>\n\n" + "  ".join(lines)
     if deadline_timestamp:
@@ -3857,12 +3859,18 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 agent_emoji = get_agent_emoji(self.bot, agent_name, interaction.guild)
                 prefix = f"{agent_emoji} " if agent_emoji else (f"`[{agent_name}]` " if agent_name else "")
 
-                lines.append(f"{prefix}<@{pid}>{mvp_badge}")
+                ign = lobby_player_records.get(pid, {}).get("ign") or ""
+                ign_part = f" **{ign}**" if ign else ""
+                lines.append(f"{prefix}<@{pid}>{ign_part}{mvp_badge}")
                 lines.append(f"└ [{k}/{d}/{a}] {rating:.2f}r {elo_str}")
             return lines
 
         t1_player_lines = _format_team_lines(t1_pids)
         t2_player_lines = _format_team_lines(t2_pids)
+
+        def _player_display(p_id: int) -> str:
+            p_ign = lobby_player_records.get(p_id, {}).get("ign")
+            return f"<@{p_id}> **{p_ign}**" if p_ign else f"<@{p_id}>"
 
         desc_parts = [
             "**Score**",
@@ -3870,13 +3878,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             f"{t2_team_name} [{t2_score}]",
         ]
         if overall_mvp_pid:
-            desc_parts.append(f"👑 **Match MVP:** <@{overall_mvp_pid}>")
+            desc_parts.append(f"👑 **Match MVP:** {_player_display(overall_mvp_pid)}")
         if t1_mvp_pid:
             t1_extra = " *(Match MVP)*" if t1_mvp_pid == overall_mvp_pid else ""
-            desc_parts.append(f"⭐ **{t1_team_name} MVP:** <@{t1_mvp_pid}>{t1_extra}")
+            desc_parts.append(f"⭐ **{t1_team_name} MVP:** {_player_display(t1_mvp_pid)}{t1_extra}")
         if t2_mvp_pid:
             t2_extra = " *(Match MVP)*" if t2_mvp_pid == overall_mvp_pid else ""
-            desc_parts.append(f"⭐ **{t2_team_name} MVP:** <@{t2_mvp_pid}>{t2_extra}")
+            desc_parts.append(f"⭐ **{t2_team_name} MVP:** {_player_display(t2_mvp_pid)}{t2_extra}")
 
         desc_parts.extend([
             "",
