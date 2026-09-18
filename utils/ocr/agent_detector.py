@@ -293,15 +293,25 @@ def detect_agents_from_image(img_bgr: np.ndarray) -> list[dict]:
         return [{"row": r, "agent": None, "score": 0.0, "team": 1 if r < 5 else 2} for r in range(10)]
 
     h, w = img_bgr.shape[:2]
+    aspect_ratio = w / float(h)
 
-    # Calibrated Valorant Mobile scoreboard bounds:
-    # Table rows span ~ 26.8% to 92.0% of image height
-    y_start = 0.268 * h
-    y_end = 0.920 * h
+    # Differentiate between tablet/iPad (e.g. 4:3, 1.43, 3:2) vs phone (16:9, 19.5:9, 20:9):
+    if aspect_ratio < 1.65:
+        # Tablet / iPad: Scoreboard table spans 31.7% to 82.5% vertically
+        y_start = 0.317 * h
+        y_end = 0.825 * h
+        x0, x1 = int(0.080 * w), int(0.125 * w)
+        sample_x0 = int(0.20 * w)
+        sample_x1 = int(0.35 * w)
+    else:
+        # Standard Phone: Scoreboard table spans 26.8% to 92.0%
+        y_start = 0.268 * h
+        y_end = 0.920 * h
+        x0, x1 = int(0.140 * w), int(0.188 * w)
+        sample_x0 = int(0.45 * w)
+        sample_x1 = int(0.55 * w)
+
     step = (y_end - y_start) / 10.0
-
-    # Avatar icon horizontal search window: 14.0% to 18.8% of image width
-    x0, x1 = int(0.140 * w), int(0.188 * w)
 
     results: list[dict] = []
 
@@ -313,10 +323,13 @@ def detect_agents_from_image(img_bgr: np.ndarray) -> list[dict]:
         agent_name, score = detect_agent_in_row_strip(strip)
 
         # Detect row team color from table background (greenish = Team 1, reddish = Team 2)
-        sample = img_bgr[max(0, y0 + 4):min(h, y1 - 4), int(0.45 * w):int(0.55 * w)]
+        sample = img_bgr[max(0, y0 + 4):min(h, y1 - 4), sample_x0:sample_x1]
         if sample.size > 0:
             mean_b, mean_g, mean_r = sample.mean(axis=(0, 1))
-            row_team = 1 if mean_g > mean_r else 2
+            if mean_r > 100 and mean_g > 100 and mean_b < 120:
+                row_team = 1  # Active player gold highlight is Team 1
+            else:
+                row_team = 1 if mean_g > mean_r else 2
         else:
             row_team = 1 if r < 5 else 2
 
@@ -364,15 +377,15 @@ def resolve_player_agents(
         if vlm_agent and vlm_agent in CANONICAL_AGENTS:
             p.agent = vlm_agent
             return
-        if cv_agent and cv_score >= 0.35:
+        if cv_agent and cv_score >= 0.40:
             p.agent = cv_agent
             log.debug("Player %s resolved agent by CV: %s (score=%.3f)", p.ign, cv_agent, cv_score)
         elif vlm_agent:
             p.agent = vlm_agent
-        elif cv_agent and cv_score >= 0.28:
+        elif cv_agent and cv_score >= 0.32:
             p.agent = cv_agent
         else:
-            p.agent = vlm_agent or cv_agent
+            p.agent = None
 
     if cv_detections:
         t1_rows = [d for d in cv_detections if d.get("team") == 1]

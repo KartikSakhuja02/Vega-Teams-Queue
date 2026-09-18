@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _API_KEY  = os.getenv("OPENROUTER_API_KEY_2", "")
-_MODEL    = os.getenv("OPENROUTER_MODEL", "inclusionai/ling-3.0-flash-vl:free")
+_MODEL    = os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-vl-72b-instruct:free")
 _TIMEOUT  = int(os.getenv("OPENROUTER_TIMEOUT", "120"))
 _BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -47,12 +47,13 @@ def is_configured() -> bool:
 # ── Prompt ────────────────────────────────────────────────────────────────────
 _PROMPT = """\
 You are analyzing a Valorant Mobile (CN version) custom match end-screen scoreboard.
+The image may be from a phone or a tablet/iPad.
 
 Return ONLY a valid JSON object. No explanation, no preamble, no markdown fences.
 
 Layout:
 - TOP CENTER: "N 获胜 M" → team1_score=N, team2_score=M
-- TOP LEFT: map name after "赛事模式-" (e.g. 莲华古城, 深海明珠, 源工重镇, 亚海悬城, 微风岛屿)
+- TOP LEFT: map name after "赛事模式-" (e.g. 莲华古城, 深海明珠, 源工重镇, 亚海悬城, 微风岛屿, 隐世修所, 霓虹町, 森寒冬港)
 - TOP LEFT: date "YYYY/MM/DD HH:MM" and duration "用时 MM:SS"
 - TABLE: 10 player rows total.
   IMPORTANT - TEAM ASSIGNMENT:
@@ -104,7 +105,22 @@ Layout:
   • Waylay: Light lavender/purple hair, modern tactical combat gear.
   Set "agent" to the detected agent's name or null if unclear.
 
-  Columns: 排名/头像/IGN | 平均战斗评分(ACS) | 击败/败阵/助攻(K/D/A) | 对局总伤害(damage) | 率先击败(first_bloods) | 部署(plants) | 拆除(defuses)
+  IMPORTANT - SCOREBOARD COLUMNS (Read strictly left-to-right for each row):
+  Column 1: 排名/头像/IGN (Avatar Icon + Player Name + optional MVP tag "我方-最佳" or "敌方-最佳")
+  Column 2: 平均战斗评分 (Average Combat Score / ACS) -> "acs": single integer (e.g. 469, 420, 363, 353, 347, 207)
+  Column 3: 击败/败阵/助攻 (Kills / Deaths / Assists) -> ALWAYS formatted as "K / D / A" separated by slashes.
+    - kills: the number BEFORE the first slash
+    - deaths: the number BETWEEN the two slashes
+    - assists: the number AFTER the second slash
+    Example: "13 / 4 / 1" means kills=13, deaths=4, assists=1.
+    Example: "10 / 6 / 5" means kills=10, deaths=6, assists=5.
+    Example: "10 / 7 / 4" means kills=10, deaths=7, assists=4.
+    Example: "10 / 8 / 0" means kills=10, deaths=8, assists=0.
+    DO NOT confuse the assists number with First Bloods or any other column!
+  Column 4: 对局总伤害 (Total Damage) -> "damage": single integer (e.g. 2406, 2482, 1704, 1663)
+  Column 5: 率先击败 (First Bloods) -> "first_bloods": single integer (e.g. 5, 0, 1)
+  Column 6: 部署 (Plants) -> "plants": single integer (e.g. 0, 1, 2)
+  Column 7: 拆除 (Defuses) -> "defuses": single integer (e.g. 0, 1)
 
 Return exactly this JSON (no extra keys):
 {
@@ -118,7 +134,7 @@ Return exactly this JSON (no extra keys):
   "players": [
     {
       "name": "<exact name without MVP badge>",
-      "agent": "<Agent name e.g. Iso, Neon, Sova, Phoenix, Killjoy, Cypher, Jett or null>",
+      "agent": "<Agent name e.g. Chamber, Gekko, Phoenix, Reyna, Jett, Cypher or null>",
       "team": <1 or 2>,
       "is_mvp": <true/false>,
       "mvp_type": <"Team MVP" or "Enemy MVP" or "Match MVP" or null>,
@@ -135,9 +151,9 @@ Return exactly this JSON (no extra keys):
 }
 
 Rules:
-1. players must contain all 10 players from the table.
+1. players must contain all 10 players from the table in order from top to bottom.
 2. EXACTLY 5 players must have team=1, and EXACTLY 5 players must have team=2.
-3. K/D/A format is kills/deaths/assists separated by "/".
+3. In column 3 (击败/败阵/助攻), strictly extract kills / deaths / assists from the "K / D / A" numbers.
 4. Use null for any number you cannot read confidently. Never guess.
 5. Return ONLY the JSON object. Nothing before or after.
 """
@@ -205,8 +221,18 @@ def _detect_row_teams(image_bytes: bytes) -> list[int]:
         with Image.open(io.BytesIO(image_bytes)) as img:
             img = img.convert("RGB")
             w, h = img.size
-            y_start = int(0.28 * h)
-            y_end = int(0.92 * h)
+            ar = w / float(h)
+            if ar < 1.65:
+                # Tablet / iPad: Scoreboard table spans 31.7% to 82.5%
+                y_start = int(0.317 * h)
+                y_end = int(0.825 * h)
+                sample_xs = (0.20, 0.30, 0.40, 0.50)
+            else:
+                # Standard Phone
+                y_start = int(0.28 * h)
+                y_end = int(0.92 * h)
+                sample_xs = (0.25, 0.35, 0.45, 0.55)
+
             row_h = (y_end - y_start) / 10
 
             row_types = []
@@ -214,7 +240,7 @@ def _detect_row_teams(image_bytes: bytes) -> list[int]:
                 cy = int(y_start + (i + 0.5) * row_h)
                 votes_teal = 0
                 votes_red = 0
-                for frac_x in (0.25, 0.35, 0.45, 0.55):
+                for frac_x in sample_xs:
                     sx = int(frac_x * w)
                     pixels = [
                         img.getpixel((min(w - 1, max(0, sx + dx)), min(h - 1, max(0, cy + dy))))
@@ -294,12 +320,23 @@ def _to_result(data: dict, elapsed_ms: float, image_bytes: Optional[bytes] = Non
         t2 = [p for p in players_raw if p.get("team") == 2]
 
     def _make(p: dict, team_label: str) -> PlayerRowStats:
-        # Handle K/D/A passed as a single "kills" string
+        # Handle K/D/A passed as slash string in "kda" or "kills"
         kills = deaths = assists = 0
-        raw_k = p.get("kills")
-        if isinstance(raw_k, str) and "/" in raw_k:
-            parts = raw_k.split("/")
-            kills, deaths, assists = _clean_int(parts[0]), _clean_int(parts[1]), _clean_int(parts[2])
+        raw_kda = p.get("kda") or p.get("kills")
+        if isinstance(raw_kda, str) and "/" in raw_kda:
+            parts = [re.sub(r"[^\d]", "", s) for s in raw_kda.split("/")]
+            if len(parts) >= 3:
+                kills = _clean_int(parts[0])
+                deaths = _clean_int(parts[1])
+                assists = _clean_int(parts[2])
+            elif len(parts) == 2:
+                kills = _clean_int(parts[0])
+                deaths = _clean_int(parts[1])
+                assists = _clean_int(p.get("assists"))
+            else:
+                kills = _clean_int(p.get("kills"))
+                deaths = _clean_int(p.get("deaths"))
+                assists = _clean_int(p.get("assists"))
         else:
             kills   = _clean_int(p.get("kills"))
             deaths  = _clean_int(p.get("deaths"))
