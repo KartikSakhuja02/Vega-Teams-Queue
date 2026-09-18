@@ -42,9 +42,9 @@ log = logging.getLogger(__name__)
 # ── Config (read once at import — changes require bot restart) ────────────────
 _BASE_URL   = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 _MODEL      = os.getenv("OLLAMA_MODEL",    "qwen2.5vl:3b")
-_TIMEOUT    = int(os.getenv("OLLAMA_TIMEOUT",    "0"))     # 0 = no timeout
-_MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "1500"))  # Sufficient tokens for all 10 players
-_NUM_CTX    = int(os.getenv("OLLAMA_NUM_CTX",    "4096"))  # Optimal context for CPU inference
+_TIMEOUT    = int(os.getenv("OLLAMA_TIMEOUT",    "0"))     # 0 = no timeout (wait as long as needed for 100% accuracy)
+_MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "2500"))  # Generous tokens for complete 10-player JSON
+_NUM_CTX    = int(os.getenv("OLLAMA_NUM_CTX",    "8192"))  # Full high-res context
 
 # GPU concurrency guard: RTX 2050 / 4 GB VRAM → 1 vision inference at a time.
 inference_semaphore = asyncio.Semaphore(1)
@@ -67,38 +67,104 @@ _HEADERS = {
     "ngrok-skip-browser-warning": "true",
 }
 
-# ── Scoreboard OCR prompt (same as OpenRouter) ────────────────────────────────
+# ── Scoreboard OCR prompt (High-Precision Full Guide) ──────────────────────────
 _SCOREBOARD_PROMPT = """\
 You are analyzing a Valorant Mobile (CN version) custom match end-screen scoreboard.
 
-Return ONLY a valid, compact JSON object (minimal whitespace, no markdown fences).
+Return ONLY a valid JSON object. No explanation, no preamble, no markdown fences.
 
 Layout:
 - TOP CENTER: "N 获胜 M" → team1_score=N, team2_score=M
 - TOP LEFT: map name after "赛事模式-" (e.g. 莲华古城, 深海明珠, 源工重镇, 亚海悬城, 微风岛屿, 隐世修所, 霓虹町, 森寒冬港)
 - TOP LEFT: date "YYYY/MM/DD HH:MM" and duration "用时 MM:SS"
 - TABLE: 10 player rows total.
-  TEAM ASSIGNMENT (5v5 - exactly 5 players on team 1, 5 on team 2):
+  IMPORTANT - TEAM ASSIGNMENT:
+  The table may be sorted by individual score ("个人排名"), so green and red rows are INTERLEAVED.
+  Every match is 5v5 — there must be EXACTLY 5 players on team 1 and EXACTLY 5 players on team 2.
+  Determine team for each row by background color:
   • GREEN / TEAL row = team 1 (Friendly / 我方)
   • RED / MAROON row = team 2 (Enemy / 敌方)
-  • GOLD / YELLOW row = highlighted player; assign to whichever team needs to reach 5.
+  • GOLD / YELLOW row = the viewer's highlighted row. Assign this player to whichever team needs to reach 5 players.
 
-  MVP BADGE:
-  • "我方-最佳" or "我方最佳" = OUR TEAM MVP (is_mvp=true, mvp_type="Team MVP").
-  • "敌方-最佳" or "敌方最佳" = ENEMY TEAM MVP (is_mvp=true, mvp_type="Enemy MVP").
-  • Strip the badge text from player name.
+  IMPORTANT - MVP BADGE DETECTION (text in front of player name):
+  • "我方-最佳" or "我方最佳" (yellow / gold text on teal/green background) = OUR TEAM MVP (Team 1).
+    Set is_mvp=true, mvp_type="Team MVP".
+  • "敌方-最佳" or "敌方最佳" (light blue / cyan text on maroon/red background) = ENEMY TEAM MVP (Team 2).
+    Set is_mvp=true, mvp_type="Enemy MVP".
+  • Do not include the badge text ("我方-最佳" or "敌方-最佳") inside the player's name.
 
-  AGENT: Identify character portrait avatar next to player name (e.g. Jett, Reyna, Omen, Killjoy, Sova, Cypher, Iso, Neon, Phoenix, Chamber, Clove, Sage, Fade, Gekko, Breach, Brimstone, Viper, etc.) or null.
+  IMPORTANT - AGENT DETECTION (character portrait avatar square next to player name):
+  Identify the Valorant agent played by each player from their character avatar portrait.
+  Valid agents include:
+  Astra, Breach, Brimstone, Chamber, Clove, Cypher, Deadlock, Fade, Gekko, Harbor, Iso, Jett, KAY/O, Killjoy, Neon, Omen, Phoenix, Raze, Reyna, Sage, Skye, Sova, Tejo, Viper, Vyse, Waylay, Yoru.
+  Visual Guide for Agent Portrait Avatars:
+  • Jett: White/silver swept-up hair, pale skin, facing left, blue/grey tint.
+  • Neon: Bright electric cyan/blue spiky glowing hair, blue facial lightning marks.
+  • Sova: Blonde hair covering one eye, robotic blue eye, fur collar.
+  • Omen: Dark blue/purple hooded cloak, 3 glowing vertical cyan slits on shadow face.
+  • Chamber: Short combed brown hair, gold glasses, white collar shirt & navy vest, french goatee.
+  • Yoru: Blue spiked hair with dark fade/undercut, eyebrow slit.
+  • Viper: Dark short hair, black/green tactical gas mask covering mouth/nose.
+  • Reyna: Long dark purple hair, purple eyes/glow, sharp smirk.
+  • Gekko: Bright neon lime-green dyed hair, yellow/purple highlights.
+  • Cypher: White fedora hat with wide brim, glowing blue eyes mask, trench coat collar.
+  • Sage: Long black hair in ponytail, pale skin, jade teal orb earrings/collar.
+  • Clove: Short pink/purple wavy bob hair, mischievous grin, dark choker.
+  • Breach: Orange/red hair and thick beard, bionic mechanical neck/shoulders.
+  • Brimstone: Grey beard/mustache, dark beret cap, orange tactical headset.
+  • Killjoy: Yellow beanie hat, round glasses, green jacket.
+  • Phoenix: Dark skin, black short fade hair, yellow/orange flame jacket collar.
+  • Fade: Black hair with white/grey streaks, heterochromia eyes, dark coat.
+  • Raze: Orange backwards cap/headband, curly dark hair, headphones around neck.
+  • Skye: Green headband over brown hair, leaf feather motif.
+  • Astra: Purple braids/dreadlocks, golden arm, astral stars collar.
+  • Deadlock: Blonde hair tied back, metal prosthetic neck collar, scar across left eye.
+  • Harbor: Thick black beard & mustache, teal wave armor collar.
+  • Iso: Dark bowl/curtain haircut with purple undertone, angular facial shadow.
+  • KAY/O: Metallic robot face with LED glass visor/screen.
+  • Tejo: Military brown hair, tactical combat visor/goggles, comms headset.
+  • Vyse: Liquid metallic reflective mask/helmet, dark thorny rose collar.
+  • Waylay: Light lavender/purple hair, modern tactical combat gear.
+  Set "agent" to the detected agent's name or null if unclear.
 
-  COLUMNS: 排名/头像/IGN | 平均战斗评分(ACS) | 击败/败阵/助攻(K/D/A) | 对局总伤害(damage) | 率先击败(first_bloods) | 部署(plants) | 拆除(defuses)
+  Columns: 排名/头像/IGN | 平均战斗评分(ACS) | 击败/败阵/助攻(K/D/A) | 对局总伤害(damage) | 率先击败(first_bloods) | 部署(plants) | 拆除(defuses)
 
-Return compact JSON matching this exact structure:
-{"success":true,"team1_score":8,"team2_score":3,"map":"Ascent","match_date":"2026/09/17 21:21","duration":"19:33","outcome":"Victory","players":[{"name":"Player1","agent":"Jett","team":1,"is_mvp":false,"mvp_type":null,"acs":280,"kills":18,"deaths":9,"assists":4,"damage":2400,"first_bloods":3,"plants":1,"defuses":0}]}
+Return exactly this JSON (no extra keys):
+{
+  "success": true,
+  "team1_score": <int or null>,
+  "team2_score": <int or null>,
+  "map": "<map name only>",
+  "match_date": "<YYYY/MM/DD HH:MM or null>",
+  "duration": "<MM:SS or null>",
+  "outcome": "Victory or Defeat",
+  "players": [
+    {
+      "name": "<exact name without MVP badge>",
+      "agent": "<Agent name e.g. Iso, Neon, Sova, Phoenix, Killjoy, Cypher, Jett or null>",
+      "team": <1 or 2>,
+      "is_mvp": <true/false>,
+      "mvp_type": <"Team MVP" or "Enemy MVP" or "Match MVP" or null>,
+      "acs": <int or null>,
+      "kills": <int or null>,
+      "deaths": <int or null>,
+      "assists": <int or null>,
+      "damage": <int or null>,
+      "first_bloods": <int or null>,
+      "plants": <int or null>,
+      "defuses": <int or null>
+    }
+  ]
+}
 
 Rules:
-1. players must contain all 10 players.
-2. EXACTLY 5 players team=1, 5 players team=2.
-3. Output compact raw JSON on one line with NO extra whitespace or formatting.
+1. players must contain all 10 players from the table in order from top to bottom.
+2. EXACTLY 5 players must have team=1, and EXACTLY 5 players must have team=2.
+3. K/D/A format is kills/deaths/assists separated by "/".
+4. Read each row carefully and accurately. Never copy or duplicate numbers from adjacent rows. Each player has their own distinct ACS, K/D/A, and damage stats.
+5. Average Combat Score (ACS) is the second column, K/D/A is the third column, Damage is the fourth column. Ensure values match the columns accurately.
+6. Use null for any number you cannot read confidently. Never guess.
+7. Return ONLY the JSON object. Nothing before or after.
 """
 
 
@@ -134,8 +200,8 @@ async def check_connection() -> tuple[bool, str]:
         return False, f"Ollama check failed: {exc}"
 
 
-def _prepare_image(image_bytes: bytes, max_dim: int = 800) -> bytes:
-    """Resize screenshots to max 800px to dramatically reduce vision tokens and speed up CPU inference by 3-4x."""
+def _prepare_image(image_bytes: bytes, max_dim: int = 1600) -> bytes:
+    """Resize huge screenshots to max 1600px to maintain crisp OCR accuracy while fitting within context limits."""
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
             w, h = img.size
@@ -160,7 +226,7 @@ async def _call_ollama(image_bytes: bytes, prompt: str, json_format: bool = Fals
 
 async def _call_ollama_internal(image_bytes: bytes, prompt: str, json_format: bool = False) -> str:
     """Internal HTTP call to Ollama /api/chat with auto-retry on grammar stack bug."""
-    image_bytes = _prepare_image(image_bytes, max_dim=800)
+    image_bytes = _prepare_image(image_bytes, max_dim=1600)
     image_b64 = base64.b64encode(image_bytes).decode()
 
     # Note: With vision models (qwen2.5vl:3b), passing format="json" activates llama.cpp's BNF grammar
@@ -238,7 +304,7 @@ async def _call_ollama_generate(
     stop: Optional[list[str]] = None,
 ) -> str:
     """Send image+prompt to Ollama /api/generate for fast direct vision completion."""
-    image_bytes = _prepare_image(image_bytes, max_dim=800)
+    image_bytes = _prepare_image(image_bytes, max_dim=1600)
     image_b64 = base64.b64encode(image_bytes).decode()
     payload = {
         "model": _MODEL,

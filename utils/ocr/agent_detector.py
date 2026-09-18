@@ -360,12 +360,16 @@ def resolve_player_agents(
 
     def _apply_agent(p: PlayerRowStats, cv_agent: Optional[str], cv_score: float) -> None:
         vlm_agent = clean_agent_name(p.agent)
-        if cv_agent and cv_score >= 0.32:
+        # Prioritize VLM detected agent if valid
+        if vlm_agent and vlm_agent in CANONICAL_AGENTS:
+            p.agent = vlm_agent
+            return
+        if cv_agent and cv_score >= 0.35:
             p.agent = cv_agent
             log.debug("Player %s resolved agent by CV: %s (score=%.3f)", p.ign, cv_agent, cv_score)
         elif vlm_agent:
             p.agent = vlm_agent
-        elif cv_agent and cv_score >= 0.25:
+        elif cv_agent and cv_score >= 0.28:
             p.agent = cv_agent
         else:
             p.agent = vlm_agent or cv_agent
