@@ -171,6 +171,61 @@ def _openrouter_available() -> bool:
     return _openrouter_ok
 
 
+def recover_and_validate_scores(res: MatchOCRResult, image_bytes: bytes) -> MatchOCRResult:
+    """
+    Ensure team1_score and team2_score are valid match round counts (0-30).
+    If they are missing, 0-0, or invalid (>30, e.g. player ACS hallucinations),
+    attempts to extract the true round score from the top center banner of the scoreboard.
+    """
+    s1 = res.team1_score
+    s2 = res.team2_score
+    valid = (
+        s1 is not None and s2 is not None
+        and 0 <= s1 <= 30 and 0 <= s2 <= 30
+        and not (s1 == 0 and s2 == 0)
+    )
+    if valid:
+        return res
+
+    log.warning(
+        "MatchOCRResult has invalid or missing round scores (s1=%s, s2=%s) — attempting recovery from top banner",
+        s1, s2,
+    )
+
+    try:
+        import cv2
+        import numpy as np
+        from utils.ocr.pipeline import _parse_score
+        from utils.ocr.engines.tesseract_engine import ocr_score_region, is_available as tess_available
+
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is not None:
+            h, w = img.shape[:2]
+            score_crop = img[0:int(h * 0.25), int(w * 0.28):int(w * 0.72)]
+            if tess_available():
+                score_txt = ocr_score_region(score_crop)
+                if score_txt:
+                    t1, t2, outc = _parse_score(score_txt)
+                    if (t1 > 0 or t2 > 0) and 0 <= t1 <= 30 and 0 <= t2 <= 30:
+                        log.info("Recovered round score via Tesseract: %d - %d (%s)", t1, t2, outc)
+                        res.team1_score = t1
+                        res.team2_score = t2
+                        if outc != "Unknown":
+                            res.outcome = outc
+                        return res
+    except Exception as e:
+        log.warning("Top banner score recovery failed: %s", e)
+
+    # Sanitize invalid scores so combat scores (e.g. 525) are never preserved
+    if res.team1_score is not None and res.team1_score > 30:
+        res.team1_score = None
+    if res.team2_score is not None and res.team2_score > 30:
+        res.team2_score = None
+
+    return res
+
+
 async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
     """
     Process a Valorant match scoreboard screenshot.
@@ -183,6 +238,7 @@ async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
     def _finalize(res: MatchOCRResult) -> MatchOCRResult:
         res = resolve_match_mvps(res)
         res = resolve_player_agents(res, image_bytes)
+        res = recover_and_validate_scores(res, image_bytes)
         return res
 
     # ── 1. Local Ollama (qwen2.5vl:3b — free, no rate limits) ─────────────────

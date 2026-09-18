@@ -4678,8 +4678,25 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         # 12. Determine match outcome
         t1_score = result.team1_score or 0
         t2_score = result.team2_score or 0
-        is_draw = (t1_score == t2_score)
-        winning_team = 0 if is_draw else (1 if t1_score > t2_score else 2)
+
+        # Safety check: round scores in Valorant are strictly between 0 and 30.
+        # Combat scores (ACS > 30, e.g. 525, 471) must never be used as round scores.
+        if t1_score > 30:
+            log.warning("Discarding invalid round score t1_score=%d", t1_score)
+            t1_score = 0
+        if t2_score > 30:
+            log.warning("Discarding invalid round score t2_score=%d", t2_score)
+            t2_score = 0
+
+        is_draw = (t1_score == t2_score) and (t1_score > 0 or result.outcome == "Draw")
+        if t1_score > 0 or t2_score > 0:
+            winning_team = 0 if is_draw else (1 if t1_score > t2_score else 2)
+        elif result.outcome == "Victory":
+            winning_team = 1
+        elif result.outcome == "Defeat":
+            winning_team = 2
+        else:
+            winning_team = 0
 
         # 13. Calculate ELO & stats for all 10 players
         scoring_mode = await get_solo_scoring_mode()

@@ -90,16 +90,42 @@ def _load(image_bytes: bytes) -> Optional[np.ndarray]:
 
 
 def _parse_score(txt: str) -> tuple[int, int, str]:
-    # First look for the explicit "N 获胜 M" pattern
-    m = re.search(r"(\d{1,2})\s*获胜\s*(\d{1,2})", txt)
+    # 1. "N 获胜 M" or "N 胜利 M" (Victory)
+    m = re.search(r"(\d{1,2})\s*(?:获胜|胜利)\s*(\d{1,2})", txt)
     if m:
         return int(m.group(1)), int(m.group(2)), "Victory"
-    # Fallback: two standalone 1-2 digit numbers (cap at 20 to avoid e.g. "27"→"2"+"7")
+
+    # 2. "N 败北 M" or "N 失败 M" (Defeat)
+    m = re.search(r"(\d{1,2})\s*(?:败北|失败)\s*(\d{1,2})", txt)
+    if m:
+        return int(m.group(1)), int(m.group(2)), "Defeat"
+
+    # 3. "N 平局 M" (Draw)
+    m = re.search(r"(\d{1,2})\s*平局\s*(\d{1,2})", txt)
+    if m:
+        return int(m.group(1)), int(m.group(2)), "Draw"
+
+    # 4. Two numbers separated by punctuation / dash / colon
+    m = re.search(r"(\d{1,2})\s*[-:—–vs比对]\s*(\d{1,2})", txt)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        outcome = "Victory" if a > b else ("Defeat" if a < b else "Draw")
+        return a, b, outcome
+
+    # 5. Fallback: two standalone 1-2 digit numbers (cap at 25 to avoid combat scores)
     nums = re.findall(r"\b(\d{1,2})\b", txt)
-    valid = [int(n) for n in nums if 0 <= int(n) <= 20]
+    valid = [int(n) for n in nums if 0 <= int(n) <= 25]
     if len(valid) >= 2:
         a, b = valid[0], valid[1]
-        return a, b, ("Victory" if a >= b else "Defeat")
+        outcome = "Victory" if a > b else ("Defeat" if a < b else "Draw")
+        if "败" in txt or "失" in txt:
+            outcome = "Defeat"
+        elif "胜" in txt:
+            outcome = "Victory"
+        elif "平" in txt:
+            outcome = "Draw"
+        return a, b, outcome
+
     return 0, 0, "Unknown"
 
 

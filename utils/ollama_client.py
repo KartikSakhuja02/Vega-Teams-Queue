@@ -46,6 +46,11 @@ _TIMEOUT    = int(os.getenv("OLLAMA_TIMEOUT",    "0"))     # 0 = no timeout (wai
 _MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "2500"))  # Generous tokens for complete 10-player JSON
 _NUM_CTX    = int(os.getenv("OLLAMA_NUM_CTX",    "8192"))  # Full high-res context
 
+
+def is_configured() -> bool:
+    return bool(_BASE_URL and _MODEL)
+
+
 # GPU concurrency guard: RTX 2050 / 4 GB VRAM → 1 vision inference at a time.
 inference_semaphore = asyncio.Semaphore(1)
 
@@ -74,7 +79,16 @@ You are analyzing a Valorant Mobile (CN version) custom match end-screen scorebo
 Return ONLY a valid JSON object. No explanation, no preamble, no markdown fences.
 
 Layout:
-- TOP CENTER: "N 获胜 M" → team1_score=N, team2_score=M
+- TOP CENTER: MATCH ROUND SCORE (CRITICAL):
+  There are two large numbers at the top center showing the number of rounds won by each team:
+  • If Team 1 won (Victory): "N 获胜 M" or "N 胜利 M" → team1_score=N, team2_score=M, outcome="Victory"
+  • If Team 1 lost (Defeat): "N 败北 M" or "N 失败 M" → team1_score=N, team2_score=M, outcome="Defeat"
+    Example: "6 败北 8" means team1_score=6 (cyan/green, left), team2_score=8 (red, right), outcome="Defeat".
+  • If Draw: "N 平局 M" → team1_score=N, team2_score=M, outcome="Draw"
+  • Left number (large, in cyan/green/blue font) = team1_score (Friendly team rounds won, integer 0-25).
+  • Right number (large, in red/pink font) = team2_score (Enemy team rounds won, integer 0-25).
+  • ROUND COUNTS are always small integers between 0 and 25 (e.g. 13 vs 11, 8 vs 6, 6 vs 8).
+  • NEVER use player combat scores (ACS / 平均战斗评分 such as 525, 471, 308) as team scores! Player combat scores belong strictly in the "acs" field of each player.
 - TOP LEFT: map name after "赛事模式-" (e.g. 莲华古城, 深海明珠, 源工重镇, 亚海悬城, 微风岛屿, 隐世修所, 霓虹町, 森寒冬港)
 - TOP LEFT: date "YYYY/MM/DD HH:MM" and duration "用时 MM:SS"
 - TABLE: 10 player rows total.
@@ -441,6 +455,17 @@ def _clean_int(v) -> int:
         return 0
 
 
+def _clean_round_score(v) -> Optional[int]:
+    if v is None:
+        return None
+    n = _clean_int(v)
+    # Valid match rounds are between 0 and 30. Combat scores (ACS) are > 30.
+    if 0 <= n <= 30:
+        return n
+    log.warning("Ollama: Rejected invalid round score %d (likely combat score / ACS)", n)
+    return None
+
+
 def _confidence(players: list[dict]) -> float:
     FIELDS = ("acs", "kills", "deaths", "assists", "damage")
     total  = len(players) * len(FIELDS)
@@ -613,8 +638,8 @@ def _to_result(data: dict, elapsed_ms: float, image_bytes: Optional[bytes] = Non
         map_name=str(data.get("map") or "Unknown"),
         match_date=str(data.get("match_date") or "Unknown"),
         duration=str(data.get("duration") or "Unknown"),
-        team1_score=_clean_int(data.get("team1_score")),
-        team2_score=_clean_int(data.get("team2_score")),
+        team1_score=_clean_round_score(data.get("team1_score")),
+        team2_score=_clean_round_score(data.get("team2_score")),
         outcome=str(data.get("outcome") or "Unknown"),
         team1_players=t1_players,
         team2_players=t2_players,

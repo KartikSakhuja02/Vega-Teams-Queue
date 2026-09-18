@@ -56,7 +56,16 @@ You are analyzing a Valorant Mobile (CN version) custom match end-screen scorebo
 Return ONLY a valid JSON object. No explanation, no preamble, no markdown fences.
 
 Layout:
-- TOP CENTER: "N 获胜 M" → team1_score=N, team2_score=M
+- TOP CENTER: MATCH ROUND SCORE (CRITICAL):
+  There are two large numbers at the top center showing the number of rounds won by each team:
+  • If Team 1 won (Victory): "N 获胜 M" or "N 胜利 M" → team1_score=N, team2_score=M, outcome="Victory"
+  • If Team 1 lost (Defeat): "N 败北 M" or "N 失败 M" → team1_score=N, team2_score=M, outcome="Defeat"
+    Example: "6 败北 8" means team1_score=6 (cyan/green, left), team2_score=8 (red, right), outcome="Defeat".
+  • If Draw: "N 平局 M" → team1_score=N, team2_score=M, outcome="Draw"
+  • Left number (large, in cyan/green/blue font) = team1_score (Friendly team rounds won, integer 0-25).
+  • Right number (large, in red/pink font) = team2_score (Enemy team rounds won, integer 0-25).
+  • ROUND COUNTS are always small integers between 0 and 25 (e.g. 13 vs 11, 8 vs 6, 6 vs 8).
+  • NEVER use player combat scores (ACS / 平均战斗评分 such as 525, 471, 308) as team scores! Player combat scores belong strictly in the "acs" field of each player.
 - TOP LEFT: map name after "赛事模式-" (e.g. 莲华古城, 深海明珠, 源工重镇, 亚海悬城, 微风岛屿)
 - TOP LEFT: date "YYYY/MM/DD HH:MM" and duration "用时 MM:SS"
 - TABLE: 10 player rows:
@@ -284,6 +293,16 @@ def _clean_int(v) -> int:
         return 0
 
 
+def _clean_round_score(v) -> Optional[int]:
+    if v is None:
+        return None
+    n = _clean_int(v)
+    if 0 <= n <= 30:
+        return n
+    log.warning("Bedrock: Rejected invalid round score %d (likely combat score / ACS)", n)
+    return None
+
+
 def _confidence_from_nulls(players: list[dict]) -> float:
     FIELDS = ("acs", "kills", "deaths", "assists", "damage")
     total  = len(players) * len(FIELDS)
@@ -341,8 +360,8 @@ def _to_match_result(data: dict, elapsed_ms: float) -> MatchOCRResult:
         map_name=str(data.get("map") or "Unknown"),
         match_date=str(data.get("match_date") or "Unknown"),
         duration=str(data.get("duration") or "Unknown"),
-        team1_score=_clean_int(data.get("team1_score")),
-        team2_score=_clean_int(data.get("team2_score")),
+        team1_score=_clean_round_score(data.get("team1_score")),
+        team2_score=_clean_round_score(data.get("team2_score")),
         outcome=str(data.get("outcome") or "Unknown"),
         team1_players=t1_players,
         team2_players=t2_players,
