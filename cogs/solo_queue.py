@@ -772,8 +772,9 @@ async def finalize_teams_and_move(
     t2_ids: list[int],
 ) -> None:
     """
-    Unlock Team A & Team B voice channels for their respective players,
+    Unlock Team 1 & Team 2 voice channels for their respective players,
     and automatically move any players currently connected to voice in parallel.
+    Ensures players can freely leave and rejoin their team VC or lobby VC at any time.
     """
     v1_id = match.get("voice_team1_id")
     v2_id = match.get("voice_team2_id")
@@ -790,30 +791,76 @@ async def finalize_teams_and_move(
         if isinstance(ch2, discord.VoiceChannel):
             t2_vc = ch2
 
-    async def _handle_player(vc: discord.VoiceChannel, pid: int, team_name: str) -> None:
-        mem = await _get_or_fetch_member(guild, pid)
-        if not mem:
-            return
-        try:
-            await vc.set_permissions(mem, view_channel=True, connect=True, speak=True)
-        except Exception as e:
-            log.debug("Could not set %s voice permissions for %s: %s", team_name, mem.name, e)
-        if mem.voice and mem.voice.channel:
+    async def _safe_set_perm(vc: discord.VoiceChannel, member: discord.Member, overwrite: discord.PermissionOverwrite) -> None:
+        for attempt in range(3):
             try:
-                await mem.move_to(vc, reason=f"Queue #{match['id']} {team_name} VC")
+                await vc.set_permissions(member, overwrite=overwrite)
+                return
+            except discord.RateLimited as rl:
+                await asyncio.sleep(getattr(rl, "retry_after", 0.5) + 0.1)
             except Exception as e:
-                log.debug("Could not move %s to %s VC: %s", mem.name, team_name, e)
+                if attempt == 2:
+                    log.warning("Failed to set perms on VC %s for %s: %s", vc.name, member.name, e)
+                await asyncio.sleep(0.2)
 
-    tasks = []
+    # Fetch members in parallel
+    mems1 = await asyncio.gather(*[_get_or_fetch_member(guild, pid) for pid in t1_ids])
+    mems2 = await asyncio.gather(*[_get_or_fetch_member(guild, pid) for pid in t2_ids])
+
+    # Allow permissions on their assigned team voice channel
+    allow_perms = discord.PermissionOverwrite(
+        view_channel=True,
+        connect=True,
+        speak=True,
+        stream=True,
+        use_voice_activation=True,
+    )
+    # Opposing team permissions (cannot join enemy team VC during active match)
+    deny_perms = discord.PermissionOverwrite(
+        view_channel=True,
+        connect=False,
+    )
+
+    perm_tasks = []
     if t1_vc:
-        for pid in t1_ids:
-            tasks.append(_handle_player(t1_vc, pid, "Team 1"))
-    if t2_vc:
-        for pid in t2_ids:
-            tasks.append(_handle_player(t2_vc, pid, "Team 2"))
+        for m in mems1:
+            if m:
+                perm_tasks.append(_safe_set_perm(t1_vc, m, allow_perms))
+        for m in mems2:
+            if m:
+                perm_tasks.append(_safe_set_perm(t1_vc, m, deny_perms))
 
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    if t2_vc:
+        for m in mems2:
+            if m:
+                perm_tasks.append(_safe_set_perm(t2_vc, m, allow_perms))
+        for m in mems1:
+            if m:
+                perm_tasks.append(_safe_set_perm(t2_vc, m, deny_perms))
+
+    if perm_tasks:
+        await asyncio.gather(*perm_tasks, return_exceptions=True)
+
+    # Move players who are currently in voice to their team VC
+    async def _move_player(mem: discord.Member, target_vc: discord.VoiceChannel, team_name: str) -> None:
+        if mem.voice and mem.voice.channel and mem.voice.channel.id != target_vc.id:
+            try:
+                await mem.move_to(target_vc, reason=f"Queue #{match['id']} {team_name} VC")
+            except Exception as e:
+                log.warning("Could not move %s to %s VC: %s", mem.name, team_name, e)
+
+    move_tasks = []
+    if t1_vc:
+        for m in mems1:
+            if m:
+                move_tasks.append(_move_player(m, t1_vc, "Team 1"))
+    if t2_vc:
+        for m in mems2:
+            if m:
+                move_tasks.append(_move_player(m, t2_vc, "Team 2"))
+
+    if move_tasks:
+        await asyncio.gather(*move_tasks, return_exceptions=True)
 
 
 # =============================================================================
@@ -2438,6 +2485,29 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
                 avail_ids = [pid for pid in player_ids if pid not in (c1_id, c2_id)]
 
+                # ---------------------------------------------------------
+                # Overwrites for dedicated category, text channel & voice channels
+                # ---------------------------------------------------------
+                category_overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
+                    guild.default_role: discord.PermissionOverwrite(
+                        view_channel=False,
+                        connect=False,
+                    ),
+                    guild.me: discord.PermissionOverwrite(
+                        view_channel=True,
+                        send_messages=True,
+                        embed_links=True,
+                        read_message_history=True,
+                        manage_channels=True,
+                        manage_messages=True,
+                        attach_files=True,
+                        manage_roles=True,
+                        connect=True,
+                        speak=True,
+                        move_members=True,
+                    ),
+                }
+
                 # Permission overwrites for text channel
                 text_overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
                     guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -2449,6 +2519,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                         manage_channels=True,
                         manage_messages=True,
                         attach_files=True,
+                        manage_roles=True,
                     ),
                 }
 
@@ -2461,11 +2532,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                         speak=True,
                         move_members=True,
                         manage_channels=True,
+                        manage_roles=True,
                     ),
                 }
 
-                # Permission overwrites for team voice channels (LOCKED initially)
-                team_locked_overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
+                # Permission overwrites for team voice channels (Open to queue players from start)
+                team_voice_overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
                     guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
                     guild.me: discord.PermissionOverwrite(
                         view_channel=True,
@@ -2473,6 +2545,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                         speak=True,
                         move_members=True,
                         manage_channels=True,
+                        manage_roles=True,
                     ),
                 }
 
@@ -2481,42 +2554,58 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
                 for mem in members:
                     if mem:
+                        category_overwrites[mem] = discord.PermissionOverwrite(
+                            view_channel=True,
+                            send_messages=True,
+                            read_message_history=True,
+                            attach_files=True,
+                            embed_links=True,
+                            connect=True,
+                            speak=True,
+                            stream=True,
+                            use_voice_activation=True,
+                        )
                         text_overwrites[mem] = discord.PermissionOverwrite(
                             view_channel=True,
                             send_messages=True,
                             read_message_history=True,
                             attach_files=True,
+                            embed_links=True,
                         )
                         voice_lobby_overwrites[mem] = discord.PermissionOverwrite(
                             view_channel=True,
                             connect=True,
                             speak=True,
+                            stream=True,
+                            use_voice_activation=True,
                         )
-                        team_locked_overwrites[mem] = discord.PermissionOverwrite(
+                        team_voice_overwrites[mem] = discord.PermissionOverwrite(
                             view_channel=True,
-                            connect=False,  # Locked until teams are picked!
+                            connect=True,
+                            speak=True,
+                            stream=True,
+                            use_voice_activation=True,
                         )
 
                 for role_id in STAFF_ROLE_IDS:
                     role = guild.get_role(role_id)
                     if role:
-                        text_overwrites[role] = discord.PermissionOverwrite(
+                        staff_perm = discord.PermissionOverwrite(
                             view_channel=True,
                             send_messages=True,
                             read_message_history=True,
-                        )
-                        voice_lobby_overwrites[role] = discord.PermissionOverwrite(
-                            view_channel=True,
+                            attach_files=True,
+                            embed_links=True,
                             connect=True,
                             speak=True,
                             move_members=True,
+                            manage_channels=True,
+                            manage_messages=True,
                         )
-                        team_locked_overwrites[role] = discord.PermissionOverwrite(
-                            view_channel=True,
-                            connect=True,
-                            speak=True,
-                            move_members=True,
-                        )
+                        category_overwrites[role] = staff_perm
+                        text_overwrites[role] = staff_perm
+                        voice_lobby_overwrites[role] = staff_perm
+                        team_voice_overwrites[role] = staff_perm
 
                 # Categories
                 # Reference parent matchmaking category (e.g. » MATCHMAKING «)
@@ -2533,7 +2622,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 pos = (parent_category.position + 1) if parent_category else None
                 cat_kwargs = {
                     "name": f"Queue #{queue_num}",
-                    "overwrites": text_overwrites,
+                    "overwrites": category_overwrites,
                 }
                 if pos is not None:
                     cat_kwargs["position"] = pos
@@ -2560,12 +2649,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     ),
                     guild.create_voice_channel(
                         name=f"Team 1 - #{queue_num}",
-                        overwrites=team_locked_overwrites,
+                        overwrites=team_voice_overwrites,
                         category=match_category,
                     ),
                     guild.create_voice_channel(
                         name=f"Team 2 - #{queue_num}",
-                        overwrites=team_locked_overwrites,
+                        overwrites=team_voice_overwrites,
                         category=match_category,
                     ),
                 )
@@ -4430,10 +4519,33 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             updated_match["available_player_ids"] = new_avail_ids
             updated_match["current_turn_captain_id"] = new_turn_id
 
-        # 8. Update channel permissions
+        # 8. Update channel & category permissions
         ch_id = updated_match.get("channel_id") or interaction.channel_id
         match_ch = interaction.guild.get_channel(ch_id) if interaction.guild else None
         if isinstance(match_ch, discord.TextChannel):
+            # Category permissions
+            if match_ch.category:
+                try:
+                    await match_ch.category.set_permissions(old_player, overwrite=None)
+                except Exception as e:
+                    log.debug("Could not clear old_player category permissions: %s", e)
+                try:
+                    await match_ch.category.set_permissions(
+                        new_player,
+                        view_channel=True,
+                        send_messages=True,
+                        read_message_history=True,
+                        attach_files=True,
+                        embed_links=True,
+                        connect=True,
+                        speak=True,
+                        stream=True,
+                        use_voice_activation=True,
+                    )
+                except Exception as e:
+                    log.debug("Could not grant new_player category permissions: %s", e)
+
+            # Text channel permissions
             try:
                 await match_ch.set_permissions(old_player, overwrite=None)
             except Exception as e:
@@ -4445,6 +4557,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     send_messages=True,
                     read_message_history=True,
                     attach_files=True,
+                    embed_links=True,
                 )
             except Exception as e:
                 log.debug("Could not grant new_player permissions: %s", e)
@@ -4454,6 +4567,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             v_lobby_id = updated_match.get("voice_lobby_id")
             v1_id = updated_match.get("voice_team1_id")
             v2_id = updated_match.get("voice_team2_id")
+
+            # Remove old player from all match voice channels
             for vid in (v_lobby_id, v1_id, v2_id):
                 if vid:
                     vch = interaction.guild.get_channel(vid)
@@ -4462,8 +4577,68 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                             await vch.set_permissions(old_player, overwrite=None)
                         except Exception:
                             pass
+
+            # Lobby VC: new player has full connect/speak access
+            if v_lobby_id:
+                lobby_vch = interaction.guild.get_channel(v_lobby_id)
+                if isinstance(lobby_vch, discord.VoiceChannel):
+                    try:
+                        await lobby_vch.set_permissions(
+                            new_player,
+                            view_channel=True,
+                            connect=True,
+                            speak=True,
+                            stream=True,
+                            use_voice_activation=True,
+                        )
+                    except Exception:
+                        pass
+
+            # Team VCs based on match state
+            t1_vch = interaction.guild.get_channel(v1_id) if v1_id else None
+            t2_vch = interaction.guild.get_channel(v2_id) if v2_id else None
+            m_status = updated_match.get("status")
+
+            if m_status == "IN_PROGRESS" and (t1_vch or t2_vch):
+                if new_player.id in new_t1_ids:
+                    if isinstance(t1_vch, discord.VoiceChannel):
                         try:
-                            await vch.set_permissions(new_player, view_channel=True, connect=True, speak=True)
+                            await t1_vch.set_permissions(new_player, view_channel=True, connect=True, speak=True, stream=True, use_voice_activation=True)
+                            if new_player.voice and new_player.voice.channel and new_player.voice.channel.id != t1_vch.id:
+                                await new_player.move_to(t1_vch, reason=f"Queue #{match['id']} Team 1 VC")
+                        except Exception:
+                            pass
+                    if isinstance(t2_vch, discord.VoiceChannel):
+                        try:
+                            await t2_vch.set_permissions(new_player, view_channel=True, connect=False)
+                        except Exception:
+                            pass
+                elif new_player.id in new_t2_ids:
+                    if isinstance(t2_vch, discord.VoiceChannel):
+                        try:
+                            await t2_vch.set_permissions(new_player, view_channel=True, connect=True, speak=True, stream=True, use_voice_activation=True)
+                            if new_player.voice and new_player.voice.channel and new_player.voice.channel.id != t2_vch.id:
+                                await new_player.move_to(t2_vch, reason=f"Queue #{match['id']} Team 2 VC")
+                        except Exception:
+                            pass
+                    if isinstance(t1_vch, discord.VoiceChannel):
+                        try:
+                            await t1_vch.set_permissions(new_player, view_channel=True, connect=False)
+                        except Exception:
+                            pass
+            else:
+                # Still check-in, draft, or veto: allow access to all match VCs
+                for vch in (t1_vch, t2_vch):
+                    if isinstance(vch, discord.VoiceChannel):
+                        try:
+                            await vch.set_permissions(
+                                new_player,
+                                view_channel=True,
+                                connect=True,
+                                speak=True,
+                                stream=True,
+                                use_voice_activation=True,
+                            )
                         except Exception:
                             pass
 
