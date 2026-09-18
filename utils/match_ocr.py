@@ -226,8 +226,8 @@ async def process_match_screenshot(image_bytes: bytes) -> MatchOCRResult:
     # ── 1. OpenRouter (Gemini 2.5 Flash — primary vision engine) ───────────────
     if _openrouter_available():
         try:
-            from utils.openrouter_client import extract_scoreboard as openrouter_extract
-            log.info("Running OpenRouter OCR (Gemini 2.5 Flash)…")
+            from utils.openrouter_client import extract_scoreboard as openrouter_extract, get_model
+            log.info("Running OpenRouter OCR (%s)…", get_model())
             result = await openrouter_extract(image_bytes)
             log.info(
                 "OpenRouter: conf=%.2f needs_review=%s engine=%s %.0fms",

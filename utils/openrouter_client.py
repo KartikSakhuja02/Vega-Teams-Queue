@@ -35,10 +35,15 @@ log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 def get_api_key() -> str:
-    return os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY_2") or ""
+    raw = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY_2") or ""
+    return raw.strip().strip('"').strip("'")
 
 def get_model() -> str:
-    return os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash"
+    m = (os.getenv("OPENROUTER_MODEL") or "").strip().strip('"').strip("'")
+    # If not set, or if an old free-tier model (e.g. :free, gemma) is leftover in env, use Gemini 2.5 Flash
+    if not m or ":free" in m or "gemma" in m.lower():
+        return "google/gemini-2.5-flash"
+    return m
 
 _TIMEOUT  = int(os.getenv("OPENROUTER_TIMEOUT", "120"))
 _BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -422,6 +427,8 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
         raise RuntimeError("OPENROUTER_API_KEY (or OPENROUTER_API_KEY_2) not set")
 
     model   = get_model()
+    masked_key = f"{api_key[:7]}...{api_key[-4:]}" if len(api_key) >= 12 else "***"
+    log.info("Sending match screenshot to OpenRouter model: %s (key=%s)", model, masked_key)
     mime    = _detect_mime(image_bytes)
     b64_img = base64.b64encode(image_bytes).decode()
     data_url = f"data:{mime};base64,{b64_img}"
