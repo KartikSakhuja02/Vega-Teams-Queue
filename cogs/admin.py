@@ -43,12 +43,27 @@ def _parse_admin_role_ids(raw_value: str) -> list[int]:
 
 HELP_ADMIN_ROLE_IDS = _parse_admin_role_ids(HELP_ADMIN_ROLE_IDS_RAW)
 
+STAFF_ROLE_NAMES = {
+    "moderator",
+    "mod",
+    "mods",
+    "faceit police",
+    "faceit-police",
+    "admin",
+    "administrator",
+}
+
 
 def _is_admin(member: discord.Member) -> bool:
-    """Check if a guild member has staff/admin permissions."""
+    """Check if a guild member has staff/admin permissions (Admin, Moderator, Faceit Police)."""
+    if not isinstance(member, discord.Member):
+        return False
     if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
         return True
-    return any(role.id in HELP_ADMIN_ROLE_IDS for role in member.roles)
+    if any(role.id in HELP_ADMIN_ROLE_IDS for role in member.roles):
+        return True
+    return any(role.name.strip().lower() in STAFF_ROLE_NAMES for role in member.roles)
+
 
 
 def _fmt_duration(hours: int) -> str:

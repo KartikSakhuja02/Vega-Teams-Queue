@@ -54,6 +54,27 @@ def _parse_role_ids(raw_value: str) -> list[int]:
 
 TEAM_MOD_ROLE_IDS: list[int] = _parse_role_ids(TEAM_MOD_ROLE_IDS_RAW)
 
+STAFF_ROLE_NAMES = {
+    "moderator",
+    "mod",
+    "mods",
+    "faceit police",
+    "faceit-police",
+    "admin",
+    "administrator",
+}
+
+
+def _is_staff(member: discord.Member) -> bool:
+    if not isinstance(member, discord.Member):
+        return False
+    if member.guild_permissions.administrator or member.guild_permissions.manage_guild or member.guild_permissions.manage_channels:
+        return True
+    if any(r.id in TEAM_MOD_ROLE_IDS for r in member.roles):
+        return True
+    return any(r.name.strip().lower() in STAFF_ROLE_NAMES for r in member.roles)
+
+
 REGIONS: list[str] = ["India", "APAC", "EMEA", "Americas"]
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 
@@ -1136,12 +1157,15 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
 
     @app_commands.command(
         name="post_team_queue",
-        description="Post or refresh the team matchmaking queue panel in the configured channel.",
+        description="Post or refresh the team matchmaking queue panel in the configured channel (Staff only).",
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def post_team_queue_command(self, interaction: discord.Interaction) -> None:
         """Admin command to manually trigger or refresh the team queue message."""
         await interaction.response.defer(ephemeral=True)
+
+        if not _is_staff(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send("You do not have staff permissions to manage the queue panel.", ephemeral=True)
+            return
 
         if not TEAM_QUEUE_CHANNEL_ID:
             await interaction.followup.send(
@@ -1160,12 +1184,15 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
         name="matchmake_teams",
         description="Force check and create matches for currently queued teams (Staff only).",
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def matchmake_teams_command(self, interaction: discord.Interaction) -> None:
         """Admin command to manually evaluate queues and trigger matchmaking."""
         await interaction.response.defer(ephemeral=True)
         if not interaction.guild:
             await interaction.followup.send("Must be executed in a server.", ephemeral=True)
+            return
+
+        if not _is_staff(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send("You do not have staff permissions to run matchmaking.", ephemeral=True)
             return
 
         await self._check_and_create_matches(interaction.guild)
@@ -1175,7 +1202,6 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
         name="close_scrim",
         description="Close and delete the current scrim match channel (Staff or Captains if cancelled).",
     )
-    @app_commands.default_permissions(manage_channels=True)
     async def close_scrim_command(self, interaction: discord.Interaction) -> None:
         """Close and delete the scrim channel."""
         await interaction.response.defer(ephemeral=True)
@@ -1185,10 +1211,7 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
             await interaction.followup.send("This channel is not an active scrim match channel.", ephemeral=True)
             return
 
-        is_staff = False
-        if isinstance(interaction.user, discord.Member):
-            if interaction.user.guild_permissions.manage_channels or any(r.id in TEAM_MOD_ROLE_IDS for r in interaction.user.roles):
-                is_staff = True
+        is_staff = _is_staff(interaction.user) if isinstance(interaction.user, discord.Member) else False
 
         is_captain = interaction.user.id in (match["team1_captain_id"], match["team2_captain_id"])
 

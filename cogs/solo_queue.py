@@ -64,12 +64,27 @@ def _parse_role_ids(raw_value: str) -> list[int]:
 
 STAFF_ROLE_IDS: list[int] = _parse_role_ids(TEAM_MOD_ROLE_IDS_RAW)
 
+STAFF_ROLE_NAMES = {
+    "moderator",
+    "mod",
+    "mods",
+    "faceit police",
+    "faceit-police",
+    "admin",
+    "administrator",
+}
+
 
 def _is_admin(member: discord.Member) -> bool:
-    """Check if member has administrator or staff moderation privileges."""
+    """Check if member has administrator or staff moderation privileges (Admin, Moderator, Faceit Police)."""
+    if not isinstance(member, discord.Member):
+        return False
     if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
         return True
-    return any(r.id in STAFF_ROLE_IDS for r in member.roles)
+    if any(r.id in STAFF_ROLE_IDS for r in member.roles):
+        return True
+    return any(r.name.strip().lower() in STAFF_ROLE_NAMES for r in member.roles)
+
 
 
 MAP_POOL_RAW = os.environ.get(
@@ -3413,7 +3428,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     solo_config = app_commands.Group(
         name="solo_config",
         description="Configure 10-man solo queue templates, draft, veto, and styling.",
-        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     @solo_config.command(name="panel", description="Open the interactive 10-man solo queue configuration panel.")
@@ -3439,6 +3453,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     @solo_config.command(name="view", description="View all active 10-man solo queue configurations.")
     async def solo_config_view_cmd(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send("You do not have staff permissions to configure solo queue.", ephemeral=True)
+            return
         captain_mode = await get_solo_captain_mode()
         draft_mode = await get_solo_draft_mode()
         veto_mode = await get_solo_veto_mode()
@@ -3637,7 +3654,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         name="clear_solo_queue",
         description="Clear all players from the 10-man solo queue and reset status to IDLE (Staff only).",
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def clear_solo_queue_cmd(self, interaction: discord.Interaction) -> None:
         """Staff command to clear all waiting players from the 10-man solo queue."""
         await self._handle_clear_solo_queue(interaction)
@@ -3646,7 +3662,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         name="clear-solo-queue",
         description="Clear all players from the 10-man solo queue and reset status to IDLE (Staff only).",
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def clear_solo_queue_hyphen_cmd(self, interaction: discord.Interaction) -> None:
         """Staff command to clear all waiting players from the 10-man solo queue."""
         await self._handle_clear_solo_queue(interaction)
@@ -3724,7 +3739,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     @app_commands.describe(
         time_in_minutes="Inactivity time before auto-clearing (e.g. 10, 15, 30m, or 0 to disable)."
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def auto_clear_solo_queue_hyphen_cmd(
         self,
         interaction: discord.Interaction,
@@ -3740,7 +3754,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     @app_commands.describe(
         time_in_minutes="Inactivity time before auto-clearing (e.g. 10, 15, 30m, or 0 to disable)."
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def auto_clear_solo_queue_underscore_cmd(
         self,
         interaction: discord.Interaction,
@@ -3751,12 +3764,15 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
     @app_commands.command(
         name="post_solo_queue",
-        description="Post or refresh the 10-man solo queue panel in the configured channel.",
+        description="Post or refresh the 10-man solo queue panel in the configured channel (Staff only).",
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def post_solo_queue_command(self, interaction: discord.Interaction) -> None:
-        """Admin command to manually post or refresh the 10-man queue embed."""
+        """Admin/staff command to manually post or refresh the 10-man queue embed."""
         await interaction.response.defer(ephemeral=True)
+
+        if not _is_admin(interaction.user):  # type: ignore[arg-type]
+            await interaction.followup.send("You do not have staff permissions to manage the queue panel.", ephemeral=True)
+            return
 
         if not SOLO_QUEUE_CHANNEL_ID:
             await interaction.followup.send(
@@ -3777,7 +3793,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     @app_commands.describe(
         timing="Optional pause duration (e.g., 30m, 1h, 2h, 45m). Leave blank to stop indefinitely."
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def stop_queue_hyphen_cmd(
         self,
         interaction: discord.Interaction,
@@ -3793,7 +3808,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     @app_commands.describe(
         timing="Optional pause duration (e.g., 30m, 1h, 2h, 45m). Leave blank to stop indefinitely."
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def stop_queue_underscore_cmd(
         self,
         interaction: discord.Interaction,
@@ -3806,7 +3820,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         name="start-queue",
         description="Resume/start the queue so players can join again.",
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def start_queue_hyphen_cmd(self, interaction: discord.Interaction) -> None:
         """Resume the queue (hyphen version)."""
         await self._handle_start_queue(interaction)
@@ -3815,7 +3828,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         name="start_queue",
         description="Resume/start the queue so players can join again.",
     )
-    @app_commands.default_permissions(manage_guild=True)
     async def start_queue_underscore_cmd(self, interaction: discord.Interaction) -> None:
         """Resume the queue (underscore version)."""
         await self._handle_start_queue(interaction)
@@ -4571,7 +4583,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     @app_commands.describe(
         match_id="Optional match ID to cancel if running outside the match channel"
     )
-    @app_commands.default_permissions(manage_channels=True)
     async def cancel_solo_match_command(
         self,
         interaction: discord.Interaction,
@@ -4797,7 +4808,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         old_captain="The current captain to be replaced",
         new_captain="The player to promote to captain",
     )
-    @app_commands.default_permissions(manage_channels=True)
     async def admin_change_command_alt(
         self,
         interaction: discord.Interaction,
@@ -4814,7 +4824,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         old_captain="The current captain to be replaced",
         new_captain="The player to promote to captain",
     )
-    @app_commands.default_permissions(manage_channels=True)
     async def admin_change_captain_command(
         self,
         interaction: discord.Interaction,
@@ -5014,13 +5023,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
     @app_commands.command(
         name="replace-player",
-        description="Replace an old player with a new player in the active queue match.",
+        description="Replace an old player with a new player in the active queue match (Admin, Mod, Faceit Police only).",
     )
     @app_commands.describe(
         old_player="The player currently in the match to be replaced",
         new_player="The new player joining to play in their place",
     )
-    @app_commands.default_permissions(manage_channels=True)
     async def replace_player_hyphen(
         self,
         interaction: discord.Interaction,
@@ -5032,13 +5040,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
     @app_commands.command(
         name="replace_player",
-        description="Replace an old player with a new player in the active queue match.",
+        description="Replace an old player with a new player in the active queue match (Admin, Mod, Faceit Police only).",
     )
     @app_commands.describe(
         old_player="The player currently in the match to be replaced",
         new_player="The new player joining to play in their place",
     )
-    @app_commands.default_permissions(manage_channels=True)
     async def replace_player_underscore(
         self,
         interaction: discord.Interaction,
@@ -5063,6 +5070,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             return
 
         is_staff = isinstance(interaction.user, discord.Member) and _is_admin(interaction.user)
+        if not is_staff:
+            await interaction.followup.send(
+                "Only Admins, Moderators, or Faceit Police can use /replace-player.",
+                ephemeral=True,
+            )
+            return
 
         # Verify new player is registered
         new_p_rec = await db.get_player(new_player.id)
@@ -5106,9 +5119,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         if not match:
             queued = await db.get_solo_queue()
             if any(p["discord_id"] == old_player.id for p in queued):
-                if not is_staff:
-                    await interaction.followup.send("Only staff can replace players in the queue.", ephemeral=True)
-                    return
                 await db.remove_player_from_solo_queue(old_player.id)
                 await db.set_player_status(old_player.id, "IDLE")
                 await db.add_player_to_solo_queue(new_player.id)
@@ -5127,23 +5137,15 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             )
             return
 
-        # 3. Match authorization
-        c1_id = match.get("captain1_id")
-        c2_id = match.get("captain2_id")
-        is_captain = interaction.user.id in (c1_id, c2_id)
-        if not is_staff and not is_captain:
-            await interaction.followup.send(
-                "Only staff members or captains can replace players in this match.",
-                ephemeral=True,
-            )
-            return
-
-        # 4. Check match status
+        # 3. Check match status
         if match.get("status") in ("COMPLETED", "CANCELLED"):
             await interaction.followup.send("This match has already concluded.", ephemeral=True)
             return
 
-        # 5. Check old_player is in this match
+        c1_id = match.get("captain1_id")
+        c2_id = match.get("captain2_id")
+
+        # 4. Check old_player is in this match
         t1_ids = list(match.get("team1_player_ids") or [])
         t2_ids = list(match.get("team2_player_ids") or [])
         avail_ids = list(match.get("available_player_ids") or [])
@@ -5886,9 +5888,16 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             + [p for p in (match.get("captain1_id"), match.get("captain2_id")) if p]
         ))
 
-        # Authorization: staff or participant
-        if not is_staff and interaction.user.id not in all_match_pids:
-            await interaction.followup.send("Only staff or players in this match can propose a substitute.", ephemeral=True)
+        # Authorization: staff, match participant, or waiting queue player
+        queued_players = await db.get_solo_queue()
+        queued_pids = {p["discord_id"] for p in queued_players}
+        is_in_queue = (interaction.user.id in all_match_pids) or (interaction.user.id in queued_pids)
+
+        if not is_staff and not is_in_queue:
+            await interaction.followup.send(
+                "Only players in the queue/match or staff (Admin, Moderator, Faceit Police) can use /sub.",
+                ephemeral=True,
+            )
             return
 
         if old_player.id not in all_match_pids:
@@ -6039,7 +6048,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         app_commands.Choice(name="Default Flat ELO (+25 Win / -20 Loss / +5 MVP)", value="DEFAULT"),
         app_commands.Choice(name="Performance Combat-Based ELO (Stats Scaling)", value="PERFORMANCE"),
     ])
-    @app_commands.default_permissions(manage_guild=True)
     async def set_elo_template_command(
         self,
         interaction: discord.Interaction,
@@ -6056,7 +6064,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         app_commands.Choice(name="Default Flat ELO (+25 Win / -20 Loss / +5 MVP)", value="DEFAULT"),
         app_commands.Choice(name="Performance Combat-Based ELO (Stats Scaling)", value="PERFORMANCE"),
     ])
-    @app_commands.default_permissions(manage_guild=True)
     async def set_elo_system_command(
         self,
         interaction: discord.Interaction,
