@@ -105,6 +105,11 @@ def get_staff_role_ids() -> set[int]:
     Extract all staff role IDs from environment variables.
     Handles comma-separated integers, quotes, and Discord role mentions (<@&123456789>).
     """
+    try:
+        load_dotenv(override=False)
+    except Exception:
+        pass
+
     role_ids: set[int] = set()
     for key in ENV_STAFF_KEYS:
         val = os.environ.get(key, "").strip()
@@ -116,16 +121,11 @@ def get_staff_role_ids() -> set[int]:
                 continue
             # Extract raw digits (handles role mentions like <@&123456789012345678>)
             digits = re.sub(r"\D", "", chunk)
-            if len(digits) >= 15:
+            if digits:
                 try:
                     role_ids.add(int(digits))
-                    continue
                 except ValueError:
                     pass
-            try:
-                role_ids.add(int(chunk))
-            except ValueError:
-                pass
     return role_ids
 
 

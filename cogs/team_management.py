@@ -1257,7 +1257,7 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
         caller_team = await db.get_team_by_captain(interaction.user.id)
         caller_membership = await db.get_player_team_membership(interaction.user.id)
         target_membership = await db.get_player_team_membership(player.id)
-        is_staff_caller = is_staff(interaction.user)
+        is_staff_caller = is_staff(interaction)
 
         team_id = None
         if caller_team:
