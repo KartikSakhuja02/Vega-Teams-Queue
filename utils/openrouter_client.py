@@ -40,6 +40,10 @@ def get_api_key() -> str:
 
 def get_model() -> str:
     m = (os.getenv("OPENROUTER_MODEL") or "").strip().strip('"').strip("'")
+    if m.startswith("oogle/"):
+        m = "g" + m
+    if "gemini-2.5-flash" in m.lower():
+        return "google/gemini-2.5-flash"
     # If not set, or if an old free-tier model (e.g. :free, gemma) is leftover in env, use Gemini 2.5 Flash
     if not m or ":free" in m or "gemma" in m.lower():
         return "google/gemini-2.5-flash"
