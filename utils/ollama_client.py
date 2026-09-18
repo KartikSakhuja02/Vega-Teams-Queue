@@ -233,6 +233,7 @@ async def _call_ollama_internal(image_bytes: bytes, prompt: str, json_format: bo
     # We do not pass format="json" by default as the prompt already requires JSON and _extract_json parses it.
     payload: dict = {
         "model": _MODEL,
+        "keep_alive": -1,
         "messages": [
             {
                 "role": "user",
@@ -304,6 +305,7 @@ async def _call_ollama_generate(
     image_b64 = base64.b64encode(image_bytes).decode()
     payload = {
         "model": _MODEL,
+        "keep_alive": -1,
         "prompt": prompt,
         "images": [image_b64],
         "stream": False,
