@@ -487,8 +487,9 @@ def build_solo_checkin_embed(
     connected_pids: set[int],
     lobby_vc_id: int,
     colour: Optional[discord.Colour] = None,
+    deadline_timestamp: Optional[int] = None,
 ) -> discord.Embed:
-    """Minimalist voice check-in embed."""
+    """Minimalist voice check-in embed with countdown timer."""
     all_pids = list(dict.fromkeys(
         match.get("team1_player_ids", [])
         + match.get("team2_player_ids", [])
@@ -502,15 +503,16 @@ def build_solo_checkin_embed(
         icon = "🟢" if pid in connected_pids else "🔴"
         lines.append(f"{icon} {ign}")
 
+    desc = f"`[ {checked_count} / {len(all_pids)} in Voice ]` — <#{lobby_vc_id}>\n\n" + "  ".join(lines)
+    if deadline_timestamp:
+        desc += f"\n\n⏱️ **Check-in Deadline:** <t:{deadline_timestamp}:R> (<t:{deadline_timestamp}:T>)"
+
     embed = discord.Embed(
         title=f"QUEUE #{match['id']} — VOICE CHECK-IN",
-        description=(
-            f"`[ {checked_count} / {len(all_pids)} in Voice ]` — <#{lobby_vc_id}>\n\n"
-            + "  ".join(lines)
-        ),
+        description=desc,
         colour=colour or EMBED_COLOUR,
     )
-    embed.set_footer(text="Draft starts when all 10 are in voice.")
+    embed.set_footer(text="Draft starts when all 10 are in voice • Unjoined players will be auto-subbed")
     return embed
 
 
@@ -1935,6 +1937,55 @@ class MatchResultVoteView(discord.ui.View):
                 await self.on_declined_callback(None)
 
 
+class SubConfirmationView(discord.ui.View):
+    """Interactive view for a sub candidate to accept or decline subbing into a match."""
+
+    def __init__(self, candidate_id: int, timeout: float = 60.0) -> None:
+        super().__init__(timeout=timeout)
+        self.candidate_id = candidate_id
+        self.confirmed: Optional[bool] = None
+        self.response_interaction: Optional[discord.Interaction] = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.candidate_id:
+            await interaction.response.send_message(
+                "❌ This substitution confirmation is not for you.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Accept & Ready", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.confirmed = True
+        self.response_interaction = interaction
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content=f"✅ <@{self.candidate_id}> accepted the substitution!",
+            view=self,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger, emoji="❌")
+    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.confirmed = False
+        self.response_interaction = interaction
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content=f"❌ <@{self.candidate_id}> declined the substitution.",
+            view=self,
+        )
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        if self.confirmed is None:
+            self.confirmed = False
+            for item in self.children:
+                item.disabled = True
+
+
 # =============================================================================
 # Interactive Admin Configuration Panel Components
 # =============================================================================
@@ -2220,6 +2271,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         self._auto_resume_task: Optional[asyncio.Task] = None
         # Cache panel message ID in memory to avoid a DB round-trip on every refresh
         self._panel_message_id: Optional[int] = None
+        # Track 5-minute check-in timeout tasks and deadlines
+        self._checkin_timers: dict[int, asyncio.Task] = {}
+        self._checkin_deadlines: dict[int, int] = {}
 
     async def is_queue_paused(self) -> tuple[bool, Optional[float]]:
         """Check if the queue is paused. Returns (is_paused, pause_until_timestamp)."""
@@ -2693,10 +2747,14 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
                 asyncio.create_task(_send_dms_background())
 
+                # Calculate 5-minute check-in deadline
+                deadline = int(time.time()) + 300
+                self._checkin_deadlines[match["id"]] = deadline
+
                 # Check initial voice connections
                 connected_pids = {m.id for m in lobby_vc.members if m.id in player_ids}
                 checkin_embed = build_solo_checkin_embed(
-                    match, players_by_id, connected_pids, lobby_vc.id, colour=colour
+                    match, players_by_id, connected_pids, lobby_vc.id, colour=colour, deadline_timestamp=deadline
                 )
 
                 pings = " ".join(f"<@{pid}>" for pid in player_ids)
@@ -2704,12 +2762,17 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     content=(
                         f"{pings}\n"
                         f"**10-MAN QUEUE FOUND — VOICE CHECK-IN**\n"
-                        f"All 10 players please connect to {lobby_vc.mention} to begin!"
+                        f"All 10 players please connect to {lobby_vc.mention} within **5 minutes** (<t:{deadline}:R>) to begin!"
                     ),
                     embed=checkin_embed,
                 )
                 await db.update_solo_match_panel(match["id"], panel_msg.id)
                 log.info("Created 10-man solo queue #%d in channel #%s.", match["id"], text_channel.name)
+
+                # Schedule 5-minute voice check-in timeout monitor
+                self._checkin_timers[match["id"]] = asyncio.create_task(
+                    self._monitor_voice_checkin_timeout(match["id"], guild, deadline)
+                )
 
                 # If all 10 players are somehow already in voice, start immediately
                 if len(connected_pids) >= 10:
@@ -2777,7 +2840,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         )
         players_by_id = {p["discord_id"]: p for p in players}
 
-        embed = build_solo_checkin_embed(match, players_by_id, connected_pids, lobby_vc.id, colour=colour)
+        deadline_ts = self._checkin_deadlines.get(match["id"])
+        embed = build_solo_checkin_embed(match, players_by_id, connected_pids, lobby_vc.id, colour=colour, deadline_timestamp=deadline_ts)
 
         if panel_msg_id:
             try:
@@ -2797,6 +2861,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         players_by_id: Optional[dict[int, dict]] = None,
     ) -> None:
         """Advance match from VOICE_CHECKIN to DRAFTING or AUTO_BALANCE."""
+        # Cancel and cleanup check-in timer
+        timer = self._checkin_timers.pop(match["id"], None)
+        if timer and not timer.done():
+            timer.cancel()
+        self._checkin_deadlines.pop(match["id"], None)
+
         current_match = await db.get_solo_match_by_id(match["id"])
         if not current_match or current_match.get("status") != "VOICE_CHECKIN":
             return
@@ -4081,6 +4151,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         # Cancel match in database
         await db.cancel_solo_match(match["id"])
 
+        # Cancel and cleanup check-in timer if running
+        timer = self._checkin_timers.pop(match["id"], None)
+        if timer and not timer.done():
+            timer.cancel()
+        self._checkin_deadlines.pop(match["id"], None)
+
         # Delete voice channels if created
         v_lobby_id = match.get("voice_lobby_id")
         v1_id = match.get("voice_team1_id")
@@ -4333,6 +4409,25 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 await interaction.channel.send(
                     f"Captain updated: <@{new_captain.id}> has replaced <@{old_captain.id}> as captain."
                 )
+
+    # ── /sub ──────────────────────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="sub",
+        description="Substitute a player in an active match with confirmation and a 3-minute voice join timer.",
+    )
+    @app_commands.describe(
+        old_player="The player currently in the match to be replaced",
+        new_player="The new player to sub in (will receive a confirmation prompt)",
+    )
+    async def sub_player(
+        self,
+        interaction: discord.Interaction,
+        old_player: discord.Member,
+        new_player: discord.Member,
+    ) -> None:
+        """Substitute a player in an active match with confirmation and a 3-minute voice timer."""
+        await self._handle_sub_command(interaction, old_player, new_player)
 
     # ── /replace-player ───────────────────────────────────────────────────────
 
@@ -4691,6 +4786,602 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         except Exception:
             if isinstance(interaction.channel, discord.TextChannel):
                 await interaction.channel.send(msg)
+
+    # ── Match Permission & Substitution Helpers ────────────────────────────────
+
+    async def _grant_match_permissions(self, match: dict, guild: discord.Guild, member: discord.Member) -> None:
+        """Grant player view, message, and voice connect access to the match category, text channel, and VCs."""
+        ch_id = match.get("channel_id")
+        match_ch = guild.get_channel(ch_id) if ch_id else None
+        if isinstance(match_ch, discord.TextChannel):
+            if match_ch.category:
+                try:
+                    await match_ch.category.set_permissions(
+                        member,
+                        view_channel=True,
+                        send_messages=True,
+                        read_message_history=True,
+                        attach_files=True,
+                        embed_links=True,
+                        connect=True,
+                        speak=True,
+                        stream=True,
+                        use_voice_activation=True,
+                    )
+                except Exception as e:
+                    log.debug("Could not set category perms for %s: %s", member.name, e)
+            try:
+                await match_ch.set_permissions(
+                    member,
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    attach_files=True,
+                    embed_links=True,
+                )
+            except Exception as e:
+                log.debug("Could not set text perms for %s: %s", member.name, e)
+
+        for vid_key in ("voice_lobby_id", "voice_team1_id", "voice_team2_id"):
+            vid = match.get(vid_key)
+            if vid:
+                vch = guild.get_channel(vid)
+                if isinstance(vch, discord.VoiceChannel):
+                    try:
+                        await vch.set_permissions(
+                            member,
+                            view_channel=True,
+                            connect=True,
+                            speak=True,
+                            stream=True,
+                            use_voice_activation=True,
+                        )
+                    except Exception as e:
+                        log.debug("Could not set VC perms on %s for %s: %s", vid_key, member.name, e)
+
+    async def _revoke_match_permissions(self, match: dict, guild: discord.Guild, member: discord.Member) -> None:
+        """Revoke player's access to the match category, text channel, and VCs."""
+        ch_id = match.get("channel_id")
+        match_ch = guild.get_channel(ch_id) if ch_id else None
+        if isinstance(match_ch, discord.TextChannel):
+            if match_ch.category:
+                try:
+                    await match_ch.category.set_permissions(member, overwrite=None)
+                except Exception:
+                    pass
+            try:
+                await match_ch.set_permissions(member, overwrite=None)
+            except Exception:
+                pass
+
+        for vid_key in ("voice_lobby_id", "voice_team1_id", "voice_team2_id"):
+            vid = match.get(vid_key)
+            if vid:
+                vch = guild.get_channel(vid)
+                if isinstance(vch, discord.VoiceChannel):
+                    try:
+                        await vch.set_permissions(member, overwrite=None)
+                    except Exception:
+                        pass
+
+    async def _commit_player_replacement(self, match: dict, old_pid: int, new_pid: int) -> Optional[dict]:
+        """Commit player replacement to database and return updated match dict."""
+        t1_ids = list(match.get("team1_player_ids") or [])
+        t2_ids = list(match.get("team2_player_ids") or [])
+        avail_ids = list(match.get("available_player_ids") or [])
+        c1_id = match.get("captain1_id")
+        c2_id = match.get("captain2_id")
+        turn_id = match.get("current_turn_captain_id")
+
+        new_t1_ids = [new_pid if pid == old_pid else pid for pid in t1_ids]
+        new_t2_ids = [new_pid if pid == old_pid else pid for pid in t2_ids]
+        new_avail_ids = [new_pid if pid == old_pid else pid for pid in avail_ids]
+
+        new_c1 = new_pid if c1_id == old_pid else c1_id
+        new_c2 = new_pid if c2_id == old_pid else c2_id
+        new_turn_id = new_pid if turn_id == old_pid else turn_id
+
+        updated_match = await db.replace_player_in_solo_match(
+            match_id=match["id"],
+            old_pid=old_pid,
+            new_pid=new_pid,
+            captain1_id=new_c1,
+            captain2_id=new_c2,
+            team1_player_ids=new_t1_ids,
+            team2_player_ids=new_t2_ids,
+            available_player_ids=new_avail_ids,
+            current_turn_captain_id=new_turn_id,
+        )
+        if not updated_match:
+            updated_match = dict(match)
+            updated_match["captain1_id"] = new_c1
+            updated_match["captain2_id"] = new_c2
+            updated_match["team1_player_ids"] = new_t1_ids
+            updated_match["team2_player_ids"] = new_t2_ids
+            updated_match["available_player_ids"] = new_avail_ids
+            updated_match["current_turn_captain_id"] = new_turn_id
+
+        return updated_match
+
+    async def _refresh_match_panel_after_replacement(
+        self,
+        updated_match: dict,
+        guild: discord.Guild,
+        match_ch: discord.TextChannel,
+    ) -> None:
+        """Update the match embed/view (checkin, drafting, veto, or in-progress) after a roster change."""
+        try:
+            panel_msg_id = updated_match.get("panel_message_id")
+            if not panel_msg_id or not hasattr(match_ch, "fetch_message"):
+                return
+            panel_msg = await match_ch.fetch_message(panel_msg_id)
+
+            t1_ids = list(updated_match.get("team1_player_ids") or [])
+            t2_ids = list(updated_match.get("team2_player_ids") or [])
+            avail_ids = list(updated_match.get("available_player_ids") or [])
+            c1_id = updated_match.get("captain1_id")
+            c2_id = updated_match.get("captain2_id")
+            match_pids = list(dict.fromkeys(t1_ids + t2_ids + avail_ids + [p for p in (c1_id, c2_id) if p]))
+
+            fetched = await db.get_players_bulk(match_pids)
+            players_by_id = {p["discord_id"]: p for p in fetched}
+            colour = await get_solo_embed_colour()
+            status = updated_match.get("status")
+
+            if status == "DRAFTING":
+                embed = build_solo_draft_embed(updated_match, players_by_id, colour=colour)
+                avail_players = [players_by_id[pid] for pid in avail_ids if pid in players_by_id]
+                draft_mode = await get_solo_draft_mode()
+                view = SoloDraftView(updated_match, avail_players, players_by_id=players_by_id, colour=colour, draft_mode=draft_mode)
+                await panel_msg.edit(embed=embed, view=view)
+            elif status == "MAP_VETO":
+                embed = build_solo_map_veto_embed(updated_match, players_by_id, colour=colour)
+                veto_mode = await get_solo_veto_mode()
+                if veto_mode not in ("MAP_VOTE", "VOTE"):
+                    view = SoloMapVetoView(updated_match, players_by_id, veto_mode=veto_mode, colour=colour)
+                    await panel_msg.edit(embed=embed, view=view)
+                else:
+                    await panel_msg.edit(embed=embed)
+            elif status == "VOICE_CHECKIN":
+                v_lobby_id = updated_match.get("voice_lobby_id")
+                lobby_vc = guild.get_channel(v_lobby_id) if (v_lobby_id and guild) else None
+                connected_pids = {m.id for m in lobby_vc.members if m.id in match_pids} if isinstance(lobby_vc, discord.VoiceChannel) else set()
+                deadline_ts = self._checkin_deadlines.get(updated_match["id"])
+                embed = build_solo_checkin_embed(updated_match, players_by_id, connected_pids, v_lobby_id or 0, colour=colour, deadline_timestamp=deadline_ts)
+                await panel_msg.edit(embed=embed)
+            elif status == "IN_PROGRESS":
+                embed = build_solo_map_veto_embed(updated_match, players_by_id, colour=colour)
+                map_file = get_solo_map_file(updated_match.get("selected_map"))
+                edit_kwargs = {"embed": embed}
+                if map_file:
+                    edit_kwargs["attachments"] = [map_file]
+                await panel_msg.edit(**edit_kwargs)
+        except Exception as e:
+            log.debug("Failed to update panel message on player replacement: %s", e)
+
+    async def _auto_cancel_match_due_to_timeout(self, match: dict, guild: discord.Guild, reason: str) -> None:
+        """Auto-cancel match when queue is empty or no subs are available."""
+        match_id = match["id"]
+        log.info("Auto-cancelling Queue #%d: %s", match_id, reason)
+
+        # 1. Update database
+        await db.cancel_solo_match(match_id)
+
+        # 2. Reset all participants to IDLE
+        all_pids = list(dict.fromkeys(
+            (match.get("team1_player_ids") or [])
+            + (match.get("team2_player_ids") or [])
+            + (match.get("available_player_ids") or [])
+            + [p for p in (match.get("captain1_id"), match.get("captain2_id")) if p]
+        ))
+        if all_pids:
+            try:
+                await db.set_players_status_bulk(all_pids, "IDLE")
+            except Exception as e:
+                log.warning("Could not set players to IDLE on auto-cancel: %s", e)
+
+        # 3. Post cancellation notice in text channel before deletion
+        ch_id = match.get("channel_id")
+        match_ch = guild.get_channel(ch_id) if ch_id else None
+        if isinstance(match_ch, discord.TextChannel):
+            try:
+                await match_ch.send(
+                    f"🛑 **Match #{match_id} Cancelled.**\n"
+                    f"{reason}\n"
+                    f"This match category will be deleted in 10 seconds."
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(10)
+
+        # 4. Delete channels and category
+        for vid_key in ("voice_lobby_id", "voice_team1_id", "voice_team2_id"):
+            vid = match.get(vid_key)
+            if vid:
+                vch = guild.get_channel(vid)
+                if isinstance(vch, discord.VoiceChannel):
+                    try:
+                        await vch.delete(reason=f"Queue #{match_id} auto-cancelled: {reason}")
+                    except Exception:
+                        pass
+
+        if isinstance(match_ch, discord.TextChannel):
+            cat_to_delete = match_ch.category
+            try:
+                await match_ch.delete(reason=f"Queue #{match_id} auto-cancelled: {reason}")
+            except Exception:
+                pass
+            if cat_to_delete:
+                try:
+                    await cat_to_delete.delete(reason=f"Queue #{match_id} auto-cancelled: {reason}")
+                except Exception:
+                    pass
+
+        # Clean up any tracking timer
+        self._checkin_timers.pop(match_id, None)
+        self._checkin_deadlines.pop(match_id, None)
+
+        # Refresh queue panel
+        self._schedule_queue_panel_refresh()
+
+    async def _find_and_prompt_sub(
+        self,
+        match: dict,
+        guild: discord.Guild,
+        match_ch: discord.TextChannel,
+        lobby_vc: discord.VoiceChannel,
+        old_pid: int,
+    ) -> bool:
+        """
+        Finds replacement candidates from solo_queue FIFO.
+        Prompts candidate with UI.
+        If confirmed: substitutes them into the match and gives 3 minutes to join VC.
+        If they don't join VC in 3 minutes: re-subs them.
+        Returns True if a sub successfully joined, or False if queue is exhausted.
+        """
+        excluded_ids = list(dict.fromkeys(
+            (match.get("team1_player_ids") or [])
+            + (match.get("team2_player_ids") or [])
+            + (match.get("available_player_ids") or [])
+            + [p for p in (match.get("captain1_id"), match.get("captain2_id")) if p]
+        ))
+
+        curr_match = match
+        current_target_old_pid = old_pid
+
+        while True:
+            # 1. Fetch next FIFO candidate
+            candidate = await db.get_next_fifo_queue_candidate(excluded_ids)
+            if not candidate:
+                log.info("No more FIFO candidates in solo_queue for Match #%d", curr_match["id"])
+                return False
+
+            cand_id = candidate["discord_id"]
+            excluded_ids.append(cand_id)
+
+            cand_mem = await _get_or_fetch_member(guild, cand_id)
+            if not cand_mem:
+                continue
+
+            # 2. Propagate permissions so candidate can see match channel
+            await self._grant_match_permissions(curr_match, guild, cand_mem)
+
+            # 3. Post confirmation view
+            confirm_view = SubConfirmationView(candidate_id=cand_id, timeout=60.0)
+            confirm_msg = await match_ch.send(
+                content=(
+                    f"🚨 **SUB NEEDED!** <@{cand_id}>\n"
+                    f"<@{current_target_old_pid}> failed to connect to voice in time.\n"
+                    f"You are next in queue! Do you confirm you can play **Match #{curr_match['id']}** right now?"
+                ),
+                view=confirm_view,
+            )
+
+            await confirm_view.wait()
+
+            if not confirm_view.confirmed:
+                # Declined or timed out
+                await self._revoke_match_permissions(curr_match, guild, cand_mem)
+                await match_ch.send(f"⏭️ <@{cand_id}> declined or timed out. Looking for the next substitute in queue...")
+                continue
+
+            # 4. Accepted! Remove old player match permissions
+            old_mem = await _get_or_fetch_member(guild, current_target_old_pid)
+            if old_mem:
+                await self._revoke_match_permissions(curr_match, guild, old_mem)
+
+            # Commit player replacement to DB
+            updated = await self._commit_player_replacement(curr_match, current_target_old_pid, cand_id)
+            if not updated:
+                await self._revoke_match_permissions(curr_match, guild, cand_mem)
+                return False
+
+            curr_match = updated
+
+            # Refresh panel embed
+            await self._refresh_match_panel_after_replacement(curr_match, guild, match_ch)
+
+            # 5. Start 3-minute voice join window
+            three_min_deadline = int(time.time()) + 180
+            await match_ch.send(
+                f"✅ **Player Substituted!** <@{cand_id}> has replaced <@{current_target_old_pid}>.\n"
+                f"<@{cand_id}>, please connect to {lobby_vc.mention} within **3 minutes**!\n"
+                f"⏱️ **Deadline:** <t:{three_min_deadline}:R> (<t:{three_min_deadline}:T>)"
+            )
+
+            # Monitor voice join for 3 minutes (36 iterations * 5s = 180s)
+            joined_in_time = False
+            for _ in range(36):
+                await asyncio.sleep(5)
+                # Re-check voice lobby members
+                if any(m.id == cand_id for m in lobby_vc.members):
+                    joined_in_time = True
+                    break
+
+            if joined_in_time:
+                await match_ch.send(f"🎉 <@{cand_id}> has connected to voice!")
+                await self._handle_voice_checkin_update(curr_match, guild)
+                return True
+            else:
+                # Candidate failed to join in 3 minutes! Sub them out again
+                await match_ch.send(f"⏱️ <@{cand_id}> failed to connect to voice within 3 minutes! Subbing them out...")
+                await self._revoke_match_permissions(curr_match, guild, cand_mem)
+                await db.set_player_status(cand_id, "IDLE")
+                current_target_old_pid = cand_id
+                # Loop continues to pick next FIFO candidate
+
+    async def _monitor_voice_checkin_timeout(self, match_id: int, guild: discord.Guild, deadline: int) -> None:
+        """Background task that fires after 5 minutes of check-in, identifying missing players and auto-subbing or cancelling."""
+        delay = max(0.0, deadline - time.time())
+        await asyncio.sleep(delay)
+
+        # Re-fetch match to verify it is still in VOICE_CHECKIN
+        current_match = await db.get_solo_match_by_id(match_id)
+        if not current_match or current_match.get("status") != "VOICE_CHECKIN":
+            return
+
+        lobby_vc_id = current_match.get("voice_lobby_id")
+        lobby_vc = guild.get_channel(lobby_vc_id) if lobby_vc_id else None
+        if not isinstance(lobby_vc, discord.VoiceChannel):
+            return
+
+        all_pids = list(dict.fromkeys(
+            (current_match.get("team1_player_ids") or [])
+            + (current_match.get("team2_player_ids") or [])
+            + (current_match.get("available_player_ids") or [])
+            + [p for p in (current_match.get("captain1_id"), current_match.get("captain2_id")) if p]
+        ))
+        connected_pids = {m.id for m in lobby_vc.members if m.id in all_pids}
+
+        # If all 10 are connected, advance
+        if len(connected_pids) >= 10:
+            ch_id = current_match.get("channel_id")
+            match_ch = guild.get_channel(ch_id) if ch_id else None
+            if isinstance(match_ch, discord.TextChannel):
+                await self._start_match_after_checkin(current_match, guild, match_ch)
+            return
+
+        missing_pids = [pid for pid in all_pids if pid not in connected_pids]
+        log.info("Queue #%d 5-minute check-in expired. Missing players: %s", match_id, missing_pids)
+
+        ch_id = current_match.get("channel_id")
+        match_ch = guild.get_channel(ch_id) if ch_id else None
+        if not isinstance(match_ch, discord.TextChannel):
+            return
+
+        missing_pings = " ".join(f"<@{pid}>" for pid in missing_pids)
+        await match_ch.send(
+            f"⏰ **Voice Check-in Expired (5 minutes)!**\n"
+            f"Missing players: {missing_pings}\n"
+            f"Searching waiting queue for replacement substitutes..."
+        )
+
+        curr = current_match
+        for missing_pid in missing_pids:
+            # Verify match still active
+            curr = await db.get_solo_match_by_id(match_id)
+            if not curr or curr.get("status") != "VOICE_CHECKIN":
+                return
+
+            sub_success = await self._find_and_prompt_sub(curr, guild, match_ch, lobby_vc, missing_pid)
+            if not sub_success:
+                # Queue empty or all candidates declined/timed out: auto-cancel match!
+                await self._auto_cancel_match_due_to_timeout(
+                    curr,
+                    guild,
+                    reason=f"<@{missing_pid}> failed to connect to voice in time, and there are no replacement substitutes available in the queue.",
+                )
+                return
+
+        # After resolving missing players, check if all 10 are in voice
+        curr = await db.get_solo_match_by_id(match_id)
+        if curr and curr.get("status") == "VOICE_CHECKIN":
+            all_now = list(dict.fromkeys(
+                (curr.get("team1_player_ids") or [])
+                + (curr.get("team2_player_ids") or [])
+                + (curr.get("available_player_ids") or [])
+                + [p for p in (curr.get("captain1_id"), curr.get("captain2_id")) if p]
+            ))
+            connected_now = {m.id for m in lobby_vc.members if m.id in all_now}
+            if len(connected_now) >= 10:
+                await self._start_match_after_checkin(curr, guild, match_ch)
+
+    async def _handle_sub_command(
+        self,
+        interaction: discord.Interaction,
+        old_player: discord.Member,
+        new_player: discord.Member,
+    ) -> None:
+        """Handle /sub <old_player> <new_player> command with interactive confirmation and 3-min voice timer."""
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        if old_player.id == new_player.id:
+            await interaction.response.send_message("Old player and new player cannot be the same person.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=False)
+
+        # 1. Check permissions & player profiles
+        is_staff = isinstance(interaction.user, discord.Member) and _is_admin(interaction.user)
+        old_p_rec, new_p_rec = await asyncio.gather(
+            db.get_player(old_player.id),
+            db.get_player(new_player.id),
+        )
+
+        if not new_p_rec:
+            await interaction.followup.send(f"<@{new_player.id}> is not registered yet (`/register`).", ephemeral=True)
+            return
+        if new_p_rec.get("is_banned"):
+            await interaction.followup.send(f"<@{new_player.id}> is banned from queues.", ephemeral=True)
+            return
+
+        # 2. Find target match
+        match = await db.get_solo_match_by_channel(interaction.channel_id)
+        if not match:
+            match = await db.get_active_solo_match_by_player(old_player.id)
+
+        if not match:
+            await interaction.followup.send("No active match found for that player in this channel.", ephemeral=True)
+            return
+
+        all_match_pids = list(dict.fromkeys(
+            (match.get("team1_player_ids") or [])
+            + (match.get("team2_player_ids") or [])
+            + (match.get("available_player_ids") or [])
+            + [p for p in (match.get("captain1_id"), match.get("captain2_id")) if p]
+        ))
+
+        # Authorization: staff or participant
+        if not is_staff and interaction.user.id not in all_match_pids:
+            await interaction.followup.send("Only staff or players in this match can propose a substitute.", ephemeral=True)
+            return
+
+        if old_player.id not in all_match_pids:
+            await interaction.followup.send(f"<@{old_player.id}> is not a participant in Match #{match['id']}.", ephemeral=True)
+            return
+
+        if new_player.id in all_match_pids:
+            await interaction.followup.send(f"<@{new_player.id}> is already a participant in Match #{match['id']}.", ephemeral=True)
+            return
+
+        # Check if new player is already in an active match
+        if new_p_rec.get("status") == "IN_MATCH":
+            new_p_active_m = await db.get_active_solo_match_by_player(new_player.id)
+            if new_p_active_m and new_p_active_m.get("id") != match.get("id"):
+                ch_id = new_p_active_m.get("channel_id")
+                active_ch = interaction.guild.get_channel(ch_id) if ch_id else None
+                if active_ch:
+                    await interaction.followup.send(
+                        f"<@{new_player.id}> is already in an active match (<#{ch_id}>).",
+                        ephemeral=True,
+                    )
+                    return
+                else:
+                    await db.set_player_status(new_player.id, "IDLE")
+            else:
+                await db.set_player_status(new_player.id, "IDLE")
+
+        # 3. Propagate permissions so new_player can see the channel and interact
+        await self._grant_match_permissions(match, interaction.guild, new_player)
+
+        # 4. Send confirmation UI
+        confirm_view = SubConfirmationView(candidate_id=new_player.id, timeout=90.0)
+        confirm_msg = await interaction.followup.send(
+            content=(
+                f"🚨 **SUB PROPOSAL!** <@{new_player.id}>\n"
+                f"<@{interaction.user.id}> has requested to sub you into **Match #{match['id']}** in place of <@{old_player.id}>.\n"
+                f"Do you confirm that you can play right now?"
+            ),
+            view=confirm_view,
+        )
+
+        await confirm_view.wait()
+
+        if not confirm_view.confirmed:
+            # Declined or timed out
+            await self._revoke_match_permissions(match, interaction.guild, new_player)
+            try:
+                await confirm_msg.edit(
+                    content=f"❌ Substitution request for <@{new_player.id}> was declined or timed out.",
+                    view=None,
+                )
+            except Exception:
+                pass
+            return
+
+        # 5. Confirmed! Commit roster swap
+        await self._revoke_match_permissions(match, interaction.guild, old_player)
+        updated_match = await self._commit_player_replacement(match, old_player.id, new_player.id)
+        if not updated_match:
+            await interaction.followup.send("❌ Failed to commit player substitution to database.", ephemeral=True)
+            return
+
+        # Update panel
+        ch_id = updated_match.get("channel_id") or interaction.channel_id
+        match_ch = interaction.guild.get_channel(ch_id) if interaction.guild else None
+        if isinstance(match_ch, discord.TextChannel):
+            await self._refresh_match_panel_after_replacement(updated_match, interaction.guild, match_ch)
+
+        # Announce
+        await match_ch.send(
+            f"🔄 **Player Substituted!** <@{new_player.id}> has officially replaced <@{old_player.id}> in Match #{match['id']}."
+        )
+
+        # 6. If match is in VOICE_CHECKIN, give them 3 minutes to join voice!
+        if updated_match.get("status") == "VOICE_CHECKIN":
+            v_lobby_id = updated_match.get("voice_lobby_id")
+            lobby_vc = interaction.guild.get_channel(v_lobby_id) if v_lobby_id else None
+            three_min_deadline = int(time.time()) + 180
+            if isinstance(lobby_vc, discord.VoiceChannel):
+                await match_ch.send(
+                    f"<@{new_player.id}>, please connect to {lobby_vc.mention} within **3 minutes**!\n"
+                    f"⏱️ **Deadline:** <t:{three_min_deadline}:R> (<t:{three_min_deadline}:T>)"
+                )
+                # Monitor for 3 minutes
+                joined_in_time = False
+                for _ in range(36):
+                    await asyncio.sleep(5)
+                    if any(m.id == new_player.id for m in lobby_vc.members):
+                        joined_in_time = True
+                        break
+
+                if joined_in_time:
+                    await match_ch.send(f"🎉 <@{new_player.id}> joined the voice lobby!")
+                    await self._handle_voice_checkin_update(updated_match, interaction.guild)
+                else:
+                    await match_ch.send(f"⏱️ <@{new_player.id}> failed to join voice in 3 minutes! Subbing them out...")
+                    await self._revoke_match_permissions(updated_match, interaction.guild, new_player)
+                    await db.set_player_status(new_player.id, "IDLE")
+                    # Trigger auto-sub from queue
+                    success = await self._find_and_prompt_sub(updated_match, interaction.guild, match_ch, lobby_vc, new_player.id)
+                    if not success:
+                        await self._auto_cancel_match_due_to_timeout(
+                            updated_match,
+                            interaction.guild,
+                            reason=f"<@{new_player.id}> failed to join voice within 3 minutes and no replacement substitutes were available in the queue.",
+                        )
+        elif updated_match.get("status") == "IN_PROGRESS":
+            # If match is already playing, update team VC perms and move them if in voice
+            t1_ids = updated_match.get("team1_player_ids") or []
+            v1_id = updated_match.get("voice_team1_id")
+            v2_id = updated_match.get("voice_team2_id")
+            target_vid = v1_id if new_player.id in t1_ids else v2_id
+            enemy_vid = v2_id if new_player.id in t1_ids else v1_id
+            if target_vid:
+                tvch = interaction.guild.get_channel(target_vid)
+                if isinstance(tvch, discord.VoiceChannel):
+                    await tvch.set_permissions(new_player, view_channel=True, connect=True, speak=True, stream=True, use_voice_activation=True)
+                    if new_player.voice and new_player.voice.channel and new_player.voice.channel.id != tvch.id:
+                        try:
+                            await new_player.move_to(tvch, reason=f"Queue #{match['id']} subbed team VC")
+                        except Exception:
+                            pass
+            if enemy_vid:
+                evch = interaction.guild.get_channel(enemy_vid)
+                if isinstance(evch, discord.VoiceChannel):
+                    await evch.set_permissions(new_player, view_channel=True, connect=False)
 
     async def _handle_set_elo_template(
         self,

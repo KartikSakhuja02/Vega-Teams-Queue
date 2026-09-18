@@ -2278,11 +2278,41 @@ async def replace_player_in_solo_match(
                 new_pid,
             )
             await conn.execute(
-                "DELETE FROM solo_queue WHERE player_id = $1",
+                "DELETE FROM solo_queue WHERE discord_id = $1",
                 new_pid,
             )
 
             return dict(updated_match) if updated_match else None
+
+
+async def get_next_fifo_queue_candidate(excluded_ids: Optional[list[int]] = None) -> Optional[dict]:
+    """
+    Fetch the next eligible player in the solo queue waiting list ordered by FIFO (joined_at ASC),
+    excluding any players in excluded_ids (e.g. current match players or candidates who declined).
+    """
+    excluded = list(excluded_ids or [])
+    query = """
+        SELECT
+            sq.id as queue_id,
+            sq.discord_id,
+            sq.joined_at,
+            p.ign,
+            p.discord_username,
+            p.elo,
+            p.region,
+            p.wins,
+            p.matches_played,
+            p.status
+        FROM solo_queue sq
+        JOIN players p ON sq.discord_id = p.discord_id
+        WHERE p.is_active = TRUE
+          AND p.is_banned = FALSE
+          AND ($1::BIGINT[] IS NULL OR NOT (sq.discord_id = ANY($1::BIGINT[])))
+        ORDER BY sq.joined_at ASC
+        LIMIT 1
+    """
+    row = await get_pool().fetchrow(query, excluded if excluded else None)
+    return dict(row) if row else None
 
 
 async def update_solo_match_map_veto(
