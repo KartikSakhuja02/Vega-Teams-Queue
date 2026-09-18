@@ -93,33 +93,7 @@ CONFIG_KEY_PINNED_LEADERBOARD_MSG = "leaderboard_panel_message_id"
 CONFIG_KEY_PINNED_LEADERBOARD_CH = "leaderboard_panel_channel_id"
 
 
-STAFF_ROLE_NAMES = {
-    "moderator",
-    "mod",
-    "mods",
-    "faceit police",
-    "faceit-police",
-    "admin",
-    "administrator",
-}
-
-
-def _is_admin(member: discord.Member) -> bool:
-    """Check administrator/manage_guild perms, configured admin role IDs, or staff role names."""
-    if not isinstance(member, discord.Member):
-        return False
-    if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
-        return True
-    raw = os.environ.get("HELP_ADMIN_ROLE_IDS", "")
-    admin_ids: list[int] = []
-    for chunk in raw.split(","):
-        try:
-            admin_ids.append(int(chunk.strip()))
-        except ValueError:
-            pass
-    if any(role.id in admin_ids for role in member.roles):
-        return True
-    return any(role.name.strip().lower() in STAFF_ROLE_NAMES for role in member.roles)
+from utils.staff import is_staff, _is_admin, STAFF_ROLE_NAMES, get_staff_role_ids
 
 
 

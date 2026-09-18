@@ -43,47 +43,7 @@ SOLO_MATCH_CATEGORY_ID: int = int(os.environ.get("SOLO_MATCH_CATEGORY_ID", "0"))
 SOLO_VOICE_CATEGORY_ID: int = int(os.environ.get("SOLO_VOICE_CATEGORY_ID", "0"))
 SOLO_QUEUE_MESSAGE_CONFIG_KEY: str = "solo_queue_message_id"
 
-TEAM_MOD_ROLE_IDS_RAW: str = (
-    os.environ.get("TEAM_MOD_ROLE_IDS", "").strip()
-    or os.environ.get("HELP_ADMIN_ROLE_IDS", "")
-)
-
-
-def _parse_role_ids(raw_value: str) -> list[int]:
-    ids: list[int] = []
-    for chunk in raw_value.split(","):
-        cleaned = chunk.strip()
-        if not cleaned:
-            continue
-        try:
-            ids.append(int(cleaned))
-        except ValueError:
-            pass
-    return ids
-
-
-STAFF_ROLE_IDS: list[int] = _parse_role_ids(TEAM_MOD_ROLE_IDS_RAW)
-
-STAFF_ROLE_NAMES = {
-    "moderator",
-    "mod",
-    "mods",
-    "faceit police",
-    "faceit-police",
-    "admin",
-    "administrator",
-}
-
-
-def _is_admin(member: discord.Member) -> bool:
-    """Check if member has administrator or staff moderation privileges (Admin, Moderator, Faceit Police)."""
-    if not isinstance(member, discord.Member):
-        return False
-    if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
-        return True
-    if any(r.id in STAFF_ROLE_IDS for r in member.roles):
-        return True
-    return any(r.name.strip().lower() in STAFF_ROLE_NAMES for r in member.roles)
+from utils.staff import is_staff, _is_admin, STAFF_ROLE_NAMES, get_staff_role_ids
 
 
 

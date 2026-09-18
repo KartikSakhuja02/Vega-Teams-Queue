@@ -25,44 +25,7 @@ EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 ADMIN_COMMANDS_CHANNEL_ID: int = int(
     os.environ.get("ADMIN_COMMANDS_CHANNEL_ID", "0") or os.environ.get("ADMIN_CHANNEL_ID", "0")
 )
-HELP_ADMIN_ROLE_IDS_RAW = os.environ.get("HELP_ADMIN_ROLE_IDS", "")
-
-
-def _parse_admin_role_ids(raw_value: str) -> list[int]:
-    ids: list[int] = []
-    for chunk in raw_value.split(","):
-        cleaned = chunk.strip()
-        if not cleaned:
-            continue
-        try:
-            ids.append(int(cleaned))
-        except ValueError:
-            pass
-    return ids
-
-
-HELP_ADMIN_ROLE_IDS = _parse_admin_role_ids(HELP_ADMIN_ROLE_IDS_RAW)
-
-STAFF_ROLE_NAMES = {
-    "moderator",
-    "mod",
-    "mods",
-    "faceit police",
-    "faceit-police",
-    "admin",
-    "administrator",
-}
-
-
-def _is_admin(member: discord.Member) -> bool:
-    """Check if a guild member has staff/admin permissions (Admin, Moderator, Faceit Police)."""
-    if not isinstance(member, discord.Member):
-        return False
-    if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
-        return True
-    if any(role.id in HELP_ADMIN_ROLE_IDS for role in member.roles):
-        return True
-    return any(role.name.strip().lower() in STAFF_ROLE_NAMES for role in member.roles)
+from utils.staff import is_staff, _is_admin, STAFF_ROLE_NAMES, get_staff_role_ids
 
 
 
