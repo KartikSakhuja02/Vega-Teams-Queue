@@ -3400,6 +3400,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await interaction.response.send_message(f"❌ {err_reason}", ephemeral=True)
             return
 
+        # 4b. Immediately release all lobby players to IDLE so they can join a new queue right away while OCR runs
+        try:
+            await db.set_players_status_bulk(all_match_pids, "IDLE")
+        except Exception as e:
+            log.warning("Could not set lobby players to IDLE on submission start: %s", e)
+
         # 5. Send public calculating message
         await interaction.response.send_message("Calculating result, please wait...")
 

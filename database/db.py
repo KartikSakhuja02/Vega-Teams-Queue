@@ -2521,24 +2521,42 @@ async def delete_matchmaking_verification(orig_message_id: int) -> None:
 
 async def claim_solo_match_result_submission(match_id: int, user_id: int) -> tuple[bool, str, Optional[dict]]:
     """
-    Atomically transition match from IN_PROGRESS to PROCESSING_RESULT.
+    Atomically transition match from IN_PROGRESS to PROCESSING_RESULT,
+    and release all match participants to IDLE so they can join a new queue immediately.
     Guarantees only one player's submission is processed at a time.
     Returns (success, reason_if_failed, match_dict).
     """
     pool = get_pool()
-    row = await pool.fetchrow(
-        """
-        UPDATE solo_matches
-        SET status = 'PROCESSING_RESULT',
-            submitted_by = $1
-        WHERE id = $2 AND status = 'IN_PROGRESS'
-        RETURNING *
-        """,
-        user_id,
-        match_id,
-    )
-    if row:
-        return True, "", dict(row)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE solo_matches
+                SET status = 'PROCESSING_RESULT',
+                    submitted_by = $1
+                WHERE id = $2 AND status = 'IN_PROGRESS'
+                RETURNING *
+                """,
+                user_id,
+                match_id,
+            )
+            if row:
+                m_dict = dict(row)
+                t1 = list(m_dict.get("team1_player_ids") or [])
+                t2 = list(m_dict.get("team2_player_ids") or [])
+                avail = list(m_dict.get("available_player_ids") or [])
+                all_pids = list(set(t1 + t2 + avail))
+                if all_pids:
+                    await conn.execute(
+                        """
+                        UPDATE players
+                        SET status = 'IDLE',
+                            status_since = NOW()
+                        WHERE discord_id = ANY($1::BIGINT[]) AND status = 'IN_MATCH'
+                        """,
+                        all_pids,
+                    )
+                return True, "", m_dict
 
     # Could not claim lock — inspect current status to give clear error
     current = await pool.fetchrow("SELECT * FROM solo_matches WHERE id = $1", match_id)
@@ -2631,7 +2649,15 @@ async def complete_solo_match_with_stats(
                         wins = wins + (CASE WHEN $4::BOOLEAN THEN 1 ELSE 0 END),
                         mvp_count = mvp_count + (CASE WHEN $5::BOOLEAN THEN 1 ELSE 0 END),
                         elo = GREATEST(100, elo + $6),
-                        status = CASE WHEN status = 'IN_MATCH' THEN 'IDLE' ELSE status END,
+                        status = CASE
+                            WHEN status = 'IN_MATCH' AND NOT EXISTS (
+                                SELECT 1 FROM solo_matches sm
+                                WHERE sm.id != $8
+                                  AND ($7 = ANY(sm.team1_player_ids) OR $7 = ANY(sm.team2_player_ids) OR $7 = ANY(sm.available_player_ids))
+                                  AND sm.status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS')
+                            ) THEN 'IDLE'
+                            ELSE status
+                        END,
                         status_since = NOW()
                     WHERE discord_id = $7
                     """,
@@ -2642,6 +2668,7 @@ async def complete_solo_match_with_stats(
                     is_mvp,
                     elo_delta,
                     pid,
+                    match_id,
                 )
 
             # 3. Ensure any other lobby participants (e.g. if undetected by OCR) are set to IDLE
@@ -2651,9 +2678,17 @@ async def complete_solo_match_with_stats(
                     UPDATE players
                     SET status = 'IDLE',
                         status_since = NOW()
-                    WHERE discord_id = ANY($1::BIGINT[]) AND status = 'IN_MATCH'
+                    WHERE discord_id = ANY($1::BIGINT[])
+                      AND status = 'IN_MATCH'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM solo_matches sm
+                          WHERE sm.id != $2
+                            AND (players.discord_id = ANY(sm.team1_player_ids) OR players.discord_id = ANY(sm.team2_player_ids) OR players.discord_id = ANY(sm.available_player_ids))
+                            AND sm.status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS')
+                      )
                     """,
                     all_lobby_player_ids,
+                    match_id,
                 )
 
             return dict(updated_match) if updated_match else None
