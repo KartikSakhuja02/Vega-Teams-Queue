@@ -373,17 +373,21 @@ def resolve_player_agents(
 
     def _apply_agent(p: PlayerRowStats, cv_agent: Optional[str], cv_score: float) -> None:
         vlm_agent = clean_agent_name(p.agent)
-        # Prioritize VLM detected agent if valid
+        # 1. High-confidence CV template match against official agent portraits takes precedence
+        if cv_agent and cv_score >= 0.40:
+            p.agent = cv_agent
+            log.info("Player %s resolved agent by CV: %s (score=%.3f, VLM was %s)", p.ign, cv_agent, cv_score, vlm_agent)
+            return
+        # 2. VLM detected agent if CV is unavailable or low confidence
         if vlm_agent and vlm_agent in CANONICAL_AGENTS:
             p.agent = vlm_agent
             return
-        if cv_agent and cv_score >= 0.40:
+        # 3. Moderate CV match fallback
+        if cv_agent and cv_score >= 0.32:
             p.agent = cv_agent
-            log.debug("Player %s resolved agent by CV: %s (score=%.3f)", p.ign, cv_agent, cv_score)
-        elif vlm_agent:
+            return
+        if vlm_agent:
             p.agent = vlm_agent
-        elif cv_agent and cv_score >= 0.32:
-            p.agent = cv_agent
         else:
             p.agent = None
 
