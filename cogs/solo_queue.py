@@ -2410,11 +2410,15 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         # In-memory pause-state cache — avoids 2 DB round-trips on every Join Queue click
         # None means "unknown, query DB on next access"
         self._pause_cache: Optional[tuple[bool, Optional[float]]] = None
+        # Track debounced task to repost queue panel under incoming chat messages
+        self._repost_bottom_task: Optional[asyncio.Task] = None
 
     async def cog_load(self) -> None:
         self._auto_clear_loop_task = asyncio.create_task(self._auto_clear_monitor_loop())
 
     async def cog_unload(self) -> None:
+        if self._repost_bottom_task and not self._repost_bottom_task.done():
+            self._repost_bottom_task.cancel()
         if self._auto_clear_loop_task and not self._auto_clear_loop_task.done():
             self._auto_clear_loop_task.cancel()
         if self._auto_clear_task and not self._auto_clear_task.done():
@@ -2677,7 +2681,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         return None
 
-    async def refresh_queue_message(self) -> None:
+    async def refresh_queue_message(self, repost_at_bottom: bool = False) -> None:
         """Update or post the persistent queue panel.
 
         Optimisations:
@@ -2685,6 +2689,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         - Uses get_partial_message() + edit() instead of fetch_message() + edit()
           to save one HTTP GET per refresh.
         - In-memory message ID cache avoids a DB lookup on every refresh.
+        - If repost_at_bottom is True, deletes previous panel and posts a new one
+          at the bottom of the chat under the latest message.
         """
         async with self._refresh_lock:
             channel = await self._get_channel()
@@ -2730,7 +2736,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     panel_id = int(stored)
                     self._panel_message_id = panel_id
 
-            if panel_id:
+            if panel_id and not repost_at_bottom:
                 try:
                     # Use get_partial_message — no HTTP GET needed; edit directly via REST PATCH
                     partial = channel.get_partial_message(panel_id)
@@ -2743,17 +2749,64 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 except Exception as e:
                     log.error("Error editing solo queue message %d: %s", panel_id, e)
 
+            # If reposting at bottom, delete old panel so only 1 panel exists at bottom
+            if panel_id and repost_at_bottom:
+                try:
+                    old_partial = channel.get_partial_message(panel_id)
+                    await old_partial.delete()
+                except Exception:
+                    pass
+                self._panel_message_id = None
+
             try:
                 msg = await channel.send(embed=embed, view=view)
-                try:
-                    await msg.pin()
-                except discord.Forbidden:
-                    pass
+                if not repost_at_bottom:
+                    try:
+                        await msg.pin()
+                    except discord.Forbidden:
+                        pass
                 self._panel_message_id = msg.id
                 await db.set_config(SOLO_QUEUE_MESSAGE_CONFIG_KEY, str(msg.id))
                 log.info("Sent new solo queue panel message (ID: %d).", msg.id)
             except Exception as e:
                 log.error("Failed to post solo queue panel message: %s", e)
+
+    def _schedule_repost_panel_at_bottom(self, delay: float = 0.5) -> None:
+        """Debounced schedule to repost the queue panel at the bottom of the channel."""
+        if self._repost_bottom_task and not self._repost_bottom_task.done():
+            self._repost_bottom_task.cancel()
+
+        async def _runner() -> None:
+            try:
+                await asyncio.sleep(delay)
+                await self.refresh_queue_message(repost_at_bottom=True)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.error("Error reposting solo queue panel at bottom: %s", e)
+
+        self._repost_bottom_task = asyncio.create_task(_runner())
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """
+        When anyone messages in the solo queue channel, repost the Join/Leave queue UI
+        directly under their message so it's always at the bottom of the chat.
+        """
+        if message.author.bot or (self.bot.user and message.author.id == self.bot.user.id):
+            return
+        if not message.guild:
+            return
+
+        channel = await self._get_channel()
+        if not channel or message.channel.id != channel.id:
+            return
+
+        # Ignore system messages like pins
+        if message.type not in (discord.MessageType.default, discord.MessageType.reply):
+            return
+
+        self._schedule_repost_panel_at_bottom()
 
     # =========================================================================
     # Queue Actions

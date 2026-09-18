@@ -712,6 +712,11 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
         self._queue_message_posted: bool = False
         self._refresh_lock: asyncio.Lock = asyncio.Lock()
         self._matchmaking_lock: asyncio.Lock = asyncio.Lock()
+        self._repost_bottom_task: Optional[asyncio.Task] = None
+
+    async def cog_unload(self) -> None:
+        if self._repost_bottom_task and not self._repost_bottom_task.done():
+            self._repost_bottom_task.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -739,9 +744,11 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
 
         return None
 
-    async def refresh_queue_message(self) -> None:
+    async def refresh_queue_message(self, repost_at_bottom: bool = False) -> None:
         """
         Fetch latest queue data from database and update or post the persistent queue message.
+        If repost_at_bottom is True, deletes previous panel and posts a new one
+        at the bottom of the chat under the latest message.
         """
         async with self._refresh_lock:
             channel = await self._get_channel()
@@ -762,26 +769,67 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
             if stored_id_str:
                 try:
                     stored_id = int(stored_id_str)
-                    existing_msg = await channel.fetch_message(stored_id)
-                    await existing_msg.edit(content=None, embed=embed, view=view, attachments=[])
-                    log.info("Refreshed team queue panel message (ID: %d).", stored_id)
-                    return
+                    if not repost_at_bottom:
+                        partial = channel.get_partial_message(stored_id)
+                        await partial.edit(content=None, embed=embed, view=view, attachments=[])
+                        log.info("Refreshed team queue panel message (ID: %d).", stored_id)
+                        return
+                    else:
+                        old_partial = channel.get_partial_message(stored_id)
+                        await old_partial.delete()
                 except discord.NotFound:
                     log.warning("Stored team queue message %s was deleted. Sending a new message.", stored_id_str)
                 except Exception as e:
-                    log.error("Error editing existing team queue message %s: %s", stored_id_str, e)
+                    log.error("Error with team queue message %s: %s", stored_id_str, e)
 
             # Create new persistent message
             try:
                 msg = await channel.send(embed=embed, view=view)
-                try:
-                    await msg.pin()
-                except discord.Forbidden:
-                    log.warning("Missing Manage Messages permission — could not pin team queue message.")
+                if not repost_at_bottom:
+                    try:
+                        await msg.pin()
+                    except discord.Forbidden:
+                        log.warning("Missing Manage Messages permission — could not pin team queue message.")
                 await db.set_config(TEAM_QUEUE_MESSAGE_CONFIG_KEY, str(msg.id))
                 log.info("Sent and stored new team queue panel message (ID: %d).", msg.id)
             except Exception as e:
                 log.error("Failed to post team queue panel message: %s", e)
+
+    def _schedule_repost_panel_at_bottom(self, delay: float = 0.5) -> None:
+        """Debounced schedule to repost the team queue panel at the bottom of the channel."""
+        if self._repost_bottom_task and not self._repost_bottom_task.done():
+            self._repost_bottom_task.cancel()
+
+        async def _runner() -> None:
+            try:
+                await asyncio.sleep(delay)
+                await self.refresh_queue_message(repost_at_bottom=True)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.error("Error reposting team queue panel at bottom: %s", e)
+
+        self._repost_bottom_task = asyncio.create_task(_runner())
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """
+        When someone messages in the team queue channel, repost the Join/Leave queue UI
+        directly under their message so it's always at the bottom of the chat.
+        """
+        if message.author.bot or (self.bot.user and message.author.id == self.bot.user.id):
+            return
+        if not message.guild:
+            return
+
+        channel = await self._get_channel()
+        if not channel or message.channel.id != channel.id:
+            return
+
+        if message.type not in (discord.MessageType.default, discord.MessageType.reply):
+            return
+
+        self._schedule_repost_panel_at_bottom()
 
     # =========================================================================
     # Matchmaking & Channel Creation
