@@ -505,14 +505,14 @@ def build_solo_checkin_embed(
 
     desc = f"`[ {checked_count} / {len(all_pids)} in Voice ]` — <#{lobby_vc_id}>\n\n" + "  ".join(lines)
     if deadline_timestamp:
-        desc += f"\n\n⏱️ **Check-in Deadline:** <t:{deadline_timestamp}:R> (<t:{deadline_timestamp}:T>)"
+        desc += f"\n\n**Check-in Deadline:** <t:{deadline_timestamp}:R> (<t:{deadline_timestamp}:T>)"
 
     embed = discord.Embed(
         title=f"QUEUE #{match['id']} — VOICE CHECK-IN",
         description=desc,
         colour=colour or EMBED_COLOUR,
     )
-    embed.set_footer(text="Draft starts when all 10 are in voice • Unjoined players will be auto-subbed")
+    embed.set_footer(text="Draft starts when all 10 players connect to voice.")
     return embed
 
 
@@ -1949,32 +1949,32 @@ class SubConfirmationView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.candidate_id:
             await interaction.response.send_message(
-                "❌ This substitution confirmation is not for you.",
+                "This substitution confirmation is not for you.",
                 ephemeral=True,
             )
             return False
         return True
 
-    @discord.ui.button(label="Accept & Ready", style=discord.ButtonStyle.success, emoji="✅")
+    @discord.ui.button(label="Accept & Ready", style=discord.ButtonStyle.success)
     async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         self.confirmed = True
         self.response_interaction = interaction
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(
-            content=f"✅ <@{self.candidate_id}> accepted the substitution!",
+            content=f"<@{self.candidate_id}> accepted the substitution.",
             view=self,
         )
         self.stop()
 
-    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger, emoji="❌")
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
     async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         self.confirmed = False
         self.response_interaction = interaction
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(
-            content=f"❌ <@{self.candidate_id}> declined the substitution.",
+            content=f"<@{self.candidate_id}> declined the substitution.",
             view=self,
         )
         self.stop()
@@ -4534,7 +4534,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 await db.set_player_status(new_player.id, "IN_QUEUE")
                 self._schedule_queue_panel_refresh()
                 await interaction.followup.send(
-                    f"🔄 **Player Replaced in Queue!** <@{new_player.id}> has replaced <@{old_player.id}> in the waiting queue."
+                    f"**Player Replaced:** <@{new_player.id}> has replaced <@{old_player.id}> in the waiting queue."
                 )
                 if interaction.guild:
                     asyncio.create_task(self._check_and_create_solo_match(interaction.guild))
@@ -4780,7 +4780,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             log.debug("Failed to update panel message on player replacement: %s", e)
 
         # 10. Announce replacement in lobby
-        msg = f"🔄 **Player Replaced!** <@{new_player.id}> has replaced <@{old_player.id}> in Match #{match['id']}."
+        msg = f"**Player Replaced:** <@{new_player.id}> has replaced <@{old_player.id}> in Match #{match['id']}."
         try:
             await interaction.followup.send(msg)
         except Exception:
@@ -4986,9 +4986,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         if isinstance(match_ch, discord.TextChannel):
             try:
                 await match_ch.send(
-                    f"🛑 **Match #{match_id} Cancelled.**\n"
+                    f"**Match #{match_id} Cancelled**\n"
                     f"{reason}\n"
-                    f"This match category will be deleted in 10 seconds."
+                    f"This channel will be deleted in 10 seconds."
                 )
             except Exception:
                 pass
@@ -5070,9 +5070,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             confirm_view = SubConfirmationView(candidate_id=cand_id, timeout=60.0)
             confirm_msg = await match_ch.send(
                 content=(
-                    f"🚨 **SUB NEEDED!** <@{cand_id}>\n"
-                    f"<@{current_target_old_pid}> failed to connect to voice in time.\n"
-                    f"You are next in queue! Do you confirm you can play **Match #{curr_match['id']}** right now?"
+                    f"**Substitute Confirmation Required** — <@{cand_id}>\n"
+                    f"<@{current_target_old_pid}> did not join voice in time.\n"
+                    f"You are next in queue. Do you confirm you are available to play in **Match #{curr_match['id']}**?"
                 ),
                 view=confirm_view,
             )
@@ -5082,7 +5082,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             if not confirm_view.confirmed:
                 # Declined or timed out
                 await self._revoke_match_permissions(curr_match, guild, cand_mem)
-                await match_ch.send(f"⏭️ <@{cand_id}> declined or timed out. Looking for the next substitute in queue...")
+                await match_ch.send(f"<@{cand_id}> declined or timed out. Checking queue for next substitute...")
                 continue
 
             # 4. Accepted! Remove old player match permissions
@@ -5104,9 +5104,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             # 5. Start 3-minute voice join window
             three_min_deadline = int(time.time()) + 180
             await match_ch.send(
-                f"✅ **Player Substituted!** <@{cand_id}> has replaced <@{current_target_old_pid}>.\n"
-                f"<@{cand_id}>, please connect to {lobby_vc.mention} within **3 minutes**!\n"
-                f"⏱️ **Deadline:** <t:{three_min_deadline}:R> (<t:{three_min_deadline}:T>)"
+                f"**Player Substituted:** <@{cand_id}> has replaced <@{current_target_old_pid}>.\n"
+                f"<@{cand_id}>, please connect to {lobby_vc.mention} within **3 minutes** (<t:{three_min_deadline}:R>)."
             )
 
             # Monitor voice join for 3 minutes (36 iterations * 5s = 180s)
@@ -5119,12 +5118,12 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     break
 
             if joined_in_time:
-                await match_ch.send(f"🎉 <@{cand_id}> has connected to voice!")
+                await match_ch.send(f"<@{cand_id}> has connected to voice.")
                 await self._handle_voice_checkin_update(curr_match, guild)
                 return True
             else:
                 # Candidate failed to join in 3 minutes! Sub them out again
-                await match_ch.send(f"⏱️ <@{cand_id}> failed to connect to voice within 3 minutes! Subbing them out...")
+                await match_ch.send(f"<@{cand_id}> failed to connect to voice within 3 minutes. Finding replacement substitute...")
                 await self._revoke_match_permissions(curr_match, guild, cand_mem)
                 await db.set_player_status(cand_id, "IDLE")
                 current_target_old_pid = cand_id
@@ -5171,10 +5170,21 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         missing_pings = " ".join(f"<@{pid}>" for pid in missing_pids)
         await match_ch.send(
-            f"⏰ **Voice Check-in Expired (5 minutes)!**\n"
+            f"**Voice Check-in Expired (5 minutes)**\n"
             f"Missing players: {missing_pings}\n"
-            f"Searching waiting queue for replacement substitutes..."
+            f"Checking queue for replacement substitutes..."
         )
+
+        # Cancel match if queue does not have enough substitutes to replace all missing players
+        queued = await db.get_solo_queue()
+        queued_eligible = [p for p in queued if p["discord_id"] not in all_pids]
+        if len(queued_eligible) < len(missing_pids):
+            reason = (
+                f"{len(missing_pids)} player{'s' if len(missing_pids) > 1 else ''} failed to connect to voice in time, "
+                f"and insufficient substitutes ({len(queued_eligible)}) were available in the queue. Match cancelled."
+            )
+            await self._auto_cancel_match_due_to_timeout(current_match, guild, reason=reason)
+            return
 
         curr = current_match
         for missing_pid in missing_pids:
@@ -5290,9 +5300,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         confirm_view = SubConfirmationView(candidate_id=new_player.id, timeout=90.0)
         confirm_msg = await interaction.followup.send(
             content=(
-                f"🚨 **SUB PROPOSAL!** <@{new_player.id}>\n"
-                f"<@{interaction.user.id}> has requested to sub you into **Match #{match['id']}** in place of <@{old_player.id}>.\n"
-                f"Do you confirm that you can play right now?"
+                f"**Substitution Request** — <@{new_player.id}>\n"
+                f"<@{interaction.user.id}> has requested to substitute you into **Match #{match['id']}** in place of <@{old_player.id}>.\n"
+                f"Do you confirm you are available to play?"
             ),
             view=confirm_view,
         )
@@ -5304,7 +5314,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await self._revoke_match_permissions(match, interaction.guild, new_player)
             try:
                 await confirm_msg.edit(
-                    content=f"❌ Substitution request for <@{new_player.id}> was declined or timed out.",
+                    content=f"Substitution request for <@{new_player.id}> was declined or timed out.",
                     view=None,
                 )
             except Exception:
@@ -5315,7 +5325,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         await self._revoke_match_permissions(match, interaction.guild, old_player)
         updated_match = await self._commit_player_replacement(match, old_player.id, new_player.id)
         if not updated_match:
-            await interaction.followup.send("❌ Failed to commit player substitution to database.", ephemeral=True)
+            await interaction.followup.send("Failed to commit player substitution to database.", ephemeral=True)
             return
 
         # Update panel
@@ -5326,7 +5336,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         # Announce
         await match_ch.send(
-            f"🔄 **Player Substituted!** <@{new_player.id}> has officially replaced <@{old_player.id}> in Match #{match['id']}."
+            f"**Player Substituted:** <@{new_player.id}> has replaced <@{old_player.id}> in Match #{match['id']}."
         )
 
         # 6. If match is in VOICE_CHECKIN, give them 3 minutes to join voice!
@@ -5336,8 +5346,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             three_min_deadline = int(time.time()) + 180
             if isinstance(lobby_vc, discord.VoiceChannel):
                 await match_ch.send(
-                    f"<@{new_player.id}>, please connect to {lobby_vc.mention} within **3 minutes**!\n"
-                    f"⏱️ **Deadline:** <t:{three_min_deadline}:R> (<t:{three_min_deadline}:T>)"
+                    f"<@{new_player.id}>, please connect to {lobby_vc.mention} within **3 minutes** (<t:{three_min_deadline}:R>)."
                 )
                 # Monitor for 3 minutes
                 joined_in_time = False
@@ -5348,10 +5357,10 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                         break
 
                 if joined_in_time:
-                    await match_ch.send(f"🎉 <@{new_player.id}> joined the voice lobby!")
+                    await match_ch.send(f"<@{new_player.id}> has connected to voice.")
                     await self._handle_voice_checkin_update(updated_match, interaction.guild)
                 else:
-                    await match_ch.send(f"⏱️ <@{new_player.id}> failed to join voice in 3 minutes! Subbing them out...")
+                    await match_ch.send(f"<@{new_player.id}> failed to connect to voice within 3 minutes. Finding replacement substitute...")
                     await self._revoke_match_permissions(updated_match, interaction.guild, new_player)
                     await db.set_player_status(new_player.id, "IDLE")
                     # Trigger auto-sub from queue

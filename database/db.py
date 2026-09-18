@@ -68,16 +68,7 @@ async def _apply_schema() -> None:
         except Exception as e:
             log.warning("Could not ensure solo_matches result columns: %s", e)
 
-        try:
-            # Clean up old non-active test matches so queue numbering starts cleanly at 1
-            await conn.execute(
-                """
-                DELETE FROM solo_matches WHERE status IN ('CANCELLED', 'COMPLETED');
-                SELECT setval('solo_matches_id_seq', COALESCE((SELECT MAX(id) FROM solo_matches), 1), (SELECT COUNT(*) > 0 FROM solo_matches));
-                """
-            )
-        except Exception:
-            pass
+
 
         try:
             await conn.execute(
@@ -2029,10 +2020,39 @@ async def clear_solo_queue(discord_ids: Optional[list[int]] = None) -> None:
 # =============================================================================
 
 async def get_next_solo_match_id() -> int:
-    """Get the next queue ID starting from 1."""
+    """
+    Get and atomically increment the sequential queue number.
+    Uses bot_config with row locking to ensure it never resets or gets stuck,
+    guaranteeing the queue number increments after every queue.
+    """
     pool = get_pool()
-    row = await pool.fetchrow("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM solo_matches")
-    return int(row["next_id"]) if row else 1
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT value FROM bot_config WHERE key = 'solo_queue_match_counter' FOR UPDATE"
+            )
+            max_row = await conn.fetchrow("SELECT COALESCE(MAX(id), 0) AS max_id FROM solo_matches")
+            max_id = int(max_row["max_id"]) if max_row else 0
+
+            current_counter = max_id
+            if row and row["value"]:
+                try:
+                    val = int(row["value"])
+                    current_counter = max(val, max_id)
+                except ValueError:
+                    current_counter = max_id
+
+            next_id = current_counter + 1
+
+            await conn.execute(
+                """
+                INSERT INTO bot_config (key, value)
+                VALUES ('solo_queue_match_counter', $1)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                str(next_id),
+            )
+            return next_id
 
 
 async def create_solo_match(
