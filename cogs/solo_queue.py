@@ -282,9 +282,19 @@ def calculate_player_elo(
         total = 20 + perf_mod + mvp_bonus
         return max(12, min(38, total))
     else:
-        # Carry protection on loss:
+        # Carry protection on loss (good performers get 10-15 MMR reduction, -10 to -15 Elo):
         total = -20 + perf_mod + mvp_bonus
-        return max(-28, min(-8, total))
+        is_good_performer = (
+            is_match_mvp
+            or is_team_mvp
+            or kd_ratio >= 1.1
+            or acs >= 240
+            or (perf_mod + mvp_bonus) >= 4
+        )
+        if is_good_performer:
+            return max(-15, min(-10, total))
+        else:
+            return max(-28, min(-16, total))
 
 
 async def get_solo_map_pool() -> list[str]:
