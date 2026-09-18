@@ -7,6 +7,7 @@ Administrative moderation cog — /admin command group (player_ban, player_unban
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone

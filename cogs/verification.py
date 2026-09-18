@@ -32,6 +32,9 @@ MATCHMAKING_VERIFY_CHANNEL_ID: int = int(os.environ.get("MATCHMAKING_VERIFY_CHAN
 MATCHMAKING_VERIFIED_ROLE_ID: int = int(os.environ.get("MATCHMAKING_VERIFIED_ROLE_ID", "0") or "0")
 from utils.staff import is_staff, STAFF_ROLE_NAMES, get_staff_role_ids
 
+EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
+_SUPPORTED_IMAGE_MIMES = ("image/png", "image/jpeg", "image/webp", "image/gif")
+
 STAFF_ROLE_IDS: list[int] = list(get_staff_role_ids())
 _is_staff = is_staff
 
