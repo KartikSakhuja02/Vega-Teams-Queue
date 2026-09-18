@@ -60,6 +60,65 @@ if _SERVER_B_REG_ID and _SERVER_B_REG_ID not in REGISTRATION_CHANNEL_IDS:
 
 REGISTRATION_CHANNEL_ID: int = REGISTRATION_CHANNEL_IDS[0] if REGISTRATION_CHANNEL_IDS else 0
 
+MATCHMAKING_VERIFIED_ROLE_ID: int = int(os.environ.get("MATCHMAKING_VERIFIED_ROLE_ID", "0") or "0")
+
+
+async def assign_verified_role(
+    guild: Optional[discord.Guild],
+    user: discord.abc.User | discord.Member,
+) -> Optional[discord.Role]:
+    """Grant Matchmaking Verified role to the user upon registration."""
+    if not guild:
+        return None
+
+    member: Optional[discord.Member] = None
+    if isinstance(user, discord.Member):
+        member = user
+    else:
+        member = guild.get_member(user.id)
+        if not member:
+            try:
+                member = await guild.fetch_member(user.id)
+            except Exception:
+                member = None
+
+    if not member:
+        return None
+
+    role: Optional[discord.Role] = None
+    role_id = MATCHMAKING_VERIFIED_ROLE_ID
+    if not role_id:
+        try:
+            cfg_id = await db.get_config("matchmaking_verified_role_id")
+            if cfg_id and cfg_id.isdigit():
+                role_id = int(cfg_id)
+        except Exception:
+            pass
+
+    if role_id:
+        role = guild.get_role(role_id)
+
+    if not role:
+        for r in guild.roles:
+            r_name = r.name.lower().replace("-", " ").strip()
+            if r_name in ("matchmaking verified", "matchmaking verify", "verified"):
+                role = r
+                break
+
+    if role:
+        try:
+            if role not in member.roles:
+                await member.add_roles(role, reason="Player registered via /register")
+                log.info("Assigned Matchmaking Verified role '%s' to %s (%d)", role.name, member, member.id)
+            return role
+        except discord.Forbidden:
+            log.warning("Missing Manage Roles permission to assign '%s' to %s (%d)", role.name, member, member.id)
+        except Exception as e:
+            log.warning("Failed to assign verified role to %s (%d): %s", member, member.id, e)
+    else:
+        log.info("Matchmaking Verified role not found in guild '%s' (%d)", guild.name, guild.id)
+    return None
+
 # Deep indigo — consistent brand colour, no harsh primaries.
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 
@@ -267,11 +326,13 @@ class ResumeOrFreshView(discord.ui.View):
             return
 
         registered_at = format_regional_time(player["registered_at"], player["region"])
+        verified_role = await assign_verified_role(interaction.guild, interaction.user)
+        role_line = f"\nRole       : {verified_role.mention}" if verified_role else ""
         await interaction.followup.send(
             "Welcome back! Your old profile has been restored.\n\n"
             f"IGN        : {player['ign']}\n"
             f"Region     : {player['region']}\n"
-            f"Registered : {registered_at}",
+            f"Registered : {registered_at}{role_line}",
             ephemeral=True,
         )
         asyncio.create_task(self.cog._send_welcome_dm(interaction.user, player))
@@ -314,11 +375,13 @@ class ResumeOrFreshView(discord.ui.View):
                 return
 
             registered_at = format_regional_time(player["registered_at"], player["region"])
+            verified_role = await assign_verified_role(interaction.guild, interaction.user)
+            role_line = f"\nRole       : {verified_role.mention}" if verified_role else ""
             await interaction.followup.send(
                 "Fresh profile created! All previous stats have been reset.\n\n"
                 f"IGN        : {player['ign']}\n"
                 f"Region     : {player['region']}\n"
-                f"Registered : {registered_at}",
+                f"Registered : {registered_at}{role_line}",
                 ephemeral=True,
             )
             asyncio.create_task(self.cog._send_welcome_dm(interaction.user, player))
@@ -392,11 +455,13 @@ class FreshStartModal(discord.ui.Modal, title="Start Fresh — New Profile"):
             return
 
         registered_at = format_regional_time(player["registered_at"], player["region"])
+        verified_role = await assign_verified_role(interaction.guild, interaction.user)
+        role_line = f"\nRole       : {verified_role.mention}" if verified_role else ""
         await interaction.followup.send(
             "Fresh profile created! All previous stats have been reset.\n\n"
             f"IGN        : {player['ign']}\n"
             f"Region     : {player['region']}\n"
-            f"Registered : {registered_at}",
+            f"Registered : {registered_at}{role_line}",
             ephemeral=True,
         )
         asyncio.create_task(self.cog._send_welcome_dm(interaction.user, player))
@@ -765,12 +830,14 @@ class RegistrationCog(commands.Cog, name="Registration"):
         if player is None:
             # UniqueViolation — already active.
             if existing and existing["is_active"]:
+                verified_role = await assign_verified_role(interaction.guild, interaction.user)
+                role_line = f"\nRole       : {verified_role.mention}" if verified_role else ""
                 registered_at = format_regional_time(existing["registered_at"], existing["region"])
                 await interaction.followup.send(
                     "You are already registered.\n\n"
                     f"IGN        : {existing['ign']}\n"
                     f"Region     : {existing['region']}\n"
-                    f"Registered : {registered_at}\n\n"
+                    f"Registered : {registered_at}{role_line}\n\n"
                     "Use `/edit-profile` to update your IGN or region.",
                     ephemeral=True,
                 )
@@ -784,12 +851,16 @@ class RegistrationCog(commands.Cog, name="Registration"):
 
         registered_at = format_regional_time(player["registered_at"], player["region"])
 
+        # Grant Matchmaking Verified role
+        verified_role = await assign_verified_role(interaction.guild, interaction.user)
+        role_line = f"\nRole       : {verified_role.mention}" if verified_role else ""
+
         # Ephemeral success reply.
         await interaction.followup.send(
             "Registration successful.\n\n"
             f"IGN        : {ign}\n"
             f"Region     : {player['region']}\n"
-            f"Registered : {registered_at}",
+            f"Registered : {registered_at}{role_line}",
             ephemeral=True,
         )
 
