@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 TEAM_PANEL_CHANNEL_ID: int = int(os.environ.get("TEAM_PANEL_CHANNEL_ID", "0"))
-from utils.staff import is_staff, STAFF_ROLE_NAMES, get_staff_role_ids
+from utils.staff import is_staff, STAFF_ROLE_NAMES, get_staff_role_ids, _matches_staff_role
 
 TEAM_MOD_ROLE_IDS: list[int] = list(get_staff_role_ids())
 TEAM_PANEL_MESSAGE_CONFIG_KEY = "team_creation_message_id"
@@ -152,7 +152,7 @@ def _collect_mod_members(guild: discord.Guild, role_ids: Iterable[int]) -> list[
             seen_ids.add(member.id)
             members.append(member)
     for role in guild.roles:
-        if role.name.strip().lower() in STAFF_ROLE_NAMES:
+        if _matches_staff_role(role.name) or role.name.strip().lower() in STAFF_ROLE_NAMES:
             for member in role.members:
                 if member.id not in seen_ids:
                     seen_ids.add(member.id)

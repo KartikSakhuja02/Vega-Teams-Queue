@@ -21,6 +21,7 @@ from cogs.bot_logger import send_log, COL_SUCCESS, COL_DANGER
 log = logging.getLogger(__name__)
 
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
+from utils.staff import is_staff, get_staff_role_ids, _matches_staff_role
 HELP_ADMIN_ROLE_IDS_RAW = os.environ.get("HELP_ADMIN_ROLE_IDS", "")
 
 
@@ -286,15 +287,7 @@ async def _close_ticket(interaction: discord.Interaction) -> None:
         )
         return
 
-    allowed = interaction.user.id == opener_id or any(
-        role.id in HELP_ADMIN_ROLE_IDS for role in getattr(interaction.user, "roles", [])
-    )
-    if isinstance(interaction.user, discord.Member):
-        allowed = (
-            allowed
-            or interaction.user.guild_permissions.administrator
-            or interaction.user.guild_permissions.manage_channels
-        )
+    allowed = interaction.user.id == opener_id or is_staff(interaction)
 
     if not allowed:
         await interaction.response.send_message(
@@ -349,9 +342,13 @@ class HelpTicketView(discord.ui.View):
         # Notify admins in channel
         admin_mentions = []
         if interaction.guild:
-            for role_id in HELP_ADMIN_ROLE_IDS:
+            all_staff_ids = set(HELP_ADMIN_ROLE_IDS) | get_staff_role_ids()
+            for role_id in all_staff_ids:
                 role = interaction.guild.get_role(role_id)
-                if role:
+                if role and role.mention not in admin_mentions:
+                    admin_mentions.append(role.mention)
+            for role in interaction.guild.roles:
+                if _matches_staff_role(role.name) and role.mention not in admin_mentions:
                     admin_mentions.append(role.mention)
 
         mention_str = " ".join(admin_mentions) if admin_mentions else "@Staff"

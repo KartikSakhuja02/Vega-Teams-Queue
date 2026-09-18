@@ -36,7 +36,7 @@ TEAM_QUEUE_CHANNEL_ID: int = int(os.environ.get("TEAM_QUEUE_CHANNEL_ID", "0"))
 SCRIM_CATEGORY_ID: int = int(os.environ.get("SCRIM_CATEGORY_ID", "0"))
 TEAM_QUEUE_MESSAGE_CONFIG_KEY: str = "team_queue_message_id"
 
-from utils.staff import is_staff, _is_admin, STAFF_ROLE_NAMES, get_staff_role_ids
+from utils.staff import is_staff, _is_admin, STAFF_ROLE_NAMES, get_staff_role_ids, _matches_staff_role
 _is_staff = is_staff
 TEAM_MOD_ROLE_IDS: list[int] = list(get_staff_role_ids())
 
@@ -921,7 +921,7 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
             if role:
                 overwrites[role] = staff_perm
         for role in guild.roles:
-            if role.name.strip().lower() in STAFF_ROLE_NAMES:
+            if _matches_staff_role(role.name) or role.name.strip().lower() in STAFF_ROLE_NAMES:
                 overwrites[role] = staff_perm
 
         # Determine Category

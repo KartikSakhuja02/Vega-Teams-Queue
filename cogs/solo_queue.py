@@ -43,7 +43,7 @@ SOLO_MATCH_CATEGORY_ID: int = int(os.environ.get("SOLO_MATCH_CATEGORY_ID", "0"))
 SOLO_VOICE_CATEGORY_ID: int = int(os.environ.get("SOLO_VOICE_CATEGORY_ID", "0"))
 SOLO_QUEUE_MESSAGE_CONFIG_KEY: str = "solo_queue_message_id"
 
-from utils.staff import is_staff, _is_admin, STAFF_ROLE_NAMES, get_staff_role_ids
+from utils.staff import is_staff, _is_admin, STAFF_ROLE_NAMES, get_staff_role_ids, _matches_staff_role
 STAFF_ROLE_IDS: list[int] = list(get_staff_role_ids())
 
 
@@ -3012,7 +3012,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                         voice_lobby_overwrites[role] = staff_perm
                         team_voice_overwrites[role] = staff_perm
                 for role in guild.roles:
-                    if role.name.strip().lower() in STAFF_ROLE_NAMES:
+                    if _matches_staff_role(role.name) or role.name.strip().lower() in STAFF_ROLE_NAMES:
                         category_overwrites[role] = staff_perm
                         text_overwrites[role] = staff_perm
                         voice_lobby_overwrites[role] = staff_perm
