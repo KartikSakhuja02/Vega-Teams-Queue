@@ -4409,6 +4409,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 all_lobby_player_ids=all_match_pids,
             )
 
+            # Trigger real-time leaderboard auto-update
+            lb_cog = self.bot.get_cog("Leaderboard")
+            if lb_cog and hasattr(lb_cog, "refresh_all_leaderboards"):
+                asyncio.create_task(lb_cog.refresh_all_leaderboards())
+
             # Post to dedicated results channel if configured
             results_ch_id = await get_solo_results_channel_id()
             if results_ch_id and interaction.guild:

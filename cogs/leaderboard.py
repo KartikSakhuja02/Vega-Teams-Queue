@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import math
 import os
+import re
 from typing import Optional
 
 import discord
@@ -64,6 +66,32 @@ METRIC_LABELS = {
     "mvps": "MVPs",
 }
 
+LABEL_TO_METRIC = {
+    "mmr": "elo",
+    "elo": "elo",
+    "wins": "wins",
+    "win rate": "winrate",
+    "winrate": "winrate",
+    "k/d ratio": "kda",
+    "k/d": "kda",
+    "kda": "kda",
+    "mvps": "mvps",
+    "mvp": "mvps",
+}
+
+# Deterministic custom_ids for persistent interactions
+CUSTOM_ID_FIRST = "leaderboard:first"
+CUSTOM_ID_PREV = "leaderboard:prev"
+CUSTOM_ID_REFRESH = "leaderboard:refresh"
+CUSTOM_ID_NEXT = "leaderboard:next"
+CUSTOM_ID_LAST = "leaderboard:last"
+CUSTOM_ID_METRIC = "leaderboard:metric_select"
+CUSTOM_ID_PAGE = "leaderboard:page_select"
+
+CONFIG_KEY_TRACKED_LEADERBOARDS = "tracked_leaderboard_messages"
+CONFIG_KEY_PINNED_LEADERBOARD_MSG = "leaderboard_panel_message_id"
+CONFIG_KEY_PINNED_LEADERBOARD_CH = "leaderboard_panel_channel_id"
+
 
 def _is_admin(member: discord.Member) -> bool:
     """Check administrator/manage_guild perms or configured admin role IDs."""
@@ -77,6 +105,10 @@ def _is_admin(member: discord.Member) -> bool:
         except ValueError:
             pass
     return any(role.id in admin_ids for role in member.roles)
+
+
+def _get_leaderboard_cog(interaction: discord.Interaction) -> Optional[LeaderboardCog]:
+    return interaction.client.get_cog("Leaderboard")  # type: ignore
 
 
 class ClearLeaderboardConfirmView(discord.ui.View):
@@ -105,8 +137,13 @@ class ClearLeaderboardConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="Cancelled. No changes were made.", embed=None, view=None)
 
 
-def build_leaderboard_embed(metric: str) -> discord.Embed:
-    """Construct embed matching the NeatQueue title and red accent line."""
+def build_leaderboard_embed(
+    metric: str = "elo",
+    region: str = "All",
+    page: int = 1,
+    total_pages: int = 1,
+) -> discord.Embed:
+    """Construct embed matching the NeatQueue title and red accent line with footer state."""
     title = METRIC_TITLES.get(metric, "Vega MatchMaking Queue MMR Leaderboard")
     embed = discord.Embed(
         title=title,
@@ -114,6 +151,8 @@ def build_leaderboard_embed(metric: str) -> discord.Embed:
     )
     embed.set_image(url="attachment://leaderboard.png")
     embed.timestamp = discord.utils.utcnow()
+    metric_label = METRIC_LABELS.get(metric, metric.upper())
+    embed.set_footer(text=f"Page {page}/{total_pages} • Region: {region} • Metric: {metric.upper()} • {metric_label} • Auto-Updated")
     return embed
 
 
@@ -170,9 +209,9 @@ async def prepare_leaderboard_data(
 
 
 class MetricSelect(discord.ui.Select):
-    """Dropdown menu to select ranking metric."""
+    """Dropdown menu to select ranking metric with persistent custom_id."""
 
-    def __init__(self, current_metric: str) -> None:
+    def __init__(self, current_metric: str = "elo") -> None:
         options = [
             discord.SelectOption(
                 label="MMR",
@@ -207,6 +246,7 @@ class MetricSelect(discord.ui.Select):
         ]
         placeholder = METRIC_LABELS.get(current_metric, "MMR")
         super().__init__(
+            custom_id=CUSTOM_ID_METRIC,
             placeholder=placeholder,
             min_values=1,
             max_values=1,
@@ -215,25 +255,17 @@ class MetricSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        view: LeaderboardPaginationView = self.view  # type: ignore
-        if interaction.user.id != view.author_id:
-            await interaction.response.send_message(
-                "Only the user who ran `/leaderboard` can use these controls. You can run `/leaderboard` yourself!",
-                ephemeral=True,
-            )
-            return
-
-        chosen_metric = self.values[0]
-        if chosen_metric != view.metric:
-            view.metric = chosen_metric
-            view.current_page = 1
-            await view.refresh_and_edit(interaction)
+        cog = _get_leaderboard_cog(interaction)
+        if cog:
+            await cog.handle_view_interaction(interaction, metric=self.values[0])
+        else:
+            await interaction.response.send_message("Leaderboard system initializing. Please try again shortly.", ephemeral=True)
 
 
 class PageSelect(discord.ui.Select):
-    """Dropdown menu to jump directly to a page."""
+    """Dropdown menu to jump directly to a page with persistent custom_id."""
 
-    def __init__(self, current_page: int, total_pages: int) -> None:
+    def __init__(self, current_page: int = 1, total_pages: int = 1) -> None:
         max_pages = min(max(1, total_pages), 25)
         options = [
             discord.SelectOption(
@@ -244,6 +276,7 @@ class PageSelect(discord.ui.Select):
             for p in range(1, max_pages + 1)
         ]
         super().__init__(
+            custom_id=CUSTOM_ID_PAGE,
             placeholder=f"Page {current_page}",
             min_values=1,
             max_values=1,
@@ -252,37 +285,32 @@ class PageSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        view: LeaderboardPaginationView = self.view  # type: ignore
-        if interaction.user.id != view.author_id:
-            await interaction.response.send_message(
-                "Only the user who ran `/leaderboard` can use these controls. You can run `/leaderboard` yourself!",
-                ephemeral=True,
-            )
-            return
-
-        chosen_page = int(self.values[0])
-        if chosen_page != view.current_page:
-            view.current_page = chosen_page
-            await view.refresh_and_edit(interaction)
+        cog = _get_leaderboard_cog(interaction)
+        if cog:
+            try:
+                page_val = int(self.values[0])
+            except (ValueError, IndexError):
+                page_val = 1
+            await cog.handle_view_interaction(interaction, page=page_val)
+        else:
+            await interaction.response.send_message("Leaderboard system initializing. Please try again shortly.", ephemeral=True)
 
 
 class LeaderboardPaginationView(discord.ui.View):
-    """Interactive NeatQueue UI View with buttons and metric/page dropdown menus."""
+    """Persistent Interactive NeatQueue UI View with buttons and metric/page dropdown menus."""
 
     def __init__(
         self,
-        bot: commands.Bot,
-        author_id: int,
-        region: str,
-        metric: str,
-        current_page: int,
-        total_pages: int,
-        total_count: int,
+        bot: Optional[commands.Bot] = None,
+        region: str = "All",
+        metric: str = "elo",
+        current_page: int = 1,
+        total_pages: int = 1,
+        total_count: int = 0,
         guild: Optional[discord.Guild] = None,
     ) -> None:
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)
         self.bot = bot
-        self.author_id = author_id
         self.region = region
         self.metric = metric
         self.current_page = current_page
@@ -290,56 +318,12 @@ class LeaderboardPaginationView(discord.ui.View):
         self.total_count = total_count
         self.guild = guild
 
-        self._build_components()
-
-    def _build_components(self) -> None:
-        self.clear_items()
-
         # Row 0: Navigation Buttons (⏮, ◀, 🔄, ▶, ⏭)
-        first_btn = discord.ui.Button(
-            emoji="⏮",
-            style=discord.ButtonStyle.secondary,
-            disabled=(self.current_page <= 1),
-            row=0,
-        )
-        first_btn.callback = self._on_first
-        self.add_item(first_btn)
-
-        prev_btn = discord.ui.Button(
-            emoji="◀",
-            style=discord.ButtonStyle.secondary,
-            disabled=(self.current_page <= 1),
-            row=0,
-        )
-        prev_btn.callback = self._on_prev
-        self.add_item(prev_btn)
-
-        refresh_btn = discord.ui.Button(
-            emoji="🔄",
-            style=discord.ButtonStyle.secondary,
-            disabled=False,
-            row=0,
-        )
-        refresh_btn.callback = self._on_refresh
-        self.add_item(refresh_btn)
-
-        next_btn = discord.ui.Button(
-            emoji="▶",
-            style=discord.ButtonStyle.secondary,
-            disabled=(self.current_page >= self.total_pages),
-            row=0,
-        )
-        next_btn.callback = self._on_next
-        self.add_item(next_btn)
-
-        last_btn = discord.ui.Button(
-            emoji="⏭",
-            style=discord.ButtonStyle.secondary,
-            disabled=(self.current_page >= self.total_pages),
-            row=0,
-        )
-        last_btn.callback = self._on_last
-        self.add_item(last_btn)
+        self.btn_first.disabled = (self.current_page <= 1)
+        self.btn_prev.disabled = (self.current_page <= 1)
+        self.btn_refresh.disabled = False
+        self.btn_next.disabled = (self.current_page >= self.total_pages)
+        self.btn_last.disabled = (self.current_page >= self.total_pages)
 
         # Row 1: Metric Select Menu
         self.add_item(MetricSelect(current_metric=self.metric))
@@ -347,80 +331,455 @@ class LeaderboardPaginationView(discord.ui.View):
         # Row 2: Page Select Menu
         self.add_item(PageSelect(current_page=self.current_page, total_pages=self.total_pages))
 
-    async def refresh_and_edit(self, interaction: discord.Interaction) -> None:
-        """Fetch fresh data, update components, and edit interaction response."""
+    @discord.ui.button(
+        emoji="⏮",
+        style=discord.ButtonStyle.secondary,
+        custom_id=CUSTOM_ID_FIRST,
+        row=0,
+    )
+    async def btn_first(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        cog = _get_leaderboard_cog(interaction)
+        if cog:
+            await cog.handle_view_interaction(interaction, action="first")
+        else:
+            await interaction.response.send_message("Leaderboard system initializing. Please try again shortly.", ephemeral=True)
+
+    @discord.ui.button(
+        emoji="◀",
+        style=discord.ButtonStyle.secondary,
+        custom_id=CUSTOM_ID_PREV,
+        row=0,
+    )
+    async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        cog = _get_leaderboard_cog(interaction)
+        if cog:
+            await cog.handle_view_interaction(interaction, action="prev")
+        else:
+            await interaction.response.send_message("Leaderboard system initializing. Please try again shortly.", ephemeral=True)
+
+    @discord.ui.button(
+        emoji="🔄",
+        style=discord.ButtonStyle.secondary,
+        custom_id=CUSTOM_ID_REFRESH,
+        row=0,
+    )
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        cog = _get_leaderboard_cog(interaction)
+        if cog:
+            await cog.handle_view_interaction(interaction, action="refresh")
+        else:
+            await interaction.response.send_message("Leaderboard system initializing. Please try again shortly.", ephemeral=True)
+
+    @discord.ui.button(
+        emoji="▶",
+        style=discord.ButtonStyle.secondary,
+        custom_id=CUSTOM_ID_NEXT,
+        row=0,
+    )
+    async def btn_next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        cog = _get_leaderboard_cog(interaction)
+        if cog:
+            await cog.handle_view_interaction(interaction, action="next")
+        else:
+            await interaction.response.send_message("Leaderboard system initializing. Please try again shortly.", ephemeral=True)
+
+    @discord.ui.button(
+        emoji="⏭",
+        style=discord.ButtonStyle.secondary,
+        custom_id=CUSTOM_ID_LAST,
+        row=0,
+    )
+    async def btn_last(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        cog = _get_leaderboard_cog(interaction)
+        if cog:
+            await cog.handle_view_interaction(interaction, action="last")
+        else:
+            await interaction.response.send_message("Leaderboard system initializing. Please try again shortly.", ephemeral=True)
+
+
+class LeaderboardCog(commands.Cog, name="Leaderboard"):
+    """Competitive player rankings and persistent matchmaking leaderboard."""
+
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        self._tracked_messages: dict[int, dict] = {}
+        self._is_refreshing: bool = False
+        self._refresh_pending: bool = False
+
+    async def cog_load(self) -> None:
+        # Register persistent view so button and dropdown interactions never expire
+        self.bot.add_view(LeaderboardPaginationView(bot=self.bot))
+        await self._load_tracked_messages()
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        await self._ensure_leaderboard_panel()
+        await self.refresh_all_leaderboards()
+
+    async def _load_tracked_messages(self) -> None:
+        """Load tracked persistent leaderboard messages from DB."""
+        try:
+            raw = await db.get_config(CONFIG_KEY_TRACKED_LEADERBOARDS)
+            if raw:
+                items = json.loads(raw)
+                if isinstance(items, list):
+                    self._tracked_messages = {
+                        int(x["message_id"]): x
+                        for x in items
+                        if "message_id" in x and "channel_id" in x
+                    }
+                    log.info("Loaded %d tracked persistent leaderboard message(s).", len(self._tracked_messages))
+        except Exception as e:
+            log.warning("Failed loading tracked leaderboard messages: %s", e)
+
+    async def _save_tracked_messages(self) -> None:
+        """Save tracked persistent leaderboard messages to DB."""
+        try:
+            items = list(self._tracked_messages.values())
+            await db.set_config(CONFIG_KEY_TRACKED_LEADERBOARDS, json.dumps(items))
+        except Exception as e:
+            log.warning("Failed saving tracked leaderboard messages: %s", e)
+
+    async def track_leaderboard_message(
+        self,
+        message_id: int,
+        channel_id: int,
+        region: str,
+        metric: str,
+        page: int,
+        total_pages: int = 1,
+    ) -> None:
+        """Register a public leaderboard message for real-time auto-updates."""
+        # Keep only 1 active tracked leaderboard per channel
+        old_ids = [mid for mid, d in self._tracked_messages.items() if d.get("channel_id") == channel_id]
+        for old_id in old_ids:
+            self._tracked_messages.pop(old_id, None)
+
+        self._tracked_messages[message_id] = {
+            "message_id": message_id,
+            "channel_id": channel_id,
+            "region": region,
+            "metric": metric,
+            "page": page,
+            "total_pages": total_pages,
+        }
+
+        # Keep at most 5 channels tracked to minimize load
+        if len(self._tracked_messages) > 5:
+            oldest_id = next(iter(self._tracked_messages))
+            self._tracked_messages.pop(oldest_id, None)
+
+        await self._save_tracked_messages()
+
+    def resolve_message_state(self, message: discord.Message) -> tuple[str, str, int, int]:
+        """
+        Extract (region, metric, page, total_pages) from tracked state or embed footer/title.
+        Defaults to ('All', 'elo', 1, 1).
+        """
+        if message.id in self._tracked_messages:
+            tracked = self._tracked_messages[message.id]
+            return (
+                tracked.get("region", "All"),
+                tracked.get("metric", "elo"),
+                tracked.get("page", 1),
+                tracked.get("total_pages", 1),
+            )
+
+        region = "All"
+        metric = "elo"
+        page = 1
+        total_pages = 1
+
+        if message.embeds:
+            embed = message.embeds[0]
+            if embed.footer and embed.footer.text:
+                text = embed.footer.text
+                m_page = re.search(r"Page\s+(\d+)/(\d+)", text)
+                if m_page:
+                    page = int(m_page.group(1))
+                    total_pages = int(m_page.group(2))
+                m_reg = re.search(r"Region:\s*([^\s•]+)", text)
+                if m_reg:
+                    region = m_reg.group(1)
+                m_met = re.search(r"Metric:\s*([^\s•]+)", text)
+                if m_met:
+                    raw_met = m_met.group(1).lower()
+                    metric = LABEL_TO_METRIC.get(raw_met, raw_met)
+            elif embed.title:
+                t = embed.title.lower()
+                if "win rate" in t:
+                    metric = "winrate"
+                elif "win" in t:
+                    metric = "wins"
+                elif "k/d" in t:
+                    metric = "kda"
+                elif "mvp" in t:
+                    metric = "mvps"
+                elif "mmr" in t or "elo" in t:
+                    metric = "elo"
+
+        return region, metric, page, total_pages
+
+    async def handle_view_interaction(
+        self,
+        interaction: discord.Interaction,
+        action: Optional[str] = None,
+        metric: Optional[str] = None,
+        page: Optional[int] = None,
+    ) -> None:
+        """Handle persistent button clicks and dropdown menu selections."""
         await interaction.response.defer()
 
+        msg = interaction.message
+        if not msg:
+            return
+
+        curr_region, curr_metric, curr_page, curr_total_pages = self.resolve_message_state(msg)
+
+        new_region = curr_region
+        new_metric = metric if metric else curr_metric
+        if metric and metric != curr_metric:
+            new_page = 1
+        elif page is not None:
+            new_page = page
+        elif action == "first":
+            new_page = 1
+        elif action == "prev":
+            new_page = max(1, curr_page - 1)
+        elif action == "next":
+            new_page = curr_page + 1
+        elif action == "last":
+            new_page = max(1, curr_total_pages)
+        elif action == "refresh":
+            new_page = curr_page
+        else:
+            new_page = curr_page
+
+        guild = interaction.guild or (self.bot.get_guild(msg.guild.id) if msg.guild else None)
         img_buf, total_count, _ = await prepare_leaderboard_data(
             bot=self.bot,
-            guild=self.guild or interaction.guild,
-            region=self.region,
-            metric=self.metric,
-            page=self.current_page,
+            guild=guild,
+            region=new_region,
+            metric=new_metric,
+            page=new_page,
         )
-        self.total_count = total_count
-        self.total_pages = max(1, math.ceil(total_count / PAGE_SIZE))
-        if self.current_page > self.total_pages:
-            self.current_page = self.total_pages
+        total_pages = max(1, math.ceil(total_count / PAGE_SIZE))
+        new_page = min(max(1, new_page), total_pages)
 
-        self._build_components()
-
-        embed = build_leaderboard_embed(metric=self.metric)
+        embed = build_leaderboard_embed(
+            metric=new_metric,
+            region=new_region,
+            page=new_page,
+            total_pages=total_pages,
+        )
         file = discord.File(img_buf, filename="leaderboard.png")
+        new_view = LeaderboardPaginationView(
+            bot=self.bot,
+            region=new_region,
+            metric=new_metric,
+            current_page=new_page,
+            total_pages=total_pages,
+            total_count=total_count,
+            guild=guild,
+        )
 
         try:
             await interaction.edit_original_response(
                 embed=embed,
-                view=self,
+                view=new_view,
                 attachments=[file],
             )
         except Exception as exc:
             log.warning("Failed to edit leaderboard response: %s", exc)
 
-    async def _on_first(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the command caller can use pagination.", ephemeral=True)
+        # Track public leaderboard message for real-time auto-updates
+        is_ephemeral = bool(msg.flags.ephemeral)
+        if not is_ephemeral and interaction.channel_id:
+            await self.track_leaderboard_message(
+                message_id=msg.id,
+                channel_id=interaction.channel_id,
+                region=new_region,
+                metric=new_metric,
+                page=new_page,
+                total_pages=total_pages,
+            )
+
+    async def refresh_all_leaderboards(self) -> None:
+        """
+        Auto-update all active/tracked leaderboard messages in real-time.
+        Called whenever match results or player ELO/stats are updated.
+        """
+        if self._is_refreshing:
+            self._refresh_pending = True
             return
-        if self.current_page > 1:
-            self.current_page = 1
-            await self.refresh_and_edit(interaction)
 
-    async def _on_prev(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the command caller can use pagination.", ephemeral=True)
+        self._is_refreshing = True
+        try:
+            if not self._tracked_messages:
+                await self._load_tracked_messages()
+
+            if not self._tracked_messages:
+                return
+
+            render_cache: dict[tuple[str, str, int], tuple[bytes, int]] = {}
+            to_remove: list[int] = []
+
+            for item in list(self._tracked_messages.values()):
+                msg_id = item["message_id"]
+                channel_id = item["channel_id"]
+                region = item.get("region", "All")
+                metric = item.get("metric", "elo")
+                page = item.get("page", 1)
+
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    try:
+                        channel = await self.bot.fetch_channel(channel_id)
+                    except Exception:
+                        continue
+
+                if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+                    continue
+
+                cache_key = (region, metric, page)
+                if cache_key in render_cache:
+                    img_bytes, total_count = render_cache[cache_key]
+                else:
+                    try:
+                        img_buf, total_count, _ = await prepare_leaderboard_data(
+                            bot=self.bot,
+                            guild=channel.guild,
+                            region=region,
+                            metric=metric,
+                            page=page,
+                        )
+                        img_bytes = img_buf.getvalue()
+                        render_cache[cache_key] = (img_bytes, total_count)
+                    except Exception as e:
+                        log.error("Failed preparing leaderboard data for auto-update: %s", e)
+                        continue
+
+                total_pages = max(1, math.ceil(total_count / PAGE_SIZE))
+                page = min(max(1, page), total_pages)
+                item["page"] = page
+                item["total_pages"] = total_pages
+
+                embed = build_leaderboard_embed(
+                    metric=metric,
+                    region=region,
+                    page=page,
+                    total_pages=total_pages,
+                )
+                file = discord.File(io.BytesIO(img_bytes), filename="leaderboard.png")
+                view = LeaderboardPaginationView(
+                    bot=self.bot,
+                    region=region,
+                    metric=metric,
+                    current_page=page,
+                    total_pages=total_pages,
+                    total_count=total_count,
+                    guild=channel.guild,
+                )
+
+                try:
+                    partial = channel.get_partial_message(msg_id)
+                    await partial.edit(embed=embed, view=view, attachments=[file])
+                    log.info("Auto-updated leaderboard %d in #%s.", msg_id, channel.name)
+                except discord.NotFound:
+                    log.info("Leaderboard message %d was deleted; pruning.", msg_id)
+                    to_remove.append(msg_id)
+                except Exception as e:
+                    log.warning("Could not auto-update leaderboard message %d: %s", msg_id, e)
+
+            for rid in to_remove:
+                self._tracked_messages.pop(rid, None)
+            if to_remove:
+                await self._save_tracked_messages()
+
+        finally:
+            self._is_refreshing = False
+            if self._refresh_pending:
+                self._refresh_pending = False
+                asyncio.create_task(self.refresh_all_leaderboards())
+
+    async def _ensure_leaderboard_panel(self) -> None:
+        """Check LEADERBOARD_CHANNEL_ID env var or pinned config on startup and ensure panel exists."""
+        channel_id_raw = os.environ.get("LEADERBOARD_CHANNEL_ID") or await db.get_config(CONFIG_KEY_PINNED_LEADERBOARD_CH)
+        if not channel_id_raw:
             return
-        if self.current_page > 1:
-            self.current_page -= 1
-            await self.refresh_and_edit(interaction)
 
-    async def _on_refresh(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the command caller can use pagination.", ephemeral=True)
+        try:
+            channel_id = int(channel_id_raw)
+        except ValueError:
             return
-        await self.refresh_and_edit(interaction)
 
-    async def _on_next(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the command caller can use pagination.", ephemeral=True)
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except Exception:
+                return
+
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return
-        if self.current_page < self.total_pages:
-            self.current_page += 1
-            await self.refresh_and_edit(interaction)
 
-    async def _on_last(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the command caller can use pagination.", ephemeral=True)
-            return
-        if self.current_page < self.total_pages:
-            self.current_page = self.total_pages
-            await self.refresh_and_edit(interaction)
+        stored_id = await db.get_config(CONFIG_KEY_PINNED_LEADERBOARD_MSG)
+        if stored_id:
+            try:
+                mid = int(stored_id)
+                self._tracked_messages[mid] = {
+                    "message_id": mid,
+                    "channel_id": channel.id,
+                    "region": "All",
+                    "metric": "elo",
+                    "page": 1,
+                    "total_pages": 1,
+                }
+                await self.refresh_all_leaderboards()
+                log.info("Leaderboard pinned panel refreshed (ID: %d).", mid)
+                return
+            except Exception as e:
+                log.warning("Could not refresh existing leaderboard panel: %s", e)
 
-
-class LeaderboardCog(commands.Cog, name="Leaderboard"):
-    """Competitive player rankings and matchmaking leaderboard."""
-
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
+        # Post fresh permanent panel if not already existing
+        try:
+            img_buf, total_count, _ = await prepare_leaderboard_data(
+                bot=self.bot,
+                guild=channel.guild,
+                region="All",
+                metric="elo",
+                page=1,
+            )
+            total_pages = max(1, math.ceil(total_count / PAGE_SIZE))
+            embed = build_leaderboard_embed(metric="elo", region="All", page=1, total_pages=total_pages)
+            file = discord.File(img_buf, filename="leaderboard.png")
+            view = LeaderboardPaginationView(
+                bot=self.bot,
+                region="All",
+                metric="elo",
+                current_page=1,
+                total_pages=total_pages,
+                total_count=total_count,
+                guild=channel.guild,
+            )
+            msg = await channel.send(embed=embed, file=file, view=view)
+            try:
+                await msg.pin()
+            except Exception:
+                pass
+            await self.track_leaderboard_message(
+                message_id=msg.id,
+                channel_id=channel.id,
+                region="All",
+                metric="elo",
+                page=1,
+                total_pages=total_pages,
+            )
+            await db.set_config(CONFIG_KEY_PINNED_LEADERBOARD_MSG, str(msg.id))
+            await db.set_config(CONFIG_KEY_PINNED_LEADERBOARD_CH, str(channel.id))
+            log.info("Posted new persistent leaderboard panel (ID: %d).", msg.id)
+        except Exception as e:
+            log.error("Failed to create persistent leaderboard panel: %s", e)
 
     @app_commands.command(
         name="leaderboard",
@@ -455,12 +814,11 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
 
         total_pages = max(1, math.ceil(total_count / PAGE_SIZE))
 
-        embed = build_leaderboard_embed(metric=metric_val)
+        embed = build_leaderboard_embed(metric=metric_val, region=reg_val, page=1, total_pages=total_pages)
         file = discord.File(img_buf, filename="leaderboard.png")
 
         view = LeaderboardPaginationView(
             bot=self.bot,
-            author_id=interaction.user.id,
             region=reg_val,
             metric=metric_val,
             current_page=1,
@@ -469,7 +827,93 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
             guild=interaction.guild,
         )
 
-        await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=hide)
+        msg = await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=hide)
+
+        if not hide and msg and interaction.channel_id:
+            await self.track_leaderboard_message(
+                message_id=msg.id,
+                channel_id=interaction.channel_id,
+                region=reg_val,
+                metric=metric_val,
+                page=1,
+                total_pages=total_pages,
+            )
+
+    @app_commands.command(
+        name="setup-leaderboard",
+        description="[Admin] Post a permanent, auto-updating leaderboard panel in this channel.",
+    )
+    @app_commands.describe(
+        region="Default regional matchmaking zone (Default: Global / All Regions).",
+        metric="Default sorting criterion (Default: MMR).",
+    )
+    @app_commands.choices(region=REGION_CHOICES, metric=METRIC_CHOICES)
+    async def setup_leaderboard_cmd(
+        self,
+        interaction: discord.Interaction,
+        region: Optional[app_commands.Choice[str]] = None,
+        metric: Optional[app_commands.Choice[str]] = None,
+    ) -> None:
+        """Admin-only: post a dedicated auto-updating leaderboard panel."""
+        if not isinstance(interaction.user, discord.Member) or not _is_admin(interaction.user):
+            await interaction.response.send_message(
+                "You need Staff or Administrator permissions to use this command.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        reg_val = region.value if region else "All"
+        metric_val = metric.value if metric else "elo"
+
+        channel = interaction.channel
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await interaction.followup.send("This command must be run in a text channel.", ephemeral=True)
+            return
+
+        img_buf, total_count, _ = await prepare_leaderboard_data(
+            bot=self.bot,
+            guild=interaction.guild,
+            region=reg_val,
+            metric=metric_val,
+            page=1,
+        )
+        total_pages = max(1, math.ceil(total_count / PAGE_SIZE))
+
+        embed = build_leaderboard_embed(metric=metric_val, region=reg_val, page=1, total_pages=total_pages)
+        file = discord.File(img_buf, filename="leaderboard.png")
+        view = LeaderboardPaginationView(
+            bot=self.bot,
+            region=reg_val,
+            metric=metric_val,
+            current_page=1,
+            total_pages=total_pages,
+            total_count=total_count,
+            guild=interaction.guild,
+        )
+
+        msg = await channel.send(embed=embed, file=file, view=view)
+        try:
+            await msg.pin()
+        except discord.Forbidden:
+            pass
+
+        await self.track_leaderboard_message(
+            message_id=msg.id,
+            channel_id=channel.id,
+            region=reg_val,
+            metric=metric_val,
+            page=1,
+            total_pages=total_pages,
+        )
+        await db.set_config(CONFIG_KEY_PINNED_LEADERBOARD_MSG, str(msg.id))
+        await db.set_config(CONFIG_KEY_PINNED_LEADERBOARD_CH, str(channel.id))
+
+        await interaction.followup.send(
+            f"✅ Permanent auto-updating leaderboard panel created and pinned in {channel.mention}!",
+            ephemeral=True,
+        )
 
     # -------------------------------------------------------------------------
     # /clear-leaderboard  (admin only)
@@ -517,7 +961,10 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
         )
         await interaction.edit_original_response(embed=done_embed, view=None)
         log.info("Admin %s (%d) cleared leaderboard — %d players reset.", interaction.user.name, interaction.user.id, count)
+        asyncio.create_task(self.refresh_all_leaderboards())
 
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(LeaderboardCog(bot))
+    cog = LeaderboardCog(bot)
+    await bot.add_cog(cog)
+    bot.add_view(LeaderboardPaginationView(bot=bot))

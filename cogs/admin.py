@@ -583,6 +583,10 @@ class AdminCog(commands.Cog, name="Admin"):
             await interaction.followup.send("Failed to update player ELO.", ephemeral=True)
             return
 
+        lb_cog = self.bot.get_cog("Leaderboard")
+        if lb_cog and hasattr(lb_cog, "refresh_all_leaderboards"):
+            asyncio.create_task(lb_cog.refresh_all_leaderboards())
+
         await send_log(
             self.bot,
             title="⭐ Player ELO Updated",
@@ -629,6 +633,10 @@ class AdminCog(commands.Cog, name="Admin"):
         if not updated:
             await interaction.followup.send("Failed to reset player stats.", ephemeral=True)
             return
+
+        lb_cog = self.bot.get_cog("Leaderboard")
+        if lb_cog and hasattr(lb_cog, "refresh_all_leaderboards"):
+            asyncio.create_task(lb_cog.refresh_all_leaderboards())
 
         elo_note = "ELO reset to 1000." if reset_elo else f"ELO preserved at `{player.get('elo', 1000)}`."
         await send_log(
