@@ -114,6 +114,15 @@ class VegaBot(commands.Bot):
             )
         )
 
+        # Sync slash commands to all connected guilds for instant permission updates (0 seconds)
+        for guild in self.guilds:
+            try:
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                log.info("Instantly synced %d slash command(s) to guild '%s' (%d).", len(synced), guild.name, guild.id)
+            except Exception as e:
+                log.warning("Could not sync commands to guild %d: %s", guild.id, e)
+
     async def close(self) -> None:
         """Cleanly shut down the database pool before disconnecting."""
         await db.close_db()
@@ -121,10 +130,32 @@ class VegaBot(commands.Bot):
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Entry point & Management Commands
 # ---------------------------------------------------------------------------
 
 bot = VegaBot()
+
+
+@bot.command(name="sync")
+async def sync_prefix_cmd(ctx: commands.Context) -> None:
+    """Instantly sync slash commands to this guild and clear Discord's client-side permission cache."""
+    if not ctx.guild:
+        return
+    from utils.staff import is_staff
+    if not (ctx.author.guild_permissions.administrator or is_staff(ctx.author) or ctx.guild.owner_id == ctx.author.id):
+        await ctx.reply("You need Staff or Administrator permissions to sync commands.")
+        return
+    msg = await ctx.reply("🔄 Syncing slash commands and clearing Discord's cached permissions for this server...")
+    try:
+        bot.tree.copy_global_to(guild=ctx.guild)
+        synced = await bot.tree.sync(guild=ctx.guild)
+        await msg.edit(
+            content=f"✅ Successfully synced **{len(synced)}** slash command(s) to **{ctx.guild.name}**!\n"
+            "Discord's cached permission lock is now cleared. You can run `/clear_solo_queue` without 'Missing Permissions'."
+        )
+    except Exception as e:
+        await msg.edit(content=f"❌ Failed to sync commands: {e}")
+
 
 if __name__ == "__main__":
     bot.run(TOKEN, log_handler=None)  # log_handler=None defers to our custom logger
