@@ -38,6 +38,7 @@ TEAM_QUEUE_MESSAGE_CONFIG_KEY: str = "team_queue_message_id"
 
 from utils.staff import is_staff, _is_admin, STAFF_ROLE_NAMES, get_staff_role_ids
 _is_staff = is_staff
+TEAM_MOD_ROLE_IDS: list[int] = list(get_staff_role_ids())
 
 
 REGIONS: list[str] = ["India", "APAC", "EMEA", "Americas"]
@@ -510,10 +511,7 @@ class ScrimMatchView(discord.ui.View):
             return
 
         user_team = await self._resolve_user_team(interaction.user.id, match)
-        is_staff = False
-        if isinstance(interaction.user, discord.Member):
-            if interaction.user.guild_permissions.administrator or any(r.id in TEAM_MOD_ROLE_IDS for r in interaction.user.roles):
-                is_staff = True
+        is_staff = _is_staff(interaction.user)
 
         if not user_team and not is_staff:
             await interaction.followup.send("Only captains of the matched teams or staff may cancel this match.", ephemeral=True)
@@ -918,9 +916,12 @@ class TeamQueueCog(commands.Cog, name="TeamQueue"):
             send_messages=True,
             read_message_history=True,
         )
-        for role_id in TEAM_MOD_ROLE_IDS:
+        for role_id in get_staff_role_ids():
             role = guild.get_role(role_id)
             if role:
+                overwrites[role] = staff_perm
+        for role in guild.roles:
+            if role.name.strip().lower() in STAFF_ROLE_NAMES:
                 overwrites[role] = staff_perm
 
         # Determine Category

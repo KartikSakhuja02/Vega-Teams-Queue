@@ -20,24 +20,10 @@ log = logging.getLogger(__name__)
 
 EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
 TEAM_PANEL_CHANNEL_ID: int = int(os.environ.get("TEAM_PANEL_CHANNEL_ID", "0"))
-TEAM_MOD_ROLE_IDS_RAW = os.environ.get("TEAM_MOD_ROLE_IDS", "").strip() or os.environ.get("HELP_ADMIN_ROLE_IDS", "")
+from utils.staff import is_staff, STAFF_ROLE_NAMES, get_staff_role_ids
+
+TEAM_MOD_ROLE_IDS: list[int] = list(get_staff_role_ids())
 TEAM_PANEL_MESSAGE_CONFIG_KEY = "team_creation_message_id"
-
-
-def _parse_role_ids(raw_value: str) -> list[int]:
-    ids: list[int] = []
-    for chunk in raw_value.split(","):
-        cleaned = chunk.strip()
-        if not cleaned:
-            continue
-        try:
-            ids.append(int(cleaned))
-        except ValueError:
-            log.warning("Ignoring invalid TEAM_MOD_ROLE_IDS value: %s", cleaned)
-    return ids
-
-
-TEAM_MOD_ROLE_IDS = _parse_role_ids(TEAM_MOD_ROLE_IDS_RAW)
 
 
 def _normalize_text(value: str) -> str:
@@ -146,7 +132,7 @@ def _build_resume_embed(team: dict) -> discord.Embed:
 
 
 def _is_allowed_mod(member: discord.Member, role_ids: Iterable[int]) -> bool:
-    if member.guild_permissions.administrator or member.guild_permissions.manage_channels:
+    if is_staff(member):
         return True
     role_id_set = set(role_ids)
     return any(role.id in role_id_set for role in member.roles)
@@ -155,16 +141,22 @@ def _is_allowed_mod(member: discord.Member, role_ids: Iterable[int]) -> bool:
 def _collect_mod_members(guild: discord.Guild, role_ids: Iterable[int]) -> list[discord.Member]:
     members: list[discord.Member] = []
     seen_ids: set[int] = set()
-    for role_id in role_ids:
+    all_role_ids = set(list(role_ids) + list(get_staff_role_ids()))
+    for role_id in all_role_ids:
         role = guild.get_role(role_id)
         if role is None:
-            log.warning("Configured team mod role %d could not be found in guild %s.", role_id, guild.id)
             continue
         for member in role.members:
             if member.id in seen_ids:
                 continue
             seen_ids.add(member.id)
             members.append(member)
+    for role in guild.roles:
+        if role.name.strip().lower() in STAFF_ROLE_NAMES:
+            for member in role.members:
+                if member.id not in seen_ids:
+                    seen_ids.add(member.id)
+                    members.append(member)
     return members
 
 

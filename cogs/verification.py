@@ -30,36 +30,10 @@ log = logging.getLogger(__name__)
 # ── Environment Config ────────────────────────────────────────────────────────
 MATCHMAKING_VERIFY_CHANNEL_ID: int = int(os.environ.get("MATCHMAKING_VERIFY_CHANNEL_ID", "0") or "0")
 MATCHMAKING_VERIFIED_ROLE_ID: int = int(os.environ.get("MATCHMAKING_VERIFIED_ROLE_ID", "0") or "0")
-TEAM_MOD_ROLE_IDS_RAW: str = (
-    os.environ.get("TEAM_MOD_ROLE_IDS", "").strip()
-    or os.environ.get("HELP_ADMIN_ROLE_IDS", "")
-)
+from utils.staff import is_staff, STAFF_ROLE_NAMES, get_staff_role_ids
 
-EMBED_COLOUR = discord.Colour.from_str("#5B4FCF")
-_SUPPORTED_IMAGE_MIMES = ("image/png", "image/jpeg", "image/webp", "image/gif")
-
-
-def _parse_role_ids(raw_value: str) -> list[int]:
-    ids: list[int] = []
-    for chunk in raw_value.split(","):
-        cleaned = chunk.strip()
-        if cleaned.isdigit():
-            ids.append(int(cleaned))
-    return ids
-
-
-STAFF_ROLE_IDS: list[int] = _parse_role_ids(TEAM_MOD_ROLE_IDS_RAW)
-
-
-def _is_staff(member: discord.Member) -> bool:
-    """Check if member has moderation privileges."""
-    if (
-        member.guild_permissions.administrator
-        or member.guild_permissions.manage_guild
-        or member.guild_permissions.manage_roles
-    ):
-        return True
-    return any(r.id in STAFF_ROLE_IDS for r in member.roles)
+STAFF_ROLE_IDS: list[int] = list(get_staff_role_ids())
+_is_staff = is_staff
 
 
 def _is_image_attachment(att: discord.Attachment) -> bool:
