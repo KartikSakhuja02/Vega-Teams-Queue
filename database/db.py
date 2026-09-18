@@ -25,7 +25,7 @@ async def init_db() -> None:
     """Create the async connection pool and auto-apply schema on first boot."""
     global _pool
     dsn = os.environ["DATABASE_URL"]
-    _pool = await asyncpg.create_pool(dsn, min_size=2, max_size=10)
+    _pool = await asyncpg.create_pool(dsn, min_size=5, max_size=15)
     log.info("Database connection pool created.")
     await _apply_schema()
 

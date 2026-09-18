@@ -2431,6 +2431,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         self._inactivity_cleared: bool = False
         self._auto_clear_task: Optional[asyncio.Task] = None
         self._auto_clear_loop_task: Optional[asyncio.Task] = None
+        # In-memory pause-state cache — avoids 2 DB round-trips on every Join Queue click
+        # None means "unknown, query DB on next access"
+        self._pause_cache: Optional[tuple[bool, Optional[float]]] = None
 
     async def cog_load(self) -> None:
         self._auto_clear_loop_task = asyncio.create_task(self._auto_clear_monitor_loop())
@@ -2493,7 +2496,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             except Exception as e:
                 log.error("Error in solo queue auto-clear monitor loop: %s", e)
             try:
-                await asyncio.sleep(15)
+                await asyncio.sleep(60)  # safety-net poll — precise timer handled by _schedule_auto_clear_check
             except asyncio.CancelledError:
                 break
 
@@ -2555,27 +2558,68 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             except Exception as e:
                 log.debug("Failed to send auto-clear log: %s", e)
 
+    def _invalidate_pause_cache(self) -> None:
+        """Invalidate the in-memory pause-state cache so the next call re-reads from DB."""
+        self._pause_cache = None
+
+    def _set_pause_cache(self, is_paused: bool, pause_until: Optional[float]) -> None:
+        """Update the in-memory pause-state cache."""
+        self._pause_cache = (is_paused, pause_until)
+
     async def is_queue_paused(self) -> tuple[bool, Optional[float]]:
-        """Check if the queue is paused. Returns (is_paused, pause_until_timestamp)."""
-        paused_val = await db.get_config(CONFIG_KEY_QUEUE_PAUSED)
+        """Check if the queue is paused. Returns (is_paused, pause_until_timestamp).
+
+        Uses an in-memory cache to avoid hitting the DB on every interaction.
+        Cache is invalidated whenever staff changes the pause state.
+        """
+        # Fast path: serve from cache
+        if self._pause_cache is not None:
+            cached_paused, cached_until = self._pause_cache
+            if cached_paused and cached_until is not None:
+                # Check if the timed pause has since expired
+                if time.time() >= cached_until:
+                    # Timer expired — auto-unpause
+                    self._pause_cache = (False, None)
+                    asyncio.create_task(self._async_unpause())
+                    return False, None
+            return cached_paused, cached_until
+
+        # Cache miss: fetch both config keys in parallel (single round-trip pair)
+        paused_val, until_val = await asyncio.gather(
+            db.get_config(CONFIG_KEY_QUEUE_PAUSED),
+            db.get_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL),
+        )
+
         if paused_val != "1":
+            self._pause_cache = (False, None)
             return False, None
 
-        until_val = await db.get_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL)
         if until_val and until_val != "0":
             try:
                 until_ts = float(until_val)
                 if time.time() >= until_ts:
                     # Timer expired! Automatically unpause
-                    await db.set_config(CONFIG_KEY_QUEUE_PAUSED, "0")
-                    await db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0")
-                    self._schedule_queue_panel_refresh()
+                    self._pause_cache = (False, None)
+                    asyncio.create_task(self._async_unpause())
                     return False, None
+                self._pause_cache = (True, until_ts)
                 return True, until_ts
             except ValueError:
                 pass
 
+        self._pause_cache = (True, None)
         return True, None
+
+    async def _async_unpause(self) -> None:
+        """Background task to write unpause to DB and refresh the panel."""
+        try:
+            await asyncio.gather(
+                db.set_config(CONFIG_KEY_QUEUE_PAUSED, "0"),
+                db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0"),
+            )
+            self._schedule_queue_panel_refresh()
+        except Exception as e:
+            log.error("_async_unpause failed: %s", e)
 
     def _schedule_auto_resume(self, seconds: float) -> None:
         """Schedule an automatic queue resume after `seconds`."""
@@ -2585,8 +2629,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         async def _sleeper():
             try:
                 await asyncio.sleep(seconds)
-                await db.set_config(CONFIG_KEY_QUEUE_PAUSED, "0")
-                await db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0")
+                self._set_pause_cache(False, None)  # update cache before refresh
+                await asyncio.gather(
+                    db.set_config(CONFIG_KEY_QUEUE_PAUSED, "0"),
+                    db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0"),
+                )
                 await self.refresh_queue_message()
                 log.info("Solo queue automatically resumed after timer expired.")
             except asyncio.CancelledError:
@@ -2655,29 +2702,42 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         return None
 
     async def refresh_queue_message(self) -> None:
-        """Update or post the persistent queue panel, using an in-memory message ID cache."""
+        """Update or post the persistent queue panel.
+
+        Optimisations:
+        - DB queries for queue members + pause state run in parallel.
+        - Uses get_partial_message() + edit() instead of fetch_message() + edit()
+          to save one HTTP GET per refresh.
+        - In-memory message ID cache avoids a DB lookup on every refresh.
+        """
         async with self._refresh_lock:
             channel = await self._get_channel()
             if not channel:
                 return
 
             try:
-                queued_players = await db.get_solo_queue()
+                # Parallelise the two independent DB reads
+                queued_players, pause_state = await asyncio.gather(
+                    db.get_solo_queue(),
+                    self.is_queue_paused(),
+                )
             except Exception as e:
                 log.error("Failed to query solo queue from database: %s", e)
                 return
+
+            is_paused, pause_until = pause_state
 
             # If there are players in the queue, inactivity text must never be shown
             if queued_players:
                 if self._inactivity_cleared:
                     self._inactivity_cleared = False
-                    await db.set_config(CONFIG_KEY_INACTIVITY_CLEARED, "0")
+                    # fire-and-forget — don't block the UI refresh
+                    asyncio.create_task(db.set_config(CONFIG_KEY_INACTIVITY_CLEARED, "0"))
             elif not self._inactivity_cleared:
                 cleared_val = await db.get_config(CONFIG_KEY_INACTIVITY_CLEARED)
                 if cleared_val == "1":
                     self._inactivity_cleared = True
 
-            is_paused, pause_until = await self.is_queue_paused()
             embed = build_solo_queue_embed(
                 queued_players,
                 is_paused=is_paused,
@@ -2696,8 +2756,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
             if panel_id:
                 try:
-                    existing_msg = await channel.fetch_message(panel_id)
-                    await existing_msg.edit(content=None, embed=embed, view=view, attachments=[])
+                    # Use get_partial_message — no HTTP GET needed; edit directly via REST PATCH
+                    partial = channel.get_partial_message(panel_id)
+                    await partial.edit(content=None, embed=embed, view=view, attachments=[])
                     log.info("Refreshed solo queue panel message (ID: %d).", panel_id)
                     return
                 except discord.NotFound:
@@ -2726,7 +2787,16 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         """Handle player joining 10-man solo queue — fully optimised for instant response."""
         await interaction.response.defer(ephemeral=True)
 
-        is_paused, pause_until = await self.is_queue_paused()
+        user_id = interaction.user.id
+
+        # Parallelise ALL independent pre-checks in a single round-trip:
+        # pause state (served from cache if warm), player record, and current queue.
+        (is_paused, pause_until), player, queued_players = await asyncio.gather(
+            self.is_queue_paused(),
+            db.get_player(user_id),
+            db.get_solo_queue(),
+        )
+
         if is_paused:
             if pause_until:
                 await interaction.followup.send(
@@ -2739,14 +2809,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     ephemeral=True,
                 )
             return
-
-        user_id = interaction.user.id
-
-        # Parallel: fetch player record and current queue in one round-trip
-        player, queued_players = await asyncio.gather(
-            db.get_player(user_id),
-            db.get_solo_queue(),
-        )
 
         if not player:
             b_reg_id = int(os.environ.get("SERVER_B_REGISTRATION_CHANNEL_ID", "0") or "0")
@@ -2776,10 +2838,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await interaction.followup.send("You are already in queue.", ephemeral=True)
             return
 
-        # Write to DB, then immediately reply — refresh runs in background
+        # Write to DB, reply immediately, fire refresh as background task
         self._inactivity_cleared = False
-        await db.set_config(CONFIG_KEY_INACTIVITY_CLEARED, "0")
+        # Fire-and-forget the config write + queue add + status update in parallel
         await asyncio.gather(
+            db.set_config(CONFIG_KEY_INACTIVITY_CLEARED, "0"),
             db.add_player_to_solo_queue(user_id),
             db.set_player_status(user_id, "IN_QUEUE"),
         )
@@ -3782,8 +3845,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 return
 
             pause_until = time.time() + seconds
-            await db.set_config(CONFIG_KEY_QUEUE_PAUSED, "1")
-            await db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, str(pause_until))
+            self._set_pause_cache(True, pause_until)  # update cache immediately
+            await asyncio.gather(
+                db.set_config(CONFIG_KEY_QUEUE_PAUSED, "1"),
+                db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, str(pause_until)),
+            )
             self._schedule_auto_resume(seconds)
             await self.refresh_queue_message()
 
@@ -3821,8 +3887,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             if self._auto_resume_task and not self._auto_resume_task.done():
                 self._auto_resume_task.cancel()
 
-            await db.set_config(CONFIG_KEY_QUEUE_PAUSED, "1")
-            await db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0")
+            self._set_pause_cache(True, None)  # update cache immediately
+            await asyncio.gather(
+                db.set_config(CONFIG_KEY_QUEUE_PAUSED, "1"),
+                db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0"),
+            )
             await self.refresh_queue_message()
 
             log.info(
@@ -3870,8 +3939,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         if self._auto_resume_task and not self._auto_resume_task.done():
             self._auto_resume_task.cancel()
 
-        await db.set_config(CONFIG_KEY_QUEUE_PAUSED, "0")
-        await db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0")
+        self._set_pause_cache(False, None)  # update cache immediately
+        await asyncio.gather(
+            db.set_config(CONFIG_KEY_QUEUE_PAUSED, "0"),
+            db.set_config(CONFIG_KEY_QUEUE_PAUSE_UNTIL, "0"),
+        )
         await self.refresh_queue_message()
 
         log.info(
