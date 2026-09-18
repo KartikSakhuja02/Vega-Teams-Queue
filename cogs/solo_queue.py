@@ -26,7 +26,7 @@ import os
 import random
 import re
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import discord
 from discord import app_commands
@@ -1939,6 +1939,358 @@ class MatchResultVoteView(discord.ui.View):
                 child.disabled = True  # type: ignore[attr-defined]
             if self.on_declined_callback:
                 await self.on_declined_callback(None)
+
+
+class UnknownIGNSelect(discord.ui.Select):
+    """Dropdown for selecting which queue member corresponds to an unrecognized IGN."""
+
+    def __init__(
+        self,
+        view_parent: "UnknownIGNResolutionView",
+        unmatched_ign: str,
+        options: list[discord.SelectOption],
+    ) -> None:
+        self.view_parent = view_parent
+        clean_ign = unmatched_ign[:25]
+        super().__init__(
+            placeholder=f"Whose IGN is '{clean_ign}'? Select player...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="unknown_ign:select",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not self.view_parent.can_interact(interaction.user):
+            await interaction.response.send_message(
+                "❌ Only queue members who played in this match or staff (Admins, Moderators, Faceit Police) can select players.",
+                ephemeral=True,
+            )
+            return
+
+        selected_pid = int(self.values[0])
+        await self.view_parent.handle_player_selected(interaction, selected_pid)
+
+
+class UnknownIGNResolutionView(discord.ui.View):
+    """
+    Interactive view presented when an IGN detected in a match scoreboard
+    is not found in the database. Allows any match participant, Faceit Police,
+    Moderator, or Admin to select the matching queue member and updates the DB.
+    """
+
+    def __init__(
+        self,
+        match: dict,
+        all_player_ids: list[int],
+        unmatched_rows: list[tuple[int, Any]],
+        lobby_player_records: dict[int, dict],
+        avail_t1: set[int],
+        avail_t2: set[int],
+        matched_stats_by_pid: dict[int, Any],
+        guild: Optional[discord.Guild] = None,
+        timeout: float = 300.0,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.match = match
+        self.all_player_ids = set(all_player_ids)
+        self.unmatched_rows = unmatched_rows
+        self.lobby_player_records = lobby_player_records
+        self.avail_t1 = avail_t1
+        self.avail_t2 = avail_t2
+        self.matched_stats_by_pid = matched_stats_by_pid
+        self.guild = guild
+
+        self.current_index: int = 0
+        self.selected_pid: Optional[int] = None
+        self.resolve_event: asyncio.Event = asyncio.Event()
+        self.is_resolved: bool = False
+
+        self._build_current_ui()
+
+    def can_interact(self, user: discord.Member | discord.User) -> bool:
+        """Check if user is a match participant or staff (Admin, Mod, Faceit Police)."""
+        if user.id in self.all_player_ids:
+            return True
+        if isinstance(user, discord.Member):
+            return is_staff(user) or _is_admin(user)
+        return False
+
+    def _build_current_ui(self) -> None:
+        """Rebuild view children (dropdown or confirmation buttons) based on current state."""
+        self.clear_items()
+        if self.current_index >= len(self.unmatched_rows):
+            return
+
+        team_num, ocr_row = self.unmatched_rows[self.current_index]
+        ocr_ign = (getattr(ocr_row, "ign", None) or "Unknown").strip()
+
+        if self.selected_pid is None:
+            options: list[discord.SelectOption] = []
+            added_pids: set[int] = set()
+
+            # 1. Unmatched players on this team first
+            primary_unmatched = list(self.avail_t1 if team_num == 1 else self.avail_t2)
+            for pid in primary_unmatched:
+                if pid not in added_pids:
+                    prec = self.lobby_player_records.get(pid, {})
+                    member = self.guild.get_member(pid) if self.guild else None
+                    display_name = member.display_name if member else (prec.get("ign") or prec.get("discord_username") or f"Player {pid}")
+                    current_ign = prec.get("ign") or "None"
+                    options.append(
+                        discord.SelectOption(
+                            label=f"{display_name} (Team {team_num})"[:100],
+                            value=str(pid),
+                            description=f"DB IGN: {current_ign} | Not matched"[:100],
+                            emoji="🎯",
+                        )
+                    )
+                    added_pids.add(pid)
+
+            # 2. Unmatched players on the other team
+            secondary_unmatched = list(self.avail_t2 if team_num == 1 else self.avail_t1)
+            for pid in secondary_unmatched:
+                if pid not in added_pids:
+                    prec = self.lobby_player_records.get(pid, {})
+                    member = self.guild.get_member(pid) if self.guild else None
+                    display_name = member.display_name if member else (prec.get("ign") or prec.get("discord_username") or f"Player {pid}")
+                    current_ign = prec.get("ign") or "None"
+                    options.append(
+                        discord.SelectOption(
+                            label=f"{display_name} (Team {3 - team_num})"[:100],
+                            value=str(pid),
+                            description=f"DB IGN: {current_ign} | Not matched"[:100],
+                            emoji="👤",
+                        )
+                    )
+                    added_pids.add(pid)
+
+            # 3. Remaining lobby players (already matched)
+            for pid in self.all_player_ids:
+                if pid not in added_pids:
+                    prec = self.lobby_player_records.get(pid, {})
+                    member = self.guild.get_member(pid) if self.guild else None
+                    display_name = member.display_name if member else (prec.get("ign") or prec.get("discord_username") or f"Player {pid}")
+                    current_ign = prec.get("ign") or "None"
+                    options.append(
+                        discord.SelectOption(
+                            label=f"{display_name}"[:100],
+                            value=str(pid),
+                            description=f"DB IGN: {current_ign} | Re-assign"[:100],
+                            emoji="⚪",
+                        )
+                    )
+                    added_pids.add(pid)
+
+            if options:
+                self.add_item(UnknownIGNSelect(self, ocr_ign, options[:25]))
+
+            skip_btn = discord.ui.Button(
+                label="Skip This IGN",
+                style=discord.ButtonStyle.secondary,
+                custom_id="unknown_ign:skip",
+            )
+            skip_btn.callback = self._on_skip_clicked
+            self.add_item(skip_btn)
+
+        else:
+            confirm_btn = discord.ui.Button(
+                label="Confirm & Update IGN",
+                style=discord.ButtonStyle.success,
+                emoji="✅",
+                custom_id="unknown_ign:confirm",
+            )
+            confirm_btn.callback = self._on_confirm_clicked
+            self.add_item(confirm_btn)
+
+            change_btn = discord.ui.Button(
+                label="Choose Someone Else",
+                style=discord.ButtonStyle.secondary,
+                emoji="🔄",
+                custom_id="unknown_ign:change",
+            )
+            change_btn.callback = self._on_change_clicked
+            self.add_item(change_btn)
+
+            skip_btn = discord.ui.Button(
+                label="Skip",
+                style=discord.ButtonStyle.danger,
+                custom_id="unknown_ign:skip_confirm",
+            )
+            skip_btn.callback = self._on_skip_clicked
+            self.add_item(skip_btn)
+
+    def get_current_embed(self) -> discord.Embed:
+        """Construct the prompt embed for the current unknown IGN."""
+        if self.current_index >= len(self.unmatched_rows):
+            return discord.Embed(
+                title="✅ All In-Game Names Resolved",
+                description="Finalizing match results and preparing verification vote...",
+                colour=discord.Colour.green(),
+            )
+
+        team_num, ocr_row = self.unmatched_rows[self.current_index]
+        ocr_ign = (getattr(ocr_row, "ign", None) or "Unknown").strip()
+        agent = getattr(ocr_row, "agent", None)
+        agent_str = f" `{agent}`" if agent else ""
+        k = getattr(ocr_row, "kills", 0)
+        d = getattr(ocr_row, "deaths", 0)
+        a = getattr(ocr_row, "assists", 0)
+        acs = getattr(ocr_row, "acs", 0)
+        stats_str = f"`{k}/{d}/{a}` ({acs} ACS)"
+        progress_str = f"({self.current_index + 1}/{len(self.unmatched_rows)})"
+
+        if self.selected_pid is None:
+            embed = discord.Embed(
+                title=f"❓ Unknown In-Game Name Detected {progress_str}",
+                description=(
+                    f"The scoreboard shows an unrecognized IGN: **`{ocr_ign}`**{agent_str}\n"
+                    f"• **Scoreboard Stats:** {stats_str}\n"
+                    f"• **Detected Team:** Team {team_num}\n\n"
+                    f"This IGN was not found in the database. **Whose IGN is this?**\n\n"
+                    "Select the queue member who played under this name from the dropdown menu below.\n"
+                    "*(Queue members, Faceit Police, Moderators, or Admins can select)*"
+                ),
+                colour=discord.Colour(0xE67E22),
+            )
+            embed.set_footer(text="Make sure to select the correct user who played under this name.")
+            return embed
+        else:
+            prec = self.lobby_player_records.get(self.selected_pid, {})
+            current_ign = prec.get("ign", "None registered")
+            member = self.guild.get_member(self.selected_pid) if self.guild else None
+            discord_name = member.name if member else (prec.get("discord_username") or f"User {self.selected_pid}")
+            embed = discord.Embed(
+                title=f"⚠️ Confirm Player Assignment {progress_str}",
+                description=(
+                    f"Are you sure **<@{self.selected_pid}>** played as **`{ocr_ign}`**?\n\n"
+                    f"• **Selected Player:** <@{self.selected_pid}> (`@{discord_name}`)\n"
+                    f"• **Current DB IGN:** `{current_ign}`\n"
+                    f"• **New DB IGN to be set:** **`{ocr_ign}`**\n"
+                    f"• **Match Agent & Stats:**{agent_str} — {stats_str}\n\n"
+                    "Click **Confirm & Update IGN** to save this new IGN to the database and link their match stats.\n"
+                    "Click **Choose Someone Else** if you selected the wrong player."
+                ),
+                colour=discord.Colour(0x3498DB),
+            )
+            return embed
+
+    async def handle_player_selected(self, interaction: discord.Interaction, selected_pid: int) -> None:
+        """User selected a player from dropdown; switch to confirmation stage."""
+        self.selected_pid = selected_pid
+        self._build_current_ui()
+        await interaction.response.edit_message(
+            embed=self.get_current_embed(),
+            view=self,
+        )
+
+    async def _on_confirm_clicked(self, interaction: discord.Interaction) -> None:
+        """Confirm selection: update database, link stats, and proceed."""
+        if not self.can_interact(interaction.user):
+            await interaction.response.send_message(
+                "❌ Only queue members in this match, Faceit Police, Moderators, or Admins can confirm.",
+                ephemeral=True,
+            )
+            return
+
+        if self.selected_pid is None or self.current_index >= len(self.unmatched_rows):
+            return
+
+        team_num, ocr_row = self.unmatched_rows[self.current_index]
+        clean_ign = (getattr(ocr_row, "ign", None) or "").strip().strip("'\"`")[:32]
+        pid = self.selected_pid
+
+        await interaction.response.defer()
+
+        # Update IGN in database
+        try:
+            await db.admin_update_player_ign(pid, clean_ign)
+            # Direct query safeguard
+            pool = db.get_pool()
+            await pool.execute(
+                "UPDATE players SET ign = $1 WHERE discord_id = $2",
+                clean_ign, pid
+            )
+            log.info("Updated player %d IGN to '%s' from match result recognition.", pid, clean_ign)
+        except Exception as e:
+            log.error("Failed updating player %d IGN to '%s': %s", pid, clean_ign, e)
+
+        # Update local records
+        if pid in self.lobby_player_records:
+            self.lobby_player_records[pid]["ign"] = clean_ign
+        self.matched_stats_by_pid[pid] = ocr_row
+        self.avail_t1.discard(pid)
+        self.avail_t2.discard(pid)
+
+        # Public notification in channel
+        try:
+            if interaction.channel and hasattr(interaction.channel, "send"):
+                await interaction.channel.send(
+                    f"✅ **IGN Updated:** <@{pid}>'s IGN has been updated to **`{clean_ign}`** in the database."
+                )
+        except Exception:
+            pass
+
+        # Advance to next unrecognized IGN
+        self.current_index += 1
+        self.selected_pid = None
+
+        if self.current_index < len(self.unmatched_rows):
+            self._build_current_ui()
+            await interaction.edit_original_response(
+                embed=self.get_current_embed(),
+                view=self,
+            )
+        else:
+            self.is_resolved = True
+            self.resolve_event.set()
+            self.stop()
+
+    async def _on_change_clicked(self, interaction: discord.Interaction) -> None:
+        """Go back to dropdown selection."""
+        if not self.can_interact(interaction.user):
+            await interaction.response.send_message(
+                "❌ Only queue members in this match or staff can change selection.",
+                ephemeral=True,
+            )
+            return
+        self.selected_pid = None
+        self._build_current_ui()
+        await interaction.response.edit_message(
+            embed=self.get_current_embed(),
+            view=self,
+        )
+
+    async def _on_skip_clicked(self, interaction: discord.Interaction) -> None:
+        """Skip updating IGN for this row and advance."""
+        if not self.can_interact(interaction.user):
+            await interaction.response.send_message(
+                "❌ Only queue members in this match or staff can skip.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer()
+        self.current_index += 1
+        self.selected_pid = None
+
+        if self.current_index < len(self.unmatched_rows):
+            self._build_current_ui()
+            await interaction.edit_original_response(
+                embed=self.get_current_embed(),
+                view=self,
+            )
+        else:
+            self.is_resolved = True
+            self.resolve_event.set()
+            self.stop()
+
+    async def on_timeout(self) -> None:
+        """Timeout after 5 minutes: unlock and continue with best-effort defaults."""
+        if not self.is_resolved:
+            self.is_resolved = True
+            self.resolve_event.set()
+            self.stop()
 
 
 class SubConfirmationView(discord.ui.View):
@@ -4261,17 +4613,66 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 avail_t2.discard(mpid)
                 matched_stats_by_pid[mpid] = p
 
-        # Assign any remaining unmatched OCR rows to remaining lobby players on that team
+        # Check for any OCR rows whose IGN is not found in the DB / not matched
         unmatched_ocr_t1 = [p for p in result.team1_players if p not in matched_stats_by_pid.values()]
+        unmatched_ocr_t2 = [p for p in result.team2_players if p not in matched_stats_by_pid.values()]
+
+        unknown_ign_rows: list[tuple[int, PlayerRowStats]] = []
+        for p in unmatched_ocr_t1:
+            clean = _clean_str(p.ign)
+            if len(clean) >= 2:
+                unknown_ign_rows.append((1, p))
+
+        for p in unmatched_ocr_t2:
+            clean = _clean_str(p.ign)
+            if len(clean) >= 2:
+                unknown_ign_rows.append((2, p))
+
+        # If any unknown IGNs are detected, prompt with dropdown so players/staff can select
+        if unknown_ign_rows and (avail_t1 or avail_t2):
+            ign_view = UnknownIGNResolutionView(
+                match=match,
+                all_player_ids=all_match_pids,
+                unmatched_rows=unknown_ign_rows,
+                lobby_player_records=lobby_player_records,
+                avail_t1=avail_t1,
+                avail_t2=avail_t2,
+                matched_stats_by_pid=matched_stats_by_pid,
+                guild=interaction.guild,
+            )
+            try:
+                await interaction.edit_original_response(
+                    content=None,
+                    embed=ign_view.get_current_embed(),
+                    view=ign_view,
+                )
+            except Exception as e:
+                log.warning("Could not edit_original_response for unknown IGN view: %s", e)
+                if interaction.channel and hasattr(interaction.channel, "send"):
+                    try:
+                        await interaction.channel.send(
+                            embed=ign_view.get_current_embed(),
+                            view=ign_view,
+                        )
+                    except Exception:
+                        pass
+
+            try:
+                await asyncio.wait_for(ign_view.resolve_event.wait(), timeout=305.0)
+            except asyncio.TimeoutError:
+                log.warning("Timed out waiting for unknown IGN resolution in match #%d", match["id"])
+
+        # Assign any remaining unmatched OCR rows to remaining lobby players on that team (fallback)
+        unmatched_ocr_t1_rem = [p for p in result.team1_players if p not in matched_stats_by_pid.values()]
         for pid in list(avail_t1):
-            if unmatched_ocr_t1:
-                matched_stats_by_pid[pid] = unmatched_ocr_t1.pop(0)
+            if unmatched_ocr_t1_rem:
+                matched_stats_by_pid[pid] = unmatched_ocr_t1_rem.pop(0)
                 avail_t1.remove(pid)
 
-        unmatched_ocr_t2 = [p for p in result.team2_players if p not in matched_stats_by_pid.values()]
+        unmatched_ocr_t2_rem = [p for p in result.team2_players if p not in matched_stats_by_pid.values()]
         for pid in list(avail_t2):
-            if unmatched_ocr_t2:
-                matched_stats_by_pid[pid] = unmatched_ocr_t2.pop(0)
+            if unmatched_ocr_t2_rem:
+                matched_stats_by_pid[pid] = unmatched_ocr_t2_rem.pop(0)
                 avail_t2.remove(pid)
 
         # 12. Determine match outcome
