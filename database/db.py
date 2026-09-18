@@ -2362,17 +2362,74 @@ async def get_solo_match_by_voice_channel(voice_channel_id: int) -> Optional[dic
 
 
 async def get_active_solo_match_by_player(discord_id: int) -> Optional[dict]:
-    """Fetch any active in-game match (VOICE_CHECKIN, DRAFTING, MAP_VETO, IN_PROGRESS) the player belongs to."""
+    """Fetch any active in-game match (VOICE_CHECKIN, DRAFTING, MAP_VETO, IN_PROGRESS) the player belongs to where results have not been submitted."""
     row = await get_pool().fetchrow(
         """
         SELECT * FROM solo_matches
         WHERE ($1 = ANY(team1_player_ids) OR $1 = ANY(team2_player_ids) OR $1 = ANY(available_player_ids))
           AND status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS')
+          AND submitted_by IS NULL
         ORDER BY id DESC LIMIT 1
         """,
         discord_id,
     )
     return dict(row) if row else None
+
+
+async def release_all_match_players_to_idle(match_id: int, player_ids: list[int]) -> None:
+    """
+    Called when /submit-result is executed.
+    Immediately updates all match participants to 'IDLE' in the players table,
+    so they can join a new queue right away without waiting for verification.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if player_ids:
+                await conn.execute(
+                    """
+                    UPDATE players
+                    SET status = 'IDLE'::player_status_enum,
+                        status_since = NOW()
+                    WHERE discord_id = ANY($1::BIGINT[]) AND status != 'IN_QUEUE'
+                    """,
+                    player_ids,
+                )
+            await conn.execute(
+                """
+                UPDATE solo_matches
+                SET status = 'PROCESSING_RESULT'
+                WHERE id = $1
+                """,
+                match_id,
+            )
+
+
+async def cleanup_stale_match_statuses() -> None:
+    """
+    Startup & health check: automatically free any player whose active match
+    has already submitted results or has concluded.
+    """
+    pool = get_pool()
+    try:
+        await pool.execute(
+            """
+            UPDATE players
+            SET status = 'IDLE'::player_status_enum,
+                status_since = NOW()
+            WHERE status = 'IN_MATCH'
+              AND NOT EXISTS (
+                  SELECT 1 FROM solo_matches sm
+                  WHERE (players.discord_id = ANY(sm.team1_player_ids)
+                      OR players.discord_id = ANY(sm.team2_player_ids)
+                      OR players.discord_id = ANY(sm.available_player_ids))
+                    AND sm.status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS')
+                    AND sm.submitted_by IS NULL
+              );
+            """
+        )
+    except Exception as e:
+        log.warning("Could not cleanup stale player statuses: %s", e)
 
 
 async def cancel_solo_match(match_id: int) -> Optional[dict]:

@@ -2232,6 +2232,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
+        try:
+            await db.cleanup_stale_match_statuses()
+        except Exception as e:
+            log.warning("Could not run startup stale match cleanup: %s", e)
+
         if self._queue_message_posted:
             return
         self._queue_message_posted = True
@@ -2356,11 +2361,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         if player.get("status") == "IN_MATCH":
             active_m = await db.get_active_solo_match_by_player(user_id)
             if active_m:
-                await interaction.followup.send("You are currently in an active match.", ephemeral=True)
-                return
-            else:
-                # Previous match has finished or submitted results — clear stale IN_MATCH status
-                await db.set_player_status(user_id, "IDLE")
+                ch_id = active_m.get("channel_id")
+                active_ch = interaction.guild.get_channel(ch_id) if (interaction.guild and ch_id) else None
+                if active_ch:
+                    await interaction.followup.send("You are currently in an active match.", ephemeral=True)
+                    return
+            # Previous match concluded, results submitted, or channel deleted — auto-heal to IDLE
+            await db.set_player_status(user_id, "IDLE")
 
         if any(p["discord_id"] == user_id for p in queued_players):
             await interaction.followup.send("You are already in queue.", ephemeral=True)
@@ -3372,7 +3379,10 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         t1_pids = list(match.get("team1_player_ids") or [])
         t2_pids = list(match.get("team2_player_ids") or [])
-        all_match_pids = list(set(t1_pids + t2_pids))
+        avail_pids = list(match.get("available_player_ids") or [])
+        c1_id = match.get("captain1_id")
+        c2_id = match.get("captain2_id")
+        all_match_pids = list(set(t1_pids + t2_pids + avail_pids + [p for p in (c1_id, c2_id) if p]))
 
         # 2. Verify authorization (match participant or staff)
         is_participant = interaction.user.id in all_match_pids
@@ -3392,7 +3402,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             )
             return
 
-        # 4. Atomic concurrency claim / lock
+        # 4. Atomic concurrency claim / lock and IMMEDIATELY release all players to IDLE in database
         claimed, err_reason, _ = await db.claim_solo_match_result_submission(
             match["id"], interaction.user.id
         )
@@ -3400,9 +3410,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await interaction.response.send_message(f"❌ {err_reason}", ephemeral=True)
             return
 
-        # 4b. Immediately release all lobby players to IDLE so they can join a new queue right away while OCR runs
+        # 4b. Immediately make all match participants IDLE in the database so they can join a new queue right now
         try:
-            await db.set_players_status_bulk(all_match_pids, "IDLE")
+            await db.release_all_match_players_to_idle(match["id"], all_match_pids)
         except Exception as e:
             log.warning("Could not set lobby players to IDLE on submission start: %s", e)
 
@@ -4304,20 +4314,28 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await interaction.followup.send(f"<@{new_player.id}> is banned from queues.", ephemeral=True)
             return
 
-        # Check if new player is already in an active match
-        new_p_active_m = await db.get_active_solo_match_by_player(new_player.id)
-        if new_p_active_m:
-            await interaction.followup.send(
-                f"<@{new_player.id}> is already in an active match (<#{new_p_active_m.get('channel_id')}>).",
-                ephemeral=True,
-            )
-            return
-
         # 2. Find target match
         match = await db.get_solo_match_by_channel(interaction.channel_id)
         if not match:
             # If not in match channel, check if old_player is in an active match
             match = await db.get_active_solo_match_by_player(old_player.id)
+
+        # Check if new player is currently in an active match
+        if new_p_rec.get("status") == "IN_MATCH":
+            new_p_active_m = await db.get_active_solo_match_by_player(new_player.id)
+            if new_p_active_m and (not match or new_p_active_m.get("id") != match.get("id")):
+                ch_id = new_p_active_m.get("channel_id")
+                active_ch = interaction.guild.get_channel(ch_id) if (interaction.guild and ch_id) else None
+                if active_ch:
+                    await interaction.followup.send(
+                        f"<@{new_player.id}> is already in an active match (<#{ch_id}>).",
+                        ephemeral=True,
+                    )
+                    return
+                else:
+                    await db.set_player_status(new_player.id, "IDLE")
+            else:
+                await db.set_player_status(new_player.id, "IDLE")
 
         # If still no match, check if old_player is in the waiting queue (0/10)
         if not match:
