@@ -2216,6 +2216,75 @@ async def update_solo_match_captains(
     return dict(row) if row else None
 
 
+async def replace_player_in_solo_match(
+    match_id: int,
+    old_pid: int,
+    new_pid: int,
+    captain1_id: int,
+    captain2_id: int,
+    team1_player_ids: list[int],
+    team2_player_ids: list[int],
+    available_player_ids: list[int],
+    current_turn_captain_id: Optional[int],
+) -> Optional[dict]:
+    """
+    Atomically replace old_pid with new_pid in a solo match,
+    and update player statuses and waiting queues in a single transaction.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # 1. Update solo_matches
+            updated_match = await conn.fetchrow(
+                """
+                UPDATE solo_matches
+                SET captain1_id = $1,
+                    captain2_id = $2,
+                    team1_player_ids = $3::BIGINT[],
+                    team2_player_ids = $4::BIGINT[],
+                    available_player_ids = $5::BIGINT[],
+                    current_turn_captain_id = $6
+                WHERE id = $7
+                RETURNING *
+                """,
+                captain1_id,
+                captain2_id,
+                team1_player_ids,
+                team2_player_ids,
+                available_player_ids,
+                current_turn_captain_id,
+                match_id,
+            )
+
+            # 2. Free old player to IDLE
+            await conn.execute(
+                """
+                UPDATE players
+                SET status = 'IDLE',
+                    status_since = NOW()
+                WHERE discord_id = $1
+                """,
+                old_pid,
+            )
+
+            # 3. Set new player to IN_MATCH and remove them from solo_queue if waiting
+            await conn.execute(
+                """
+                UPDATE players
+                SET status = 'IN_MATCH',
+                    status_since = NOW()
+                WHERE discord_id = $1
+                """,
+                new_pid,
+            )
+            await conn.execute(
+                "DELETE FROM solo_queue WHERE player_id = $1",
+                new_pid,
+            )
+
+            return dict(updated_match) if updated_match else None
+
+
 async def update_solo_match_map_veto(
     match_id: int,
     available_maps: list[str],

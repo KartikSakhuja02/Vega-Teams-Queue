@@ -4229,6 +4229,270 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     f"Captain updated: <@{new_captain.id}> has replaced <@{old_captain.id}> as captain."
                 )
 
+    # ── /replace-player ───────────────────────────────────────────────────────
+
+    @app_commands.command(
+        name="replace-player",
+        description="Replace an old player with a new player in the active queue match.",
+    )
+    @app_commands.describe(
+        old_player="The player currently in the match to be replaced",
+        new_player="The new player joining to play in their place",
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def replace_player_hyphen(
+        self,
+        interaction: discord.Interaction,
+        old_player: discord.Member,
+        new_player: discord.Member,
+    ) -> None:
+        """Replace an old player with a new player (hyphen version)."""
+        await self._handle_replace_player(interaction, old_player, new_player)
+
+    @app_commands.command(
+        name="replace_player",
+        description="Replace an old player with a new player in the active queue match.",
+    )
+    @app_commands.describe(
+        old_player="The player currently in the match to be replaced",
+        new_player="The new player joining to play in their place",
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def replace_player_underscore(
+        self,
+        interaction: discord.Interaction,
+        old_player: discord.Member,
+        new_player: discord.Member,
+    ) -> None:
+        """Replace an old player with a new player (underscore version)."""
+        await self._handle_replace_player(interaction, old_player, new_player)
+
+    async def _handle_replace_player(
+        self,
+        interaction: discord.Interaction,
+        old_player: discord.Member,
+        new_player: discord.Member,
+    ) -> None:
+        """Handle replacing an old player with a new player in a match lobby or waiting queue."""
+        await interaction.response.defer(ephemeral=False)
+
+        # 1. Validation checks
+        if old_player.id == new_player.id:
+            await interaction.followup.send("Old player and new player cannot be the same person.", ephemeral=True)
+            return
+
+        is_staff = isinstance(interaction.user, discord.Member) and _is_admin(interaction.user)
+
+        # Verify new player is registered
+        new_p_rec = await db.get_player(new_player.id)
+        if not new_p_rec:
+            b_reg_id = int(os.environ.get("SERVER_B_REGISTRATION_CHANNEL_ID", "0") or "0")
+            ch_hint = f" in <#{b_reg_id}>" if b_reg_id else ""
+            await interaction.followup.send(
+                f"<@{new_player.id}> is not registered! They must register first using `/register`{ch_hint}.",
+                ephemeral=True,
+            )
+            return
+
+        if new_p_rec.get("is_banned"):
+            await interaction.followup.send(f"<@{new_player.id}> is banned from queues.", ephemeral=True)
+            return
+
+        # Check if new player is already in an active match
+        new_p_active_m = await db.get_active_solo_match_by_player(new_player.id)
+        if new_p_active_m:
+            await interaction.followup.send(
+                f"<@{new_player.id}> is already in an active match (<#{new_p_active_m.get('channel_id')}>).",
+                ephemeral=True,
+            )
+            return
+
+        # 2. Find target match
+        match = await db.get_solo_match_by_channel(interaction.channel_id)
+        if not match:
+            # If not in match channel, check if old_player is in an active match
+            match = await db.get_active_solo_match_by_player(old_player.id)
+
+        # If still no match, check if old_player is in the waiting queue (0/10)
+        if not match:
+            queued = await db.get_solo_queue()
+            if any(p["discord_id"] == old_player.id for p in queued):
+                if not is_staff:
+                    await interaction.followup.send("Only staff can replace players in the queue.", ephemeral=True)
+                    return
+                await db.remove_player_from_solo_queue(old_player.id)
+                await db.set_player_status(old_player.id, "IDLE")
+                await db.add_player_to_solo_queue(new_player.id)
+                await db.set_player_status(new_player.id, "IN_QUEUE")
+                self._schedule_queue_panel_refresh()
+                await interaction.followup.send(
+                    f"🔄 **Player Replaced in Queue!** <@{new_player.id}> has replaced <@{old_player.id}> in the waiting queue."
+                )
+                if interaction.guild:
+                    asyncio.create_task(self._check_and_create_solo_match(interaction.guild))
+                return
+
+            await interaction.followup.send(
+                f"<@{old_player.id}> is not currently in an active queue or match.",
+                ephemeral=True,
+            )
+            return
+
+        # 3. Match authorization
+        c1_id = match.get("captain1_id")
+        c2_id = match.get("captain2_id")
+        is_captain = interaction.user.id in (c1_id, c2_id)
+        if not is_staff and not is_captain:
+            await interaction.followup.send(
+                "Only staff members or captains can replace players in this match.",
+                ephemeral=True,
+            )
+            return
+
+        # 4. Check match status
+        if match.get("status") in ("COMPLETED", "CANCELLED"):
+            await interaction.followup.send("This match has already concluded.", ephemeral=True)
+            return
+
+        # 5. Check old_player is in this match
+        t1_ids = list(match.get("team1_player_ids") or [])
+        t2_ids = list(match.get("team2_player_ids") or [])
+        avail_ids = list(match.get("available_player_ids") or [])
+        all_match_pids = set(t1_ids + t2_ids + avail_ids + [c1_id, c2_id])
+
+        if old_player.id not in all_match_pids:
+            await interaction.followup.send(
+                f"<@{old_player.id}> is not a participant in Match #{match['id']}.",
+                ephemeral=True,
+            )
+            return
+
+        if new_player.id in all_match_pids:
+            await interaction.followup.send(
+                f"<@{new_player.id}> is already a participant in Match #{match['id']}.",
+                ephemeral=True,
+            )
+            return
+
+        # 6. Perform player replacement in match rosters
+        new_t1_ids = [new_player.id if pid == old_player.id else pid for pid in t1_ids]
+        new_t2_ids = [new_player.id if pid == old_player.id else pid for pid in t2_ids]
+        new_avail_ids = [new_player.id if pid == old_player.id else pid for pid in avail_ids]
+
+        new_c1 = new_player.id if c1_id == old_player.id else c1_id
+        new_c2 = new_player.id if c2_id == old_player.id else c2_id
+
+        turn_id = match.get("current_turn_captain_id")
+        new_turn_id = new_player.id if turn_id == old_player.id else turn_id
+
+        # 7. Commit to database atomically
+        updated_match = await db.replace_player_in_solo_match(
+            match_id=match["id"],
+            old_pid=old_player.id,
+            new_pid=new_player.id,
+            captain1_id=new_c1,
+            captain2_id=new_c2,
+            team1_player_ids=new_t1_ids,
+            team2_player_ids=new_t2_ids,
+            available_player_ids=new_avail_ids,
+            current_turn_captain_id=new_turn_id,
+        )
+        if not updated_match:
+            updated_match = dict(match)
+            updated_match["captain1_id"] = new_c1
+            updated_match["captain2_id"] = new_c2
+            updated_match["team1_player_ids"] = new_t1_ids
+            updated_match["team2_player_ids"] = new_t2_ids
+            updated_match["available_player_ids"] = new_avail_ids
+            updated_match["current_turn_captain_id"] = new_turn_id
+
+        # 8. Update channel permissions
+        ch_id = updated_match.get("channel_id") or interaction.channel_id
+        match_ch = interaction.guild.get_channel(ch_id) if interaction.guild else None
+        if isinstance(match_ch, discord.TextChannel):
+            try:
+                await match_ch.set_permissions(old_player, overwrite=None)
+            except Exception as e:
+                log.debug("Could not clear old_player permissions: %s", e)
+            try:
+                await match_ch.set_permissions(
+                    new_player,
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    attach_files=True,
+                )
+            except Exception as e:
+                log.debug("Could not grant new_player permissions: %s", e)
+
+        # Update voice permissions if voice channels exist
+        if interaction.guild:
+            v_lobby_id = updated_match.get("voice_lobby_id")
+            v1_id = updated_match.get("voice_team1_id")
+            v2_id = updated_match.get("voice_team2_id")
+            for vid in (v_lobby_id, v1_id, v2_id):
+                if vid:
+                    vch = interaction.guild.get_channel(vid)
+                    if isinstance(vch, discord.VoiceChannel):
+                        try:
+                            await vch.set_permissions(old_player, overwrite=None)
+                        except Exception:
+                            pass
+                        try:
+                            await vch.set_permissions(new_player, view_channel=True, connect=True, speak=True)
+                        except Exception:
+                            pass
+
+        # 9. Update lobby panel message (draft view, veto view, checkin view)
+        try:
+            panel_msg_id = updated_match.get("panel_message_id")
+            ch = match_ch or interaction.channel
+            if panel_msg_id and ch and hasattr(ch, "fetch_message"):
+                panel_msg = await ch.fetch_message(panel_msg_id)
+                match_pids = list(set(new_t1_ids + new_t2_ids + new_avail_ids + [new_c1, new_c2]))
+                fetched = await db.get_players_bulk(match_pids)
+                players_by_id = {p["discord_id"]: p for p in fetched}
+                colour = await get_solo_embed_colour()
+                status = updated_match.get("status")
+
+                if status == "DRAFTING":
+                    embed = build_solo_draft_embed(updated_match, players_by_id, colour=colour)
+                    avail_players = [players_by_id[pid] for pid in new_avail_ids if pid in players_by_id]
+                    draft_mode = await get_solo_draft_mode()
+                    view = SoloDraftView(updated_match, avail_players, players_by_id=players_by_id, colour=colour, draft_mode=draft_mode)
+                    await panel_msg.edit(embed=embed, view=view)
+                elif status == "MAP_VETO":
+                    embed = build_solo_map_veto_embed(updated_match, players_by_id, colour=colour)
+                    veto_mode = await get_solo_veto_mode()
+                    if veto_mode not in ("MAP_VOTE", "VOTE"):
+                        view = SoloMapVetoView(updated_match, players_by_id, veto_mode=veto_mode, colour=colour)
+                        await panel_msg.edit(embed=embed, view=view)
+                    else:
+                        await panel_msg.edit(embed=embed)
+                elif status == "VOICE_CHECKIN":
+                    v_lobby_id = updated_match.get("voice_lobby_id")
+                    lobby_vc = interaction.guild.get_channel(v_lobby_id) if (v_lobby_id and interaction.guild) else None
+                    connected_pids = {m.id for m in lobby_vc.members if m.id in match_pids} if isinstance(lobby_vc, discord.VoiceChannel) else set()
+                    embed = build_solo_checkin_embed(updated_match, players_by_id, connected_pids, v_lobby_id or 0, colour=colour)
+                    await panel_msg.edit(embed=embed)
+                elif status == "IN_PROGRESS":
+                    embed = build_solo_map_veto_embed(updated_match, players_by_id, colour=colour)
+                    map_file = get_solo_map_file(updated_match.get("selected_map"))
+                    edit_kwargs = {"embed": embed}
+                    if map_file:
+                        edit_kwargs["attachments"] = [map_file]
+                    await panel_msg.edit(**edit_kwargs)
+        except Exception as e:
+            log.debug("Failed to update panel message on player replacement: %s", e)
+
+        # 10. Announce replacement in lobby
+        msg = f"🔄 **Player Replaced!** <@{new_player.id}> has replaced <@{old_player.id}> in Match #{match['id']}."
+        try:
+            await interaction.followup.send(msg)
+        except Exception:
+            if isinstance(interaction.channel, discord.TextChannel):
+                await interaction.channel.send(msg)
+
     async def _handle_set_elo_template(
         self,
         interaction: discord.Interaction,
