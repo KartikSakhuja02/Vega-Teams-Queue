@@ -11,6 +11,10 @@ from __future__ import annotations
 import os
 from typing import Optional, Set
 import discord
+from dotenv import load_dotenv
+
+# Ensure environment variables are loaded
+load_dotenv()
 
 STAFF_ROLE_NAMES: Set[str] = {
     "moderator",
@@ -18,9 +22,11 @@ STAFF_ROLE_NAMES: Set[str] = {
     "mods",
     "faceit police",
     "faceit-police",
+    "faceit_police",
     "faceitpolice",
     "admin",
     "administrator",
+    "admins",
 }
 
 
@@ -60,13 +66,34 @@ def get_staff_role_ids() -> set[int]:
     return role_ids
 
 
+def _matches_staff_role(role_name: str) -> bool:
+    """Check if a Discord role name corresponds to a staff role (case/symbol insensitive)."""
+    raw_lower = role_name.strip().lower()
+    if raw_lower in STAFF_ROLE_NAMES:
+        return True
+
+    clean = "".join(c.lower() for c in role_name if c.isalnum() or c.isspace()).strip()
+    words = set(clean.split())
+    if clean in STAFF_ROLE_NAMES:
+        return True
+    if "faceit" in words and "police" in words:
+        return True
+    if "faceitpolice" in clean.replace(" ", ""):
+        return True
+    if "moderator" in words or "moderators" in words or "mod" in words or "mods" in words:
+        return True
+    if "admin" in words or "administrator" in words or "admins" in words:
+        return True
+    return False
+
+
 def is_staff(member: Optional[discord.Member | discord.User]) -> bool:
     """
     Check if a guild member has staff/administrative permissions.
     Returns True if:
       1. Member has Discord Administrator, Manage Server, or Manage Channels permissions.
       2. Member has any role ID configured in .env (Moderator, Faceit Police, Admin).
-      3. Member has a role matching common staff names (Moderator, Faceit Police, Admin).
+      3. Member has a role matching staff names (Moderator, Faceit Police, Admin).
     """
     if not member or not isinstance(member, discord.Member):
         return False
@@ -81,10 +108,10 @@ def is_staff(member: Optional[discord.Member | discord.User]) -> bool:
     if any(role.id in staff_ids for role in member.roles):
         return True
 
-    # 3. Role name fallback (case-insensitive)
-    return any(role.name.strip().lower() in STAFF_ROLE_NAMES for role in member.roles)
+    # 3. Role name fallback (case and symbol insensitive)
+    return any(_matches_staff_role(role.name) for role in member.roles)
 
 
-# Backward-compatible alias
+# Backward-compatible aliases
 _is_admin = is_staff
 is_admin = is_staff

@@ -14,6 +14,7 @@ from discord.ext import commands
 
 from database import db
 from cogs.bot_logger import send_log, COL_SUCCESS, COL_DANGER
+from utils.staff import is_staff
 
 log = logging.getLogger(__name__)
 
@@ -1252,23 +1253,37 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
 
         await interaction.response.defer(ephemeral=True)
 
-        # 1. Auth: Captain or Manager
+        # 1. Auth: Captain, Manager, or Staff (Admin, Moderator, Faceit Police)
         caller_team = await db.get_team_by_captain(interaction.user.id)
         caller_membership = await db.get_player_team_membership(interaction.user.id)
+        target_membership = await db.get_player_team_membership(player.id)
+        is_staff_caller = is_staff(interaction.user)
 
-        if not caller_team and (
-            not caller_membership or caller_membership.get("role") not in ("Manager",)
-        ):
+        team_id = None
+        if caller_team:
+            team_id = caller_team["id"]
+        elif caller_membership and caller_membership.get("role") in ("Manager",):
+            team_id = caller_membership["team_id"]
+        elif is_staff_caller:
+            if target_membership:
+                team_id = target_membership["team_id"]
+            else:
+                target_team = await db.get_team_by_captain(player.id)
+                if target_team:
+                    team_id = target_team["id"]
+                else:
+                    await interaction.followup.send(f"{player.mention} is not currently a member of any team.", ephemeral=True)
+                    return
+        else:
             await interaction.followup.send(
-                "You must be the Captain or a Manager of a team to change member roles.",
+                "You must be the Captain or a Manager of a team (or Staff: Admin, Moderator, Faceit Police) to change member roles.",
                 ephemeral=True,
             )
             return
 
-        team_id = caller_team["id"] if caller_team else caller_membership["team_id"]
         full_team = await db.get_team_by_id(team_id)
         if not full_team or not full_team["is_active"]:
-            await interaction.followup.send("Your team is not active.", ephemeral=True)
+            await interaction.followup.send("The team is not active.", ephemeral=True)
             return
 
         # 2. Cannot change Captain's role
@@ -1280,7 +1295,6 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
             return
 
         # 3. Check target membership in this team
-        target_membership = await db.get_player_team_membership(player.id)
         if not target_membership or target_membership["team_id"] != full_team["id"]:
             await interaction.followup.send(
                 f"{player.mention} is not a member of **{full_team['team_name']}**.",
@@ -1386,23 +1400,32 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
             )
             return
 
-        # 1. Check if caller is captain or manager
+        # 1. Check if caller is captain, manager, or staff
         caller_team = await db.get_team_by_captain(interaction.user.id)
-        
-        # If not captain, check if they are a manager in team_members
-        if not caller_team:
-            membership = await db.get_player_team_membership(interaction.user.id)
-            if membership and membership["role"] == "Manager":
-                pass
-            if not membership or membership["role"] != "Manager":
-                await interaction.response.send_message("You must be the Captain or a Manager of a team to kick players.", ephemeral=True)
+        membership = await db.get_player_team_membership(interaction.user.id)
+        is_staff_caller = is_staff(interaction.user)
+
+        target_membership = await db.get_player_team_membership(player.id)
+
+        team_id = None
+        if caller_team:
+            team_id = caller_team["id"]
+        elif membership and membership.get("role") == "Manager":
+            team_id = membership["team_id"]
+        elif is_staff_caller:
+            if target_membership:
+                team_id = target_membership["team_id"]
+            else:
+                await interaction.response.send_message(f"{player.mention} is not in any team.", ephemeral=True)
                 return
+        else:
+            await interaction.response.send_message("You must be the Captain or a Manager of a team (or Staff: Admin, Moderator, Faceit Police) to kick players.", ephemeral=True)
+            return
                 
-        team_id = caller_team["id"] if caller_team else membership["team_id"]
         full_team = await db.get_team_by_id(team_id)
         
         if not full_team or not full_team["is_active"]:
-            await interaction.response.send_message("Your team is not active.", ephemeral=True)
+            await interaction.response.send_message("The team is not active.", ephemeral=True)
             return
             
         # 2. Prevent kicking the captain
@@ -1411,7 +1434,6 @@ class TeamManagementCog(commands.Cog, name="TeamManagement"):
             return
             
         # 3. Check if target is in the team
-        target_membership = await db.get_player_team_membership(player.id)
         if not target_membership or target_membership["team_id"] != full_team["id"]:
             await interaction.response.send_message(
                 f"{player.mention} is not in your team.",
