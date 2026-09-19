@@ -3408,7 +3408,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 # ---------------------------------------------------------
                 category_overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
                     guild.default_role: discord.PermissionOverwrite(
-                        view_channel=False,
+                        view_channel=True,
+                        send_messages=False,
                         connect=False,
                     ),
                     guild.me: discord.PermissionOverwrite(
@@ -3426,7 +3427,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     ),
                 }
 
-                # Permission overwrites for text channel
+                # Permission overwrites for text channel (Hidden from regular server members)
                 text_overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
                     guild.default_role: discord.PermissionOverwrite(view_channel=False),
                     guild.me: discord.PermissionOverwrite(
@@ -3441,9 +3442,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     ),
                 }
 
-                # Permission overwrites for voice lobby (Open to all 10 players)
+                # Permission overwrites for voice lobby (Visible to all, but connect=False for non-participants)
                 voice_lobby_overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
-                    guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
+                    guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
                     guild.me: discord.PermissionOverwrite(
                         view_channel=True,
                         connect=True,
@@ -3454,9 +3455,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     ),
                 }
 
-                # Permission overwrites for team voice channels (Open to queue players from start)
+                # Permission overwrites for team voice channels (Visible to all, but connect=False for non-participants)
                 team_voice_overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
-                    guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
+                    guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
                     guild.me: discord.PermissionOverwrite(
                         view_channel=True,
                         connect=True,
@@ -5775,6 +5776,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             updated_match["available_player_ids"] = new_avail_ids
             updated_match["current_turn_captain_id"] = new_turn_id
 
+        # Evict replaced player from waiting solo queue if queued and refresh panel immediately
+        try:
+            await db.clear_solo_queue([new_player.id])
+            await self.refresh_queue_message()
+        except Exception as e:
+            log.debug("Failed removing replaced player %d from solo_queue: %s", new_player.id, e)
+
         # 8. Update channel & category permissions
         ch_id = updated_match.get("channel_id") or interaction.channel_id
         match_ch = interaction.guild.get_channel(ch_id) if interaction.guild else None
@@ -6061,6 +6069,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             updated_match["team2_player_ids"] = new_t2_ids
             updated_match["available_player_ids"] = new_avail_ids
             updated_match["current_turn_captain_id"] = new_turn_id
+
+        # Remove subbed player from waiting solo queue if queued and refresh panel immediately
+        try:
+            await db.clear_solo_queue([new_pid])
+            await self.refresh_queue_message()
+        except Exception as e:
+            log.debug("Failed removing subbed player %d from solo_queue: %s", new_pid, e)
 
         return updated_match
 
@@ -6543,6 +6558,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         match_ch = interaction.guild.get_channel(ch_id) if interaction.guild else None
         if isinstance(match_ch, discord.TextChannel):
             await self._refresh_match_panel_after_replacement(updated_match, interaction.guild, match_ch)
+
+        # Evict subbed player from waiting solo queue if queued and refresh panel immediately
+        try:
+            await db.clear_solo_queue([new_player.id])
+            await self.refresh_queue_message()
+        except Exception as e:
+            log.debug("Failed removing subbed player %d from solo_queue in /sub: %s", new_player.id, e)
 
         # Announce
         await match_ch.send(
