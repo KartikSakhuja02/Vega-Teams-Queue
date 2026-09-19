@@ -5583,7 +5583,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
     @app_commands.command(
         name="sub",
-        description="Substitute a player in an active match with confirmation and a 3-minute voice join timer.",
+        description="Substitute a player in an active match (Administrator, Moderator, Face it Police only).",
     )
     @app_commands.describe(
         old_player="The player currently in the match to be replaced",
@@ -6445,14 +6445,22 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
+        # 1. Check permissions (Administrator, Moderator, Face it Police only)
+        is_staff = isinstance(interaction.user, discord.Member) and _is_admin(interaction.user)
+        if not is_staff:
+            await interaction.response.send_message(
+                "❌ Only Administrators, Moderators, or Face it Police can use `/sub`.",
+                ephemeral=True,
+            )
+            return
+
         if old_player.id == new_player.id:
             await interaction.response.send_message("Old player and new player cannot be the same person.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=False)
 
-        # 1. Check permissions & player profiles
-        is_staff = isinstance(interaction.user, discord.Member) and _is_admin(interaction.user)
+        # 2. Check player profiles
         old_p_rec, new_p_rec = await asyncio.gather(
             db.get_player(old_player.id),
             db.get_player(new_player.id),
@@ -6465,7 +6473,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await interaction.followup.send(f"<@{new_player.id}> is banned from queues.", ephemeral=True)
             return
 
-        # 2. Find target match
+        # 3. Find target match
         match = await db.get_solo_match_by_channel(interaction.channel_id)
         if not match:
             match = await db.get_active_solo_match_by_player(old_player.id)
@@ -6480,18 +6488,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             + (match.get("available_player_ids") or [])
             + [p for p in (match.get("captain1_id"), match.get("captain2_id")) if p]
         ))
-
-        # Authorization: staff, match participant, or waiting queue player
-        queued_players = await db.get_solo_queue()
-        queued_pids = {p["discord_id"] for p in queued_players}
-        is_in_queue = (interaction.user.id in all_match_pids) or (interaction.user.id in queued_pids)
-
-        if not is_staff and not is_in_queue:
-            await interaction.followup.send(
-                "Only players in the queue/match or staff (Admin, Moderator, Faceit Police) can use /sub.",
-                ephemeral=True,
-            )
-            return
 
         if old_player.id not in all_match_pids:
             await interaction.followup.send(f"<@{old_player.id}> is not a participant in Match #{match['id']}.", ephemeral=True)
