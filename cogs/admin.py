@@ -15,7 +15,7 @@ from typing import Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from database import db
 from cogs.bot_logger import send_log, COL_DEFAULT, COL_SUCCESS, COL_DANGER, COL_WARNING
@@ -272,6 +272,55 @@ def _build_queue_unban_embed(
     return embed
 
 
+def _build_queue_expired_unban_embed(
+    user_or_id: discord.User | discord.Member | int,
+    player_record: dict,
+    guild: Optional[discord.Guild] = None,
+) -> discord.Embed:
+    """Build a rich announcement embed when a player's temporary ban expires automatically."""
+    mention = user_or_id.mention if hasattr(user_or_id, "mention") else f"<@{user_or_id}>"
+    user_id = getattr(user_or_id, "id", user_or_id)
+    avatar_url = getattr(user_or_id, "display_avatar", None)
+    avatar_url = avatar_url.url if avatar_url else None
+
+    embed = discord.Embed(
+        title="🔓 Matchmaking Ban Expired",
+        description=(
+            f"> **Matchmaking ban has expired for {mention}.**\n"
+            f"> Temporary ban duration has concluded. Normal queue and matchmaking access has been fully restored."
+        ),
+        colour=COL_SUCCESS,
+        timestamp=datetime.now(timezone.utc),
+    )
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
+
+    ign = player_record.get("ign") or "N/A"
+    elo = player_record.get("elo", 1000)
+    region = player_record.get("region") or "Global"
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    ban_reason = player_record.get("ban_reason") or "Matchmaking violation"
+
+    embed.add_field(
+        name="👤 Player",
+        value=f"{mention}\n**IGN:** `{ign}`\n**Rating:** `{elo} ELO` `[{region}]`\n**User ID:** `{user_id}`",
+        inline=False,
+    )
+    embed.add_field(
+        name="⏳ Expiration Details",
+        value=(
+            f"• **Original Reason:** {ban_reason}\n"
+            f"• **Status:** `Active / Unbanned`\n"
+            f"• **Expired At:** <t:{now_ts}:F> (<t:{now_ts}:R>)"
+        ),
+        inline=False,
+    )
+
+    icon_url = guild.icon.url if guild and guild.icon else None
+    embed.set_footer(text="Vega Esports • Queue Moderation System", icon_url=icon_url)
+    return embed
+
+
 
 class AdminCog(commands.Cog, name="Admin"):
     """Handles staff administration, moderation commands, and the admin command center."""
@@ -279,6 +328,10 @@ class AdminCog(commands.Cog, name="Admin"):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._panel_posted: bool = False
+        self.check_expired_bans.start()
+
+    def cog_unload(self) -> None:
+        self.check_expired_bans.cancel()
 
     admin_group = app_commands.Group(
         name="admin",
@@ -347,7 +400,7 @@ class AdminCog(commands.Cog, name="Admin"):
 
     async def _send_ban_channel_ui(
         self,
-        guild: discord.Guild,
+        guild: Optional[discord.Guild],
         embed: discord.Embed,
     ) -> Optional[discord.Message]:
         """Send the ban/unban UI card to the channel configured in .env."""
@@ -355,7 +408,9 @@ class AdminCog(commands.Cog, name="Admin"):
         if not ch_id:
             return None
 
-        channel = guild.get_channel(ch_id)
+        channel = guild.get_channel(ch_id) if guild else None
+        if channel is None:
+            channel = self.bot.get_channel(ch_id)
         if channel is None:
             try:
                 channel = await self.bot.fetch_channel(ch_id)
@@ -370,6 +425,86 @@ class AdminCog(commands.Cog, name="Admin"):
             except Exception as e:
                 log.error("Failed to post ban announcement to channel %d: %s", ch_id, e)
         return None
+
+    # ── Expired Bans Background Worker ──────────────────────────────────────
+
+    @tasks.loop(seconds=30)
+    async def check_expired_bans(self) -> None:
+        """Background worker that periodically detects and clears expired matchmaking bans."""
+        try:
+            expired_players = await db.expire_pending_bans()
+            if not expired_players:
+                return
+
+            for p in expired_players:
+                user_id = p["discord_id"]
+                log.info("Ban expired for player %d (%s) — sending unban notification.", user_id, p.get("ign"))
+
+                # Try resolving the user/member
+                user: Optional[discord.User] = self.bot.get_user(user_id)
+                if not user:
+                    try:
+                        user = await self.bot.fetch_user(user_id)
+                    except Exception:
+                        user = None
+
+                # Find relevant guild for guild icon if available
+                guild: Optional[discord.Guild] = None
+                ch_id = _get_queue_ban_channel_id()
+                if ch_id:
+                    ch = self.bot.get_channel(ch_id)
+                    if isinstance(ch, (discord.TextChannel, discord.Thread)):
+                        guild = ch.guild
+                if not guild and self.bot.guilds:
+                    guild = self.bot.guilds[0]
+
+                target_entity = user if user else user_id
+
+                # Post real-time unban notification to the same configured ban channel
+                unban_embed = _build_queue_expired_unban_embed(
+                    user_or_id=target_entity,
+                    player_record=p,
+                    guild=guild,
+                )
+                await self._send_ban_channel_ui(guild, unban_embed)
+
+                # Send DM to player if possible
+                if user:
+                    try:
+                        dm_embed = discord.Embed(
+                            title="🔓 Matchmaking Ban Expired",
+                            description=(
+                                "Your temporary matchmaking ban on Vega Scrims has expired.\n"
+                                "Your queue and matchmaking access has been fully restored. Welcome back!"
+                            ),
+                            colour=COL_SUCCESS,
+                        )
+                        dm_embed.set_footer(text="Vega Scrims Moderation")
+                        await user.send(embed=dm_embed)
+                    except Exception:
+                        pass
+
+                # Audit Log
+                user_str = user.mention if user else f"<@{user_id}>"
+                fields = [
+                    ("Player", f"{user_str} (`{user_id}`)", True),
+                    ("IGN", p.get("ign", "N/A"), True),
+                    ("Status", "Ban Expired Automatically", True),
+                    ("Original Reason", p.get("ban_reason") or "N/A", False),
+                ]
+                await send_log(
+                    self.bot,
+                    title="🔓 Ban Expired Automatically",
+                    description=f"Matchmaking ban for {user_str} has expired. Queue access restored.",
+                    colour=COL_SUCCESS,
+                    fields=fields,
+                )
+        except Exception as e:
+            log.exception("Error in check_expired_bans task: %s", e)
+
+    @check_expired_bans.before_loop
+    async def before_check_expired_bans(self) -> None:
+        await self.bot.wait_until_ready()
 
     async def _refresh_solo_queue(self) -> None:
         """Helper to notify SoloQueueCog to refresh its persistent channel message."""

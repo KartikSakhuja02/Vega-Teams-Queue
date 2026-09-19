@@ -221,12 +221,23 @@ async def register_player(
 
 
 async def get_player(discord_id: int) -> Optional[dict]:
-    """Fetch a player record by Discord snowflake ID (active or inactive)."""
+    """Fetch a player record by Discord snowflake ID (active or inactive). Auto-heals expired bans."""
     row = await get_pool().fetchrow(
         "SELECT * FROM players WHERE discord_id = $1",
         discord_id,
     )
-    return dict(row) if row else None
+    if not row:
+        return None
+    player = dict(row)
+    if player.get("is_banned") and player.get("banned_until"):
+        b_until = player["banned_until"]
+        if b_until.tzinfo is None:
+            b_until = b_until.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= b_until:
+            unbanned = await unban_player(discord_id)
+            if unbanned:
+                return unbanned
+    return player
 
 
 async def get_players_bulk(discord_ids: list[int]) -> list[dict]:
@@ -682,6 +693,45 @@ async def get_player_ban_status(discord_id: int) -> tuple[bool, Optional[str], O
     except Exception:
         return False, None, None, None
 
+
+async def expire_pending_bans() -> list[dict]:
+    """
+    Check for any active temporary bans whose banned_until timestamp has passed.
+    Atomically clears the ban state in the database and returns the list of
+    unbanned player records (including their ban metadata before unbanning).
+    """
+    try:
+        rows = await get_pool().fetch(
+            """
+            WITH expired AS (
+                SELECT discord_id, ign, discord_username, elo, region, ban_reason, banned_by, banned_at, banned_until
+                FROM players
+                WHERE is_banned = TRUE
+                  AND banned_until IS NOT NULL
+                  AND banned_until <= NOW()
+                FOR UPDATE
+            ),
+            updated AS (
+                UPDATE players p
+                SET is_banned       = FALSE,
+                    banned_at       = NULL,
+                    banned_until    = NULL,
+                    ban_reason      = NULL,
+                    banned_by       = NULL,
+                    status          = 'IDLE'::player_status_enum,
+                    status_since    = NOW(),
+                    penalty_ends_at = NULL
+                FROM expired e
+                WHERE p.discord_id = e.discord_id
+                RETURNING p.discord_id
+            )
+            SELECT e.* FROM expired e;
+            """
+        )
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.error("Error expiring pending bans: %s", e)
+        return []
 
 
 async def update_team_region(team_id: int, new_region: str) -> Optional[dict]:
