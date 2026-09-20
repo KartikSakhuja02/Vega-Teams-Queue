@@ -91,11 +91,6 @@ class VegaBot(commands.Bot):
         log.info("Loaded cog: cogs.verification")
         await self.load_extension("cogs.leaderboard")
         log.info("Loaded cog: cogs.leaderboard")
-        try:
-            await self.load_extension("cogs.test_ui")
-            log.info("Loaded cog: cogs.test_ui")
-        except Exception as e:
-            log.warning("Could not load cogs.test_ui: %s", e)
 
 
         # 3. Sync slash commands.
