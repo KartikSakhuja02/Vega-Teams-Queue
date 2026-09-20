@@ -55,6 +55,7 @@ Configured via a `.env` file (see `.env.example`):
 | `TEAM_PANEL_CHANNEL_ID` | Channel where the Create Team panel and private threads are created |
 | `HELP_ADMIN_ROLE_IDS` | Comma-separated role IDs added to help-ticket channels |
 | `TEAM_MOD_ROLE_IDS` | Comma-separated role IDs added to team setup threads |
+| `QUEUE_LOG_CHANNEL_ID` | Dedicated channel ID where queue audit logs (pops, missed VC check-in, subs) are sent |
 | `GUILD_ID` | (Optional) Guild ID for instant command sync during development |
 
 > **Required Discord intents (set in Developer Portal → Bot → Privileged Gateway Intents):**

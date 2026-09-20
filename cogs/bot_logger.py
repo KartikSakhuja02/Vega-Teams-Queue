@@ -114,6 +114,69 @@ async def send_log(
         log.warning("Failed to post log embed: %s", exc)
 
 
+def get_queue_log_channel_id() -> int:
+    """Return configured queue log channel ID with fallbacks."""
+    for key in ("QUEUE_LOG_CHANNEL_ID", "SOLO_QUEUE_LOG_CHANNEL_ID"):
+        val = os.environ.get(key, "").strip()
+        if val and val.isdigit() and int(val) > 0:
+            return int(val)
+    val_b = os.environ.get("SERVER_B_LOG_CHANNEL_ID", "").strip()
+    if val_b and val_b.isdigit() and int(val_b) > 0:
+        return int(val_b)
+    return 0
+
+
+async def send_queue_log(
+    bot: commands.Bot,
+    *,
+    title: str,
+    description: str,
+    colour: discord.Colour = COL_DEFAULT,
+    fields: list[tuple[str, str, bool]] | None = None,
+) -> None:
+    """
+    Send an audit log embed specifically to the configured queue log channel (QUEUE_LOG_CHANNEL_ID).
+    Used for queue pops, missed voice check-ins, substitutions, and timeouts.
+    """
+    ch_id = get_queue_log_channel_id()
+    if not ch_id:
+        try:
+            from database import db
+            cfg_ch = await db.get_config("queue_log_channel_id")
+            if cfg_ch and cfg_ch.isdigit():
+                ch_id = int(cfg_ch)
+        except Exception:
+            pass
+
+    if not ch_id:
+        return
+
+    channel = bot.get_channel(ch_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(ch_id)
+        except Exception:
+            log.warning("Could not fetch queue log channel %d", ch_id)
+            return
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        colour=colour,
+        timestamp=datetime.now(timezone.utc),
+    )
+    if fields:
+        for name, value, inline in fields:
+            embed.add_field(name=name, value=value, inline=inline)
+
+    embed.set_footer(text="Vega Queue — Queue Audit Log")
+
+    try:
+        await channel.send(embed=embed)
+    except Exception as exc:
+        log.warning("Failed to post queue log embed to channel %d: %s", ch_id, exc)
+
+
 # ---------------------------------------------------------------------------
 # Cog
 # ---------------------------------------------------------------------------

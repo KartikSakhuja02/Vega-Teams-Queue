@@ -33,7 +33,14 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import db
-from cogs.bot_logger import send_log, COL_WARNING
+from cogs.bot_logger import (
+    send_log,
+    send_queue_log,
+    COL_DEFAULT,
+    COL_SUCCESS,
+    COL_DANGER,
+    COL_WARNING,
+)
 
 log = logging.getLogger(__name__)
 
@@ -3640,6 +3647,44 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 await db.update_solo_match_panel(match["id"], panel_msg.id)
                 log.info("Created 10-man solo queue #%d in channel #%s.", match["id"], text_channel.name)
 
+                # Send audit log to queue log channel
+                async def _log_match_created():
+                    try:
+                        p_lines = []
+                        for i, pid in enumerate(player_ids, start=1):
+                            prec = players_by_id.get(pid, {})
+                            ign = prec.get("ign") or "Unknown"
+                            tag = ""
+                            if pid == c1_id:
+                                tag = " `[Captain 1]`"
+                            elif pid == c2_id:
+                                tag = " `[Captain 2]`"
+                            p_lines.append(f"{i}. <@{pid}> — **{ign}** (`{pid}`){tag}")
+
+                        c1_ign = players_by_id.get(c1_id, {}).get("ign") or "Unknown"
+                        c2_ign = players_by_id.get(c2_id, {}).get("ign") or "Unknown"
+
+                        await send_queue_log(
+                            self.bot,
+                            title=f"🎮 Queue Pop — Match #{match['id']} Created",
+                            description=(
+                                f"A new 10-man match lobby has formed in {text_channel.mention}.\n"
+                                f"All players have **5 minutes** (<t:{deadline}:R>) to connect to {lobby_vc.mention}."
+                            ),
+                            colour=discord.Colour.from_str("#5B4FCF"),
+                            fields=[
+                                ("Match ID", f"`#{match['id']}`", True),
+                                ("Channel", text_channel.mention, True),
+                                ("Voice Lobby", lobby_vc.mention, True),
+                                ("Captains", f"👑 <@{c1_id}> (**{c1_ign}**)\n👑 <@{c2_id}> (**{c2_ign}**)", False),
+                                ("Lobby Players (10)", "\n".join(p_lines), False),
+                            ],
+                        )
+                    except Exception as e:
+                        log.warning("Failed to send queue pop log for Match #%d: %s", match["id"], e)
+
+                asyncio.create_task(_log_match_created())
+
                 # Schedule 5-minute voice check-in timeout monitor
                 self._checkin_timers[match["id"]] = asyncio.create_task(
                     self._monitor_voice_checkin_timeout(match["id"], guild, deadline)
@@ -5033,6 +5078,29 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             if lb_cog and hasattr(lb_cog, "refresh_all_leaderboards"):
                 asyncio.create_task(lb_cog.refresh_all_leaderboards())
 
+            # Log match completion to queue audit log
+            async def _log_match_completed():
+                try:
+                    await send_queue_log(
+                        self.bot,
+                        title=f"🏆 Match #{match['id']} Results Finalized",
+                        description=(
+                            f"**Map:** {map_name}\n"
+                            f"**Score:** {t1_team_name} [{t1_score}] - [{t2_score}] {t2_team_name}\n"
+                            f"**Winner:** {'Draw' if winning_team == 0 else ('Team 1' if winning_team == 1 else 'Team 2')}\n"
+                            f"**Match MVP:** <@{overall_mvp_pid}>"
+                        ),
+                        colour=COL_SUCCESS,
+                        fields=[
+                            ("Submitted By", f"<@{interaction.user.id}> (`{interaction.user.id}`)", True),
+                            ("Confirmed By", f"{btn_interaction.user.mention} (`{btn_interaction.user.id}`)", True),
+                        ],
+                    )
+                except Exception as e:
+                    log.warning("Failed to send match completed log for Match #%d: %s", match["id"], e)
+
+            asyncio.create_task(_log_match_completed())
+
             # Post to dedicated results channel if configured
             results_ch_id = await get_solo_results_channel_id()
             if results_ch_id and interaction.guild:
@@ -5272,6 +5340,34 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             except Exception:
                 pass
 
+    @app_commands.command(
+        name="set_queue_log_channel",
+        description="Set the Discord channel where queue audit logs are sent (Staff only).",
+    )
+    @app_commands.describe(
+        channel="The text channel for queue audit logs"
+    )
+    async def set_queue_log_channel_command(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+    ) -> None:
+        """Staff command to set queue log channel dynamically."""
+        if not isinstance(interaction.user, discord.Member) or not _is_admin(interaction.user):
+            await interaction.response.send_message(
+                "❌ You do not have staff permissions to use this command.", ephemeral=True
+            )
+            return
+
+        await db.set_config("queue_log_channel_id", str(channel.id))
+        os.environ["QUEUE_LOG_CHANNEL_ID"] = str(channel.id)
+
+        await interaction.response.send_message(
+            f"✅ Queue audit log channel set to {channel.mention} (`{channel.id}`).\n"
+            f"Queue pops, missing VC players, and substitutions will now be logged there.",
+            ephemeral=True,
+        )
+
     async def _handle_cancel_match(
         self,
         interaction: discord.Interaction,
@@ -5438,6 +5534,30 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         # Cancel match in database
         await db.cancel_solo_match(match_id)
+
+        # Send audit log for manual cancellation
+        async def _log_manual_cancel():
+            try:
+                p_lines = []
+                for pid in all_pids:
+                    prec = await db.get_player(pid)
+                    ign = prec.get("ign") if prec else "Unknown"
+                    p_lines.append(f"<@{pid}> (**{ign}** | `{pid}`)")
+
+                await send_queue_log(
+                    self.bot,
+                    title=f"🚫 Match #{match_id} Cancelled",
+                    description=f"Match #{match_id} was cancelled.",
+                    colour=COL_DANGER,
+                    fields=[
+                        ("Reason", reason, False),
+                        ("Participants", ", ".join(p_lines) if p_lines else "None", False),
+                    ],
+                )
+            except Exception as e:
+                log.warning("Failed to log manual match cancel for #%d: %s", match_id, e)
+
+        asyncio.create_task(_log_manual_cancel())
 
         # Refresh queue panel
         self._schedule_queue_panel_refresh()
@@ -6287,6 +6407,37 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             except Exception as e:
                 log.warning("Could not auto re-queue players on cancel: %s", e)
 
+        # Send queue audit log for match auto-cancellation
+        async def _log_match_auto_cancelled():
+            try:
+                miss_lines = []
+                for pid in idle_pids:
+                    prec = await db.get_player(pid)
+                    ign = prec.get("ign") if prec else "Unknown"
+                    miss_lines.append(f"• <@{pid}> — **{ign}** | Discord ID: `{pid}`")
+
+                fields = [
+                    ("Match ID", f"`#{match_id}`", True),
+                    ("Reason", reason, False),
+                ]
+                if miss_lines:
+                    fields.append(("Offending Player(s) (Did Not Join VC)", "\n".join(miss_lines), False))
+                if requeue_set:
+                    requeue_pings = " ".join(f"<@{pid}>" for pid in requeue_set)
+                    fields.append((f"Connected Players Returned to Queue ({len(requeue_set)})", requeue_pings, False))
+
+                await send_queue_log(
+                    self.bot,
+                    title=f"❌ Match #{match_id} Cancelled — Missing Players",
+                    description=f"Match #{match_id} was automatically cancelled due to missing players.",
+                    colour=COL_DANGER,
+                    fields=fields,
+                )
+            except Exception as e:
+                log.warning("Failed to send auto cancel log for Match #%d: %s", match_id, e)
+
+        asyncio.create_task(_log_match_auto_cancelled())
+
         # 3. Post cancellation notice in text channel before deletion
         ch_id = match.get("channel_id")
         match_ch = guild.get_channel(ch_id) if ch_id else None
@@ -6416,8 +6567,38 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             # Refresh panel embed
             await self._refresh_match_panel_after_replacement(curr_match, guild, match_ch)
 
+            # Send queue log for auto-sub
+            async def _log_sub_accepted(old_p: int, new_p: int, m_id: int):
+                try:
+                    old_rec, new_rec = await asyncio.gather(db.get_player(old_p), db.get_player(new_p))
+                    old_ign = old_rec.get("ign") if old_rec else "Unknown"
+                    new_ign = new_rec.get("ign") if new_rec else "Unknown"
+                    await send_queue_log(
+                        self.bot,
+                        title=f"🔄 Player Substituted (Auto-Sub) — Match #{m_id}",
+                        description=f"A player was replaced by a substitute from the waiting queue in <#{match_ch.id}>.",
+                        colour=COL_WARNING,
+                        fields=[
+                            (
+                                "Subbed Out (Removed)",
+                                f"❌ <@{old_p}> — **{old_ign}**\n**Discord ID:** `{old_p}`\n*Reason: Failed to connect to VC on time*",
+                                False,
+                            ),
+                            (
+                                "Subbed In (Replacement)",
+                                f"✅ <@{new_p}> — **{new_ign}**\n**Discord ID:** `{new_p}`\n*Given 3 minutes (<t:{three_min_deadline}:R>) to connect to voice*",
+                                False,
+                            ),
+                            ("Match Channel", f"<#{match_ch.id}>", True),
+                            ("Voice Lobby", lobby_vc.mention, True),
+                        ],
+                    )
+                except Exception as e:
+                    log.warning("Failed to send sub accepted log for Match #%d: %s", m_id, e)
+
             # 5. Start 3-minute voice join window
             three_min_deadline = int(time.time()) + 180
+            asyncio.create_task(_log_sub_accepted(current_target_old_pid, cand_id, curr_match["id"]))
             await match_ch.send(
                 f"**Player Substituted:** <@{cand_id}> has replaced <@{current_target_old_pid}>.\n"
                 f"<@{cand_id}>, please connect to {lobby_vc.mention} within **3 minutes** (<t:{three_min_deadline}:R>)."
@@ -6441,6 +6622,34 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 await match_ch.send(f"<@{cand_id}> failed to connect to voice within 3 minutes. Finding replacement substitute...")
                 await self._revoke_match_permissions(curr_match, guild, cand_mem)
                 await db.set_player_status(cand_id, "IDLE")
+
+                # Send queue log
+                async def _log_sub_missed_vc(c_id: int, m_id: int):
+                    try:
+                        c_rec = await db.get_player(c_id)
+                        c_ign = c_rec.get("ign") if c_rec else "Unknown"
+                        await send_queue_log(
+                            self.bot,
+                            title=f"⚠️ Substitute Failed to Join VC — Match #{m_id}",
+                            description=(
+                                f"Substitute <@{c_id}> accepted the substitution but failed to connect to voice within 3 minutes.\n"
+                                f"**Match Lobby:** <#{match_ch.id}>\n"
+                                f"**Voice Lobby:** {lobby_vc.mention}"
+                            ),
+                            colour=COL_DANGER,
+                            fields=[
+                                (
+                                    "Offending Substitute",
+                                    f"❌ <@{c_id}> — **{c_ign}**\n**Discord ID:** `{c_id}`",
+                                    False,
+                                ),
+                                ("Action", "Player removed; searching for next substitute from queue.", False),
+                            ],
+                        )
+                    except Exception as e:
+                        log.warning("Failed to log sub missed VC for Match #%d: %s", m_id, e)
+
+                asyncio.create_task(_log_sub_missed_vc(cand_id, curr_match["id"]))
                 current_target_old_pid = cand_id
                 # Loop continues to pick next FIFO candidate
 
@@ -6489,6 +6698,34 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             f"Missing players: {missing_pings}\n"
             f"Checking queue for replacement substitutes..."
         )
+
+        # Send audit log to queue log channel
+        async def _log_missing_players():
+            try:
+                miss_lines = []
+                for pid in missing_pids:
+                    prec = await db.get_player(pid)
+                    ign = prec.get("ign") if prec else "Unknown"
+                    miss_lines.append(f"• <@{pid}> — **{ign}**\n  └ **Discord ID:** `{pid}`")
+
+                await send_queue_log(
+                    self.bot,
+                    title=f"⚠️ Voice Check-in Missed — Match #{match_id}",
+                    description=(
+                        f"**{len(missing_pids)} player(s)** failed to connect to voice check-in within 5 minutes.\n"
+                        f"**Match Lobby:** <#{current_match.get('channel_id')}>\n"
+                        f"**Voice Lobby:** {lobby_vc.mention}"
+                    ),
+                    colour=COL_DANGER,
+                    fields=[
+                        ("Offending Player(s)", "\n".join(miss_lines) if miss_lines else "None", False),
+                        ("Action", "Searching for replacement substitutes from queue...", False),
+                    ],
+                )
+            except Exception as e:
+                log.warning("Failed to send missing players log for Match #%d: %s", match_id, e)
+
+        asyncio.create_task(_log_missing_players())
 
         # Cancel match if queue does not have enough substitutes to replace all missing players
         queued = await db.get_solo_queue()
@@ -6670,6 +6907,28 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             f"**Player Substituted:** <@{new_player.id}> has replaced <@{old_player.id}> in Match #{match['id']}."
         )
 
+        # Send queue log for manual substitution
+        async def _log_manual_sub():
+            try:
+                old_ign = old_p_rec.get("ign") if old_p_rec else "Unknown"
+                new_ign = new_p_rec.get("ign") if new_p_rec else "Unknown"
+                await send_queue_log(
+                    self.bot,
+                    title=f"🔄 Manual Substitution by Staff — Match #{match['id']}",
+                    description=f"Staff member {interaction.user.mention} manually substituted a player in <#{ch_id}>.",
+                    colour=COL_WARNING,
+                    fields=[
+                        ("Staff Member", f"{interaction.user.mention} (`{interaction.user.id}`)", True),
+                        ("Match Channel", f"<#{ch_id}>", True),
+                        ("Subbed Out", f"❌ <@{old_player.id}> — **{old_ign}**\n**Discord ID:** `{old_player.id}`", False),
+                        ("Subbed In", f"✅ <@{new_player.id}> — **{new_ign}**\n**Discord ID:** `{new_player.id}`", False),
+                    ],
+                )
+            except Exception as e:
+                log.warning("Failed to send manual sub log for Match #%d: %s", match["id"], e)
+
+        asyncio.create_task(_log_manual_sub())
+
         # 6. If match is in VOICE_CHECKIN, give them 3 minutes to join voice!
         if updated_match.get("status") == "VOICE_CHECKIN":
             v_lobby_id = updated_match.get("voice_lobby_id")
@@ -6694,6 +6953,30 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                     await match_ch.send(f"<@{new_player.id}> failed to connect to voice within 3 minutes. Finding replacement substitute...")
                     await self._revoke_match_permissions(updated_match, interaction.guild, new_player)
                     await db.set_player_status(new_player.id, "IDLE")
+
+                    async def _log_manual_sub_missed_vc():
+                        try:
+                            n_ign = new_p_rec.get("ign") if new_p_rec else "Unknown"
+                            await send_queue_log(
+                                self.bot,
+                                title=f"⚠️ Manual Sub Failed to Join VC — Match #{updated_match['id']}",
+                                description=f"Manually substituted player <@{new_player.id}> failed to connect to voice within 3 minutes.",
+                                colour=COL_DANGER,
+                                fields=[
+                                    (
+                                        "Offending Player",
+                                        f"❌ <@{new_player.id}> — **{n_ign}**\n**Discord ID:** `{new_player.id}`",
+                                        False,
+                                    ),
+                                    ("Match", f"<#{updated_match.get('channel_id')}>", True),
+                                    ("Action", "Player removed; finding next substitute from queue.", False),
+                                ],
+                            )
+                        except Exception as e:
+                            log.warning("Failed to send manual sub missed VC log: %s", e)
+
+                    asyncio.create_task(_log_manual_sub_missed_vc())
+
                     # Trigger auto-sub from queue
                     success = await self._find_and_prompt_sub(updated_match, interaction.guild, match_ch, lobby_vc, new_player.id)
                     if not success:
