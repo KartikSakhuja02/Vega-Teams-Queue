@@ -635,22 +635,15 @@ class AdminCog(commands.Cog, name="Admin"):
         ban_msg = await self._send_ban_channel_ui(interaction.guild, ban_embed)
 
         # 8. Audit Log
-        fields = [
-            ("Player",   f"{user.mention} (`{user.id}`)",       True),
-            ("IGN",      player_record.get("ign", "N/A"),       True),
-            ("Duration", dur_text,                              True),
-            ("Reason",   reason.strip(),                        False),
-            ("Staff",    f"{interaction.user.mention} (`{interaction.user.id}`)", False),
-        ]
-        if isinstance(banned_until_dt, datetime):
-            fields.append(("Expires", f"<t:{int(banned_until_dt.timestamp())}:R>", True))
-
+        expires_str = f" • Expires <t:{int(banned_until_dt.timestamp())}:R>" if isinstance(banned_until_dt, datetime) else ""
         await send_log(
             self.bot,
             title="🔨 Player Banned",
-            description=f"{user.mention} was banned from matchmaking by {interaction.user.mention}",
+            description=(
+                f"{user.mention} banned {dur_text}{expires_str}\n"
+                f"**Reason:** {reason.strip()}"
+            ),
             colour=COL_DANGER,
-            fields=fields,
         )
 
         channel_note = f"\n• **UI Announcement Channel:** {ban_msg.channel.mention}" if ban_msg else ""
@@ -719,17 +712,11 @@ class AdminCog(commands.Cog, name="Admin"):
         unban_msg = await self._send_ban_channel_ui(interaction.guild, unban_embed)
 
         # 6. Audit Log
-        fields = [
-            ("Player", f"{user.mention} (`{user.id}`)",       True),
-            ("IGN",    player_record.get("ign", "N/A"),       True),
-            ("Staff",  f"{interaction.user.mention} (`{interaction.user.id}`)", False),
-        ]
         await send_log(
             self.bot,
             title="🔓 Player Unbanned",
-            description=f"{user.mention} was unbanned by {interaction.user.mention}",
+            description=f"{user.mention} ban lifted — queue access restored.",
             colour=COL_SUCCESS,
-            fields=fields,
         )
 
         channel_note = f" Posted notice to {unban_msg.channel.mention}." if unban_msg else ""
