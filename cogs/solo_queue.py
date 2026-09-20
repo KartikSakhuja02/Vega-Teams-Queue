@@ -4545,12 +4545,40 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         # 4. Atomic concurrency claim / lock and IMMEDIATELY release all players to IDLE in database
         claimed, err_reason, _ = await db.claim_solo_match_result_submission(
-            match["id"], interaction.user.id
+            match["id"], interaction.user.id, is_staff=is_staff
         )
         if not claimed:
             await interaction.response.send_message(f"❌ {err_reason}", ephemeral=True)
             return
 
+        try:
+            await self._run_submit_result_pipeline(
+                interaction=interaction,
+                match=match,
+                screenshot=screenshot,
+                all_match_pids=all_match_pids,
+                t1_pids=t1_pids,
+                t2_pids=t2_pids,
+            )
+        except Exception as exc:
+            log.exception("Unexpected error in result submission for match #%d: %s", match["id"], exc)
+            await db.release_solo_match_result_submission(match["id"])
+            try:
+                await interaction.edit_original_response(
+                    content=f"❌ **Error processing match result:** `{exc}`\nSubmission lock released. Please try submitting again."
+                )
+            except Exception:
+                pass
+
+    async def _run_submit_result_pipeline(
+        self,
+        interaction: discord.Interaction,
+        match: dict,
+        screenshot: discord.Attachment,
+        all_match_pids: list[int],
+        t1_pids: list[int],
+        t2_pids: list[int],
+    ) -> None:
         # 4b. Immediately make all match participants IDLE in the database so they can join a new queue right now
         try:
             await db.release_all_match_players_to_idle(match["id"], all_match_pids)
@@ -5168,6 +5196,81 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         match_id: Optional[int] = None,
     ) -> None:
         await self._handle_cancel_match(interaction, match_id=match_id)
+
+    @app_commands.command(
+        name="unlock_submission",
+        description="Unlock a stuck match result submission so players can submit again (Staff only).",
+    )
+    @app_commands.describe(
+        match_id="Optional match ID to unlock if running outside the match channel"
+    )
+    async def unlock_submission_command(
+        self,
+        interaction: discord.Interaction,
+        match_id: Optional[int] = None,
+    ) -> None:
+        """Staff-only command to revert a stuck PROCESSING_RESULT match back to IN_PROGRESS."""
+        await self._handle_unlock_submission(interaction, match_id=match_id)
+
+    @app_commands.command(
+        name="unlock_match",
+        description="Unlock a stuck match result submission so players can submit again (Staff only).",
+    )
+    @app_commands.describe(
+        match_id="Optional match ID to unlock if running outside the match channel"
+    )
+    async def unlock_match_command(
+        self,
+        interaction: discord.Interaction,
+        match_id: Optional[int] = None,
+    ) -> None:
+        """Staff-only command to revert a stuck PROCESSING_RESULT match back to IN_PROGRESS."""
+        await self._handle_unlock_submission(interaction, match_id=match_id)
+
+    async def _handle_unlock_submission(
+        self,
+        interaction: discord.Interaction,
+        match_id: Optional[int] = None,
+    ) -> None:
+        if not isinstance(interaction.user, discord.Member) or not _is_admin(interaction.user):
+            await interaction.response.send_message(
+                "❌ You do not have staff permissions to use this command.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        match = None
+        if match_id is not None:
+            match = await db.get_solo_match_by_id(match_id)
+        else:
+            match = await db.get_solo_match_by_channel(interaction.channel_id)
+
+        if not match:
+            await interaction.followup.send("❌ No match found for this channel or match ID.", ephemeral=True)
+            return
+
+        m_id = match["id"]
+        status = match.get("status")
+        if status != "PROCESSING_RESULT":
+            await interaction.followup.send(
+                f"ℹ️ Match #{m_id} is currently `{status}` (not `PROCESSING_RESULT`). No unlock needed.",
+                ephemeral=True,
+            )
+            return
+
+        await db.release_solo_match_result_submission(m_id)
+        await interaction.followup.send(
+            f"✅ Successfully unlocked Match #{m_id}! Status reverted to `IN_PROGRESS`. Players can now use `/submit_result`.",
+            ephemeral=True,
+        )
+        if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+            try:
+                await interaction.channel.send(
+                    f"🔓 Match #{m_id} result submission was unlocked by {interaction.user.mention}. You can now submit the scoreboard screenshot using `/submit_result`."
+                )
+            except Exception:
+                pass
 
     async def _handle_cancel_match(
         self,

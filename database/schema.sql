@@ -331,6 +331,7 @@ CREATE TABLE IF NOT EXISTS solo_matches (
     team1_score             INT,
     team2_score             INT,
     submitted_by            BIGINT,
+    submitted_at            TIMESTAMPTZ,
     screenshot_url          TEXT,
     mvp_player_id           BIGINT,
     created_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),

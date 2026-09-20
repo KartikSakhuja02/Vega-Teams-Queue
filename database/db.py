@@ -60,6 +60,7 @@ async def _apply_schema() -> None:
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS team1_score INT;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS team2_score INT;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS submitted_by BIGINT;
+                ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS screenshot_url TEXT;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS mvp_player_id BIGINT;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS voice_lobby_id BIGINT;
@@ -2525,9 +2526,27 @@ async def release_all_match_players_to_idle(match_id: int, player_ids: list[int]
 async def cleanup_stale_match_statuses() -> None:
     """
     Startup & health check: automatically free any player whose active match
-    has already submitted results or has concluded.
+    has already submitted results or has concluded, and un-stick any match
+    whose result submission was interrupted by a restart.
     """
     pool = get_pool()
+    try:
+        # 1. Any match left in PROCESSING_RESULT on startup was interrupted when the bot shut down.
+        # Revert it back to IN_PROGRESS so players can re-submit results cleanly.
+        res = await pool.execute(
+            """
+            UPDATE solo_matches
+            SET status = 'IN_PROGRESS',
+                submitted_by = NULL,
+                submitted_at = NULL
+            WHERE status = 'PROCESSING_RESULT';
+            """
+        )
+        if "UPDATE" in res and res != "UPDATE 0":
+            log.info("Reset interrupted PROCESSING_RESULT matches back to IN_PROGRESS: %s", res)
+    except Exception as e:
+        log.warning("Could not reset PROCESSING_RESULT matches on startup: %s", e)
+
     try:
         await pool.execute(
             """
@@ -2693,11 +2712,20 @@ async def delete_matchmaking_verification(orig_message_id: int) -> None:
 # Match Result Submission & Leaderboard Helpers
 # =============================================================================
 
-async def claim_solo_match_result_submission(match_id: int, user_id: int) -> tuple[bool, str, Optional[dict]]:
+async def claim_solo_match_result_submission(
+    match_id: int, user_id: int, is_staff: bool = False
+) -> tuple[bool, str, Optional[dict]]:
     """
     Atomically transition match from IN_PROGRESS to PROCESSING_RESULT,
     and release all match participants to IDLE so they can join a new queue immediately.
     Guarantees only one player's submission is processed at a time.
+    Allows claiming if:
+      - Match is IN_PROGRESS
+      - Or match is PROCESSING_RESULT and:
+          * is_staff is True (admin override)
+          * or submitted_by == user_id (re-submit / retry)
+          * or submitted_at IS NULL (orphaned legacy lock)
+          * or submitted_at < NOW() - INTERVAL '90 seconds' (timed out processing)
     Returns (success, reason_if_failed, match_dict).
     """
     pool = get_pool()
@@ -2707,12 +2735,24 @@ async def claim_solo_match_result_submission(match_id: int, user_id: int) -> tup
                 """
                 UPDATE solo_matches
                 SET status = 'PROCESSING_RESULT',
-                    submitted_by = $1
-                WHERE id = $2 AND status = 'IN_PROGRESS'
+                    submitted_by = $1,
+                    submitted_at = NOW()
+                WHERE id = $2 AND (
+                    status = 'IN_PROGRESS'
+                    OR (
+                        status = 'PROCESSING_RESULT' AND (
+                            $3::BOOLEAN = TRUE
+                            OR submitted_by = $1
+                            OR submitted_at IS NULL
+                            OR submitted_at < NOW() - INTERVAL '90 seconds'
+                        )
+                    )
+                )
                 RETURNING *
                 """,
                 user_id,
                 match_id,
+                is_staff,
             )
             if row:
                 m_dict = dict(row)
@@ -2738,7 +2778,11 @@ async def claim_solo_match_result_submission(match_id: int, user_id: int) -> tup
         return False, "Match not found.", None
     status = current["status"]
     if status == "PROCESSING_RESULT":
-        return False, "A match result screenshot has already been submitted and is currently being processed by another player. Please wait.", dict(current)
+        return (
+            False,
+            "A match result screenshot has already been submitted and is currently being processed by another player. Please wait a moment for analysis to complete.",
+            dict(current),
+        )
     if status == "COMPLETED":
         return False, "Match results have already been finalized and recorded for this match.", dict(current)
     if status == "CANCELLED":
@@ -2752,7 +2796,8 @@ async def release_solo_match_result_submission(match_id: int) -> None:
         """
         UPDATE solo_matches
         SET status = 'IN_PROGRESS',
-            submitted_by = NULL
+            submitted_by = NULL,
+            submitted_at = NULL
         WHERE id = $1 AND status = 'PROCESSING_RESULT'
         """,
         match_id,
