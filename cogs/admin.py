@@ -635,14 +635,19 @@ class AdminCog(commands.Cog, name="Admin"):
         ban_msg = await self._send_ban_channel_ui(interaction.guild, ban_embed)
 
         # 8. Audit Log
-        expires_str = f" • Expires <t:{int(banned_until_dt.timestamp())}:R>" if isinstance(banned_until_dt, datetime) else ""
+        banned_at_ts = int(banned_at_dt.timestamp()) if isinstance(banned_at_dt, datetime) else None
+        banned_until_ts = int(banned_until_dt.timestamp()) if isinstance(banned_until_dt, datetime) else None
+        desc_parts = [f"{user.mention}"]
+        if banned_at_ts:
+            desc_parts.append(f"Issued: <t:{banned_at_ts}:f>")
+        if banned_until_ts:
+            desc_parts.append(f"Expires: <t:{banned_until_ts}:f> (<t:{banned_until_ts}:R>)")
+        else:
+            desc_parts.append("Duration: Permanent")
         await send_log(
             self.bot,
             title="🔨 Player Banned",
-            description=(
-                f"{user.mention} banned {dur_text}{expires_str}\n"
-                f"**Reason:** {reason.strip()}"
-            ),
+            description="\n".join(desc_parts),
             colour=COL_DANGER,
         )
 
