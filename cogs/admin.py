@@ -163,22 +163,54 @@ def _build_queue_ban_embed(
     admin: discord.User | discord.Member,
     guild: Optional[discord.Guild] = None,
 ) -> discord.Embed:
-    """Build a minimal announcement embed for a banned player."""
+    """Build an announcement embed for a banned player."""
+    embed = discord.Embed(
+        title="🔨 Matchmaking Ban Enacted",
+        description=(
+            f"A queue ban has been issued for {user.mention}.\n"
+            f"Access to 10-man matchmaking, live queues, and team scrims has been revoked."
+        ),
+        colour=discord.Colour.from_str("#FF4655"),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
+
+    embed.add_field(
+        name="👤 Banned Player",
+        value=user.mention,
+        inline=False,
+    )
+
     now_ts = int(datetime.now(timezone.utc).timestamp())
     banned_at_ts = int(banned_at_dt.timestamp()) if isinstance(banned_at_dt, datetime) else now_ts
 
     if isinstance(banned_until_dt, datetime):
         banned_until_ts = int(banned_until_dt.timestamp())
-        time_line = f"Issued: <t:{banned_at_ts}:f> • Expires: <t:{banned_until_ts}:f> (<t:{banned_until_ts}:R>)"
+        dur_label = _fmt_duration(duration_hours) if duration_hours else "Temporary"
+        time_display = (
+            f"• **Duration:** `{dur_label}`\n"
+            f"• **Time Remaining:** <t:{banned_until_ts}:R>\n"
+            f"• **Ban Expiration:** <t:{banned_until_ts}:F>"
+        )
     else:
-        time_line = f"Issued: <t:{banned_at_ts}:f> • Duration: Permanent"
+        time_display = (
+            f"• **Duration:** `Permanent`\n"
+            f"• **Time Remaining:** `Indefinite (Never)`\n"
+            f"• **Ban Expiration:** `Never`"
+        )
 
-    embed = discord.Embed(
-        title="🔨 Queue Ban Enacted",
-        description=f"{user.mention}\n{time_line}",
-        colour=discord.Colour.from_str("#FF4655"),
-        timestamp=datetime.now(timezone.utc),
+    embed.add_field(
+        name="⏳ Ban Duration & Time",
+        value=time_display,
+        inline=False,
     )
+
+    embed.add_field(
+        name="📝 Reason",
+        value=f"```{reason.strip()}```",
+        inline=False,
+    )
+
     icon_url = guild.icon.url if guild and guild.icon else None
     embed.set_footer(text="Vega Esports • Queue Moderation System", icon_url=icon_url)
     return embed
@@ -541,11 +573,13 @@ class AdminCog(commands.Cog, name="Admin"):
         banned_until_ts = int(banned_until_dt.timestamp()) if isinstance(banned_until_dt, datetime) else None
         desc_parts = [f"{user.mention}"]
         if banned_at_ts:
-            desc_parts.append(f"Issued: <t:{banned_at_ts}:f>")
+            desc_parts.append(f"Issued: <t:{banned_at_ts}:F> (<t:{banned_at_ts}:R>)")
         if banned_until_ts:
-            desc_parts.append(f"Expires: <t:{banned_until_ts}:f> (<t:{banned_until_ts}:R>)")
+            desc_parts.append(f"Expires: <t:{banned_until_ts}:F> (<t:{banned_until_ts}:R>)")
         else:
             desc_parts.append("Duration: Permanent")
+        if reason:
+            desc_parts.append(f"Reason: `{reason.strip()}`")
         await send_log(
             self.bot,
             title="🔨 Player Banned",
