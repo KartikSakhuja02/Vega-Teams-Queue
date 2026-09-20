@@ -163,68 +163,22 @@ def _build_queue_ban_embed(
     admin: discord.User | discord.Member,
     guild: Optional[discord.Guild] = None,
 ) -> discord.Embed:
-    """Build a rich, real-time updated announcement embed for a banned player."""
-    embed = discord.Embed(
-        title="🔨 Matchmaking Ban Enacted",
-        description=(
-            f"> **A queue ban has been issued for {user.mention}.**\n"
-            f"> Access to 10-man matchmaking, live queues, and team scrims has been revoked."
-        ),
-        colour=discord.Colour.from_str("#FF4655"),
-        timestamp=datetime.now(timezone.utc),
-    )
-    embed.set_thumbnail(url=user.display_avatar.url)
-
-    ign = player_record.get("ign") or "N/A"
-    elo = player_record.get("elo", 1000)
-    region = player_record.get("region") or "Global"
-
-    embed.add_field(
-        name="👤 Banned Player",
-        value=f"{user.mention}\n**IGN:** `{ign}`\n**Rating:** `{elo} ELO` `[{region}]`\n**User ID:** `{user.id}`",
-        inline=False,
-    )
-
+    """Build a minimal announcement embed for a banned player."""
     now_ts = int(datetime.now(timezone.utc).timestamp())
     banned_at_ts = int(banned_at_dt.timestamp()) if isinstance(banned_at_dt, datetime) else now_ts
 
     if isinstance(banned_until_dt, datetime):
         banned_until_ts = int(banned_until_dt.timestamp())
-        dur_label = _fmt_duration(duration_hours) if duration_hours else "Temporary"
-        time_display = (
-            f"• **Duration:** `{dur_label}`\n"
-            f"• **Time Remaining:** <t:{banned_until_ts}:R>\n"
-            f"• **Ban Expiration:** <t:{banned_until_ts}:F>"
-        )
+        time_line = f"Issued: <t:{banned_at_ts}:f> • Expires: <t:{banned_until_ts}:f> (<t:{banned_until_ts}:R>)"
     else:
-        dur_label = "Permanent"
-        time_display = (
-            f"• **Duration:** `Permanent`\n"
-            f"• **Time Remaining:** `Indefinite (Never)`\n"
-            f"• **Ban Expiration:** `Never`"
-        )
+        time_line = f"Issued: <t:{banned_at_ts}:f> • Duration: Permanent"
 
-    embed.add_field(
-        name="⏳ Ban Duration & Time",
-        value=time_display,
-        inline=False,
+    embed = discord.Embed(
+        title="🔨 Queue Ban Enacted",
+        description=f"{user.mention}\n{time_line}",
+        colour=discord.Colour.from_str("#FF4655"),
+        timestamp=datetime.now(timezone.utc),
     )
-
-    embed.add_field(
-        name="📝 Reason",
-        value=f"```{reason.strip()}```",
-        inline=False,
-    )
-
-    embed.add_field(
-        name="🛡️ Staff Information",
-        value=(
-            f"• **Moderator:** {admin.mention} (`{admin.id}`)\n"
-            f"• **Issued At:** <t:{banned_at_ts}:F> (<t:{banned_at_ts}:R>)"
-        ),
-        inline=False,
-    )
-
     icon_url = guild.icon.url if guild and guild.icon else None
     embed.set_footer(text="Vega Esports • Queue Moderation System", icon_url=icon_url)
     return embed
@@ -236,37 +190,14 @@ def _build_queue_unban_embed(
     admin: discord.User | discord.Member,
     guild: Optional[discord.Guild] = None,
 ) -> discord.Embed:
-    """Build a rich announcement embed when a player's ban is lifted."""
+    """Build a minimal announcement embed when a player's ban is lifted."""
+    now_ts = int(datetime.now(timezone.utc).timestamp())
     embed = discord.Embed(
-        title="🔓 Matchmaking Ban Revoked",
-        description=(
-            f"> **Matchmaking ban has been lifted for {user.mention}.**\n"
-            f"> Normal queue and matchmaking access has been fully restored."
-        ),
+        title="🔓 Queue Ban Lifted",
+        description=f"{user.mention}\nLifted: <t:{now_ts}:f>",
         colour=COL_SUCCESS,
         timestamp=datetime.now(timezone.utc),
     )
-    embed.set_thumbnail(url=user.display_avatar.url)
-
-    ign = player_record.get("ign") or "N/A"
-    elo = player_record.get("elo", 1000)
-    region = player_record.get("region") or "Global"
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-
-    embed.add_field(
-        name="👤 Player",
-        value=f"{user.mention}\n**IGN:** `{ign}`\n**Rating:** `{elo} ELO` `[{region}]`\n**User ID:** `{user.id}`",
-        inline=False,
-    )
-    embed.add_field(
-        name="🛡️ Staff Information",
-        value=(
-            f"• **Unbanned By:** {admin.mention} (`{admin.id}`)\n"
-            f"• **Lifted At:** <t:{now_ts}:F> (<t:{now_ts}:R>)"
-        ),
-        inline=False,
-    )
-
     icon_url = guild.icon.url if guild and guild.icon else None
     embed.set_footer(text="Vega Esports • Queue Moderation System", icon_url=icon_url)
     return embed
@@ -277,45 +208,16 @@ def _build_queue_expired_unban_embed(
     player_record: dict,
     guild: Optional[discord.Guild] = None,
 ) -> discord.Embed:
-    """Build a rich announcement embed when a player's temporary ban expires automatically."""
+    """Build a minimal announcement embed when a player's temporary ban expires automatically."""
     mention = user_or_id.mention if hasattr(user_or_id, "mention") else f"<@{user_or_id}>"
-    user_id = getattr(user_or_id, "id", user_or_id)
-    avatar_url = getattr(user_or_id, "display_avatar", None)
-    avatar_url = avatar_url.url if avatar_url else None
+    now_ts = int(datetime.now(timezone.utc).timestamp())
 
     embed = discord.Embed(
-        title="🔓 Matchmaking Ban Expired",
-        description=(
-            f"> **Matchmaking ban has expired for {mention}.**\n"
-            f"> Temporary ban duration has concluded. Normal queue and matchmaking access has been fully restored."
-        ),
+        title="🔓 Queue Ban Expired",
+        description=f"{mention}\nExpired: <t:{now_ts}:f>",
         colour=COL_SUCCESS,
         timestamp=datetime.now(timezone.utc),
     )
-    if avatar_url:
-        embed.set_thumbnail(url=avatar_url)
-
-    ign = player_record.get("ign") or "N/A"
-    elo = player_record.get("elo", 1000)
-    region = player_record.get("region") or "Global"
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    ban_reason = player_record.get("ban_reason") or "Matchmaking violation"
-
-    embed.add_field(
-        name="👤 Player",
-        value=f"{mention}\n**IGN:** `{ign}`\n**Rating:** `{elo} ELO` `[{region}]`\n**User ID:** `{user_id}`",
-        inline=False,
-    )
-    embed.add_field(
-        name="⏳ Expiration Details",
-        value=(
-            f"• **Original Reason:** {ban_reason}\n"
-            f"• **Status:** `Active / Unbanned`\n"
-            f"• **Expired At:** <t:{now_ts}:F> (<t:{now_ts}:R>)"
-        ),
-        inline=False,
-    )
-
     icon_url = guild.icon.url if guild and guild.icon else None
     embed.set_footer(text="Vega Esports • Queue Moderation System", icon_url=icon_url)
     return embed
