@@ -30,6 +30,23 @@ from utils.staff import is_staff, _is_admin, STAFF_ROLE_NAMES, get_staff_role_id
 
 
 
+BAN_ESCALATION_TIERS: dict[int, tuple[Optional[int], str]] = {
+    1: (1, "1 hour"),
+    2: (6, "6 hours"),
+    3: (12, "12 hours"),
+    4: (24, "24 hours"),
+    5: (168, "7 days"),
+    6: (720, "30 days"),
+}
+
+
+def get_escalated_ban_duration(next_ban_number: int) -> tuple[Optional[int], str]:
+    """Returns (duration_hours, display_label) based on the ban tier (1-indexed)."""
+    if next_ban_number in BAN_ESCALATION_TIERS:
+        return BAN_ESCALATION_TIERS[next_ban_number]
+    return (None, "Permanent")
+
+
 def _fmt_duration(hours: int) -> str:
     if hours < 24:
         return f"{hours} hour{'s' if hours != 1 else ''}"
@@ -53,10 +70,14 @@ def _build_admin_commands_embed() -> discord.Embed:
     embed.add_field(
         name="🔨 Player Moderation & Bans",
         value=(
-            "`/admin player_ban user:<@user> [duration_hours:<int>] reason:<text>`\n"
-            "Ban a player from matchmaking and live queues (temporary or permanent).\n\n"
+            "`/admin player_ban user:<@user> reason:<text> [duration_hours:<int>] [permanent:bool]`\n"
+            "Ban a player (auto-escalates: 1h -> 6h -> 12h -> 24h -> 7d -> 30d -> Permanent).\n\n"
             "`/admin player_unban user:<@user>`\n"
-            "Lift an active ban, clear cooldown penalties, and restore normal queue access."
+            "Lift an active ban, clear cooldown penalties, and restore normal queue access.\n\n"
+            "`/admin check_bans user:<@user>`\n"
+            "View a player's ban count history, status, and next escalation duration.\n\n"
+            "`/admin clear_bans user:<@user> [amount:<int>]`\n"
+            "Clear/reduce a player's recorded ban count (resets to 0 if amount is omitted)."
         ),
         inline=False,
     )
@@ -466,6 +487,7 @@ class AdminCog(commands.Cog, name="Admin"):
         user: discord.User,
         reason: str,
         duration_hours: Optional[int] = None,
+        permanent: Optional[bool] = False,
     ) -> None:
         """Core logic for banning a player and posting the real-time UI card."""
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
@@ -504,17 +526,23 @@ class AdminCog(commands.Cog, name="Admin"):
             )
             return
 
-        # 4. Check duration validity
-        if duration_hours is not None and duration_hours <= 0:
-            await interaction.followup.send("Duration in hours must be a positive number.", ephemeral=True)
-            return
+        # 4. Determine ban duration & auto-escalation tier
+        prev_ban_count = player_record.get("ban_count") or 0
+        next_ban_tier = prev_ban_count + 1
+
+        if permanent:
+            effective_duration = None
+        elif duration_hours is not None and duration_hours > 0:
+            effective_duration = duration_hours
+        else:
+            effective_duration, _ = get_escalated_ban_duration(next_ban_tier)
 
         # 5. Apply ban in database
         updated = await db.ban_player(
             discord_id=user.id,
             reason=reason.strip(),
             banned_by=interaction.user.id,
-            duration_hours=duration_hours,
+            duration_hours=effective_duration,
         )
         if not updated:
             await interaction.followup.send("Failed to ban player due to a database error.", ephemeral=True)
@@ -528,9 +556,10 @@ class AdminCog(commands.Cog, name="Admin"):
         except Exception as e:
             log.debug("Error during queue eviction for banned user %d: %s", user.id, e)
 
-        dur_text = f"`{_fmt_duration(duration_hours)}`" if duration_hours else "`Permanent`"
+        dur_text = f"`{_fmt_duration(effective_duration)}`" if effective_duration else "`Permanent`"
         banned_until_dt = updated.get("banned_until")
         banned_at_dt = updated.get("banned_at")
+        current_ban_count = updated.get("ban_count", next_ban_tier)
 
         if isinstance(banned_until_dt, datetime):
             banned_until_ts = int(banned_until_dt.timestamp())
@@ -560,7 +589,7 @@ class AdminCog(commands.Cog, name="Admin"):
             user=user,
             player_record=player_record,
             reason=reason,
-            duration_hours=duration_hours,
+            duration_hours=effective_duration,
             banned_until_dt=banned_until_dt,
             banned_at_dt=banned_at_dt,
             admin=interaction.user,
@@ -572,6 +601,7 @@ class AdminCog(commands.Cog, name="Admin"):
         banned_at_ts = int(banned_at_dt.timestamp()) if isinstance(banned_at_dt, datetime) else None
         banned_until_ts = int(banned_until_dt.timestamp()) if isinstance(banned_until_dt, datetime) else None
         desc_parts = [f"{user.mention}"]
+        desc_parts.append(f"Ban Count: #{current_ban_count}")
         if banned_at_ts:
             desc_parts.append(f"Issued: <t:{banned_at_ts}:F> (<t:{banned_at_ts}:R>)")
         if banned_until_ts:
@@ -590,10 +620,121 @@ class AdminCog(commands.Cog, name="Admin"):
         channel_note = f"\n• **UI Announcement Channel:** {ban_msg.channel.mention}" if ban_msg else ""
         await interaction.followup.send(
             f"✅ Successfully banned {user.mention} ({player_record.get('ign')}).\n"
+            f"• **Ban Count:** #{current_ban_count}\n"
             f"• **Duration:** {dur_text}\n"
             f"• **Reason:** {reason.strip()}{channel_note}",
             ephemeral=True,
         )
+
+    async def _handle_check_bans(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Check a player's ban history count and current status."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("You do not have permission to use admin commands.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        player_record = await db.get_player(user.id)
+        if not player_record:
+            await interaction.followup.send(f"{user.mention} is not registered in the database.", ephemeral=True)
+            return
+
+        ban_count = player_record.get("ban_count") or 0
+        is_banned, ban_reason, banned_until, _ = await db.get_player_ban_status(user.id)
+
+        next_tier = ban_count + 1
+        _, next_dur_label = get_escalated_ban_duration(next_tier)
+
+        status_str = "🔴 Currently Banned" if is_banned else "🟢 Active (Not Banned)"
+        
+        embed = discord.Embed(
+            title=f"📊 Ban Records for {user.display_name}",
+            colour=COL_DANGER if is_banned else COL_SUCCESS,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="Player", value=f"{user.mention} (`{player_record.get('ign', 'N/A')}`)", inline=False)
+        embed.add_field(name="Ban Status", value=status_str, inline=True)
+        embed.add_field(name="Total Bans Received", value=f"`{ban_count}`", inline=True)
+        embed.add_field(name=f"Next Ban Tier (#{next_tier})", value=f"`{next_dur_label}`", inline=False)
+        if is_banned:
+            if banned_until:
+                ts = int(banned_until.timestamp())
+                embed.add_field(name="Current Ban Expires", value=f"<t:{ts}:F> (<t:{ts}:R>)", inline=False)
+            else:
+                embed.add_field(name="Current Ban Duration", value="`Permanent`", inline=False)
+            if ban_reason:
+                embed.add_field(name="Current Reason", value=f"```{ban_reason}```", inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    async def _handle_clear_bans(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        amount: Optional[int] = None,
+    ) -> None:
+        """Clear or reduce a player's ban history count."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("You do not have permission to use admin commands.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        player_record = await db.get_player(user.id)
+        if not player_record:
+            await interaction.followup.send(f"{user.mention} is not registered in the database.", ephemeral=True)
+            return
+
+        old_count = player_record.get("ban_count") or 0
+        if old_count == 0:
+            await interaction.followup.send(f"{user.mention} currently has 0 recorded bans.", ephemeral=True)
+            return
+
+        updated = await db.clear_player_bans(user.id, amount)
+        new_count = updated.get("ban_count", 0) if updated else 0
+
+        next_tier = new_count + 1
+        _, next_dur_label = get_escalated_ban_duration(next_tier)
+
+        if amount is not None and amount > 0:
+            msg = (
+                f"✅ Cleared `{amount}` ban(s) for {user.mention}.\n"
+                f"• **Previous Ban Count:** `{old_count}`\n"
+                f"• **New Ban Count:** `{new_count}`\n"
+                f"• **Next Ban Tier (#{next_tier}):** `{next_dur_label}`"
+            )
+        else:
+            msg = (
+                f"✅ Cleared **all** ban records for {user.mention}.\n"
+                f"• **Previous Ban Count:** `{old_count}`\n"
+                f"• **New Ban Count:** `0`\n"
+                f"• **Next Ban Tier (#1):** `1 hour`"
+            )
+
+        await send_log(
+            self.bot,
+            title="🧹 Ban History Cleared",
+            description=(
+                f"Staff {interaction.user.mention} cleared ban history for {user.mention}.\n"
+                f"Bans: `{old_count}` ➔ `{new_count}`"
+            ),
+            colour=COL_SUCCESS,
+        )
+
+        await interaction.followup.send(msg, ephemeral=True)
 
     async def _handle_player_unban(
         self,
@@ -668,14 +809,17 @@ class AdminCog(commands.Cog, name="Admin"):
 
     # ── Slash Commands (/admin player_ban & /admin_player_ban) ──────────────
 
+    # ── Slash Commands (/admin player_ban & /admin_player_ban) ──────────────
+
     @admin_group.command(
         name="player_ban",
-        description="Ban a player from matchmaking and live queues.",
+        description="Ban a player from matchmaking and live queues (auto-escalating or custom).",
     )
     @app_commands.describe(
         user="The player to ban from matchmaking.",
         reason="The infraction reason for this ban.",
-        duration_hours="Optional ban duration in hours (leave empty for permanent).",
+        duration_hours="Optional manual ban duration in hours (leave empty for auto escalation).",
+        permanent="Set to True to issue an explicit permanent ban.",
     )
     async def player_ban(
         self,
@@ -683,18 +827,20 @@ class AdminCog(commands.Cog, name="Admin"):
         user: discord.User,
         reason: str,
         duration_hours: Optional[int] = None,
+        permanent: Optional[bool] = False,
     ) -> None:
         """Ban a player from queues and matches."""
-        await self._handle_player_ban(interaction, user, reason, duration_hours)
+        await self._handle_player_ban(interaction, user, reason, duration_hours, permanent)
 
     @app_commands.command(
         name="admin_player_ban",
-        description="Ban a player from matchmaking and live queues (Realtime UI).",
+        description="Ban a player from matchmaking and live queues (auto-escalating or custom).",
     )
     @app_commands.describe(
         user="The player to ban from matchmaking.",
         reason="The infraction reason for this ban.",
-        duration_hours="Optional ban duration in hours (leave empty for permanent).",
+        duration_hours="Optional manual ban duration in hours (leave empty for auto escalation).",
+        permanent="Set to True to issue an explicit permanent ban.",
     )
     async def admin_player_ban_command(
         self,
@@ -702,9 +848,10 @@ class AdminCog(commands.Cog, name="Admin"):
         user: discord.User,
         reason: str,
         duration_hours: Optional[int] = None,
+        permanent: Optional[bool] = False,
     ) -> None:
         """Top-level command alias for /admin player_ban."""
-        await self._handle_player_ban(interaction, user, reason, duration_hours)
+        await self._handle_player_ban(interaction, user, reason, duration_hours, permanent)
 
     @admin_group.command(
         name="player_unban",
@@ -735,6 +882,70 @@ class AdminCog(commands.Cog, name="Admin"):
     ) -> None:
         """Top-level command alias for /admin player_unban."""
         await self._handle_player_unban(interaction, user)
+
+    @admin_group.command(
+        name="check_bans",
+        description="Check a player's ban history count, status, and next escalation tier.",
+    )
+    @app_commands.describe(
+        user="The player to inspect.",
+    )
+    async def check_bans(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Check a player's ban records."""
+        await self._handle_check_bans(interaction, user)
+
+    @app_commands.command(
+        name="admin_check_bans",
+        description="Check a player's ban history count, status, and next escalation tier.",
+    )
+    @app_commands.describe(
+        user="The player to inspect.",
+    )
+    async def admin_check_bans_command(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Top-level command alias for /admin check_bans."""
+        await self._handle_check_bans(interaction, user)
+
+    @admin_group.command(
+        name="clear_bans",
+        description="Clear or reduce a player's recorded ban count.",
+    )
+    @app_commands.describe(
+        user="The player whose ban count to clear/reduce.",
+        amount="Optional number of bans to clear (leave empty to clear all).",
+    )
+    async def clear_bans(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        amount: Optional[int] = None,
+    ) -> None:
+        """Clear a player's ban count."""
+        await self._handle_clear_bans(interaction, user, amount)
+
+    @app_commands.command(
+        name="admin_clear_bans",
+        description="Clear or reduce a player's recorded ban count.",
+    )
+    @app_commands.describe(
+        user="The player whose ban count to clear/reduce.",
+        amount="Optional number of bans to clear (leave empty to clear all).",
+    )
+    async def admin_clear_bans_command(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        amount: Optional[int] = None,
+    ) -> None:
+        """Top-level command alias for /admin clear_bans."""
+        await self._handle_clear_bans(interaction, user, amount)
 
     async def _autocomplete_teams(
         self,

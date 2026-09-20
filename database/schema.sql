@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS players (
     banned_until     TIMESTAMPTZ,
     ban_reason       TEXT,
     banned_by        BIGINT,
+    ban_count        INT          NOT NULL DEFAULT 0,
     elo              INT          NOT NULL DEFAULT 1000,
     kills            INT          NOT NULL DEFAULT 0,
     deaths           INT          NOT NULL DEFAULT 0,

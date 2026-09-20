@@ -64,10 +64,13 @@ async def _apply_schema() -> None:
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS screenshot_url TEXT;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS mvp_player_id BIGINT;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS voice_lobby_id BIGINT;
+
+                ALTER TABLE players ADD COLUMN IF NOT EXISTS ban_count INT NOT NULL DEFAULT 0;
+                UPDATE players SET ban_count = 1 WHERE (is_banned = TRUE OR banned_at IS NOT NULL) AND (ban_count IS NULL OR ban_count = 0);
                 """
             )
         except Exception as e:
-            log.warning("Could not ensure solo_matches result columns: %s", e)
+            log.warning("Could not ensure schema columns/migration: %s", e)
 
 
 
@@ -593,6 +596,7 @@ async def ban_player(
 ) -> Optional[dict]:
     """
     Ban a player, storing the reason, admin ID, and optional expiration timestamp.
+    Increments their ban_count by 1.
     Also resets their status to IDLE and clears any existing penalty timestamp.
     """
     try:
@@ -605,6 +609,7 @@ async def ban_player(
                     banned_until    = NOW() + ($1 || ' hours')::INTERVAL,
                     ban_reason      = $2,
                     banned_by       = $3,
+                    ban_count       = COALESCE(ban_count, 0) + 1,
                     status          = 'IDLE'::player_status_enum,
                     status_since    = NOW(),
                     penalty_ends_at = NULL
@@ -625,6 +630,7 @@ async def ban_player(
                     banned_until    = NULL,
                     ban_reason      = $1,
                     banned_by       = $2,
+                    ban_count       = COALESCE(ban_count, 0) + 1,
                     status          = 'IDLE'::player_status_enum,
                     status_since    = NOW(),
                     penalty_ends_at = NULL
@@ -638,6 +644,40 @@ async def ban_player(
         return dict(row) if row else None
     except Exception as e:
         log.error("Error banning player %d: %s", discord_id, e)
+        return None
+
+
+async def clear_player_bans(discord_id: int, amount: Optional[int] = None) -> Optional[dict]:
+    """
+    Clear or reduce a player's ban_count.
+    If amount is provided, subtracts amount from ban_count (minimum 0).
+    If amount is None, resets ban_count to 0.
+    """
+    try:
+        if amount is not None and amount > 0:
+            row = await get_pool().fetchrow(
+                """
+                UPDATE players
+                SET ban_count = GREATEST(0, COALESCE(ban_count, 0) - $1::int)
+                WHERE discord_id = $2
+                RETURNING *
+                """,
+                amount,
+                discord_id,
+            )
+        else:
+            row = await get_pool().fetchrow(
+                """
+                UPDATE players
+                SET ban_count = 0
+                WHERE discord_id = $1
+                RETURNING *
+                """,
+                discord_id,
+            )
+        return dict(row) if row else None
+    except Exception as e:
+        log.error("Error clearing bans for player %d: %s", discord_id, e)
         return None
 
 
