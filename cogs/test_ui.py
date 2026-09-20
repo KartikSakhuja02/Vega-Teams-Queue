@@ -66,7 +66,7 @@ class RegistrationV2View(ui.LayoutView):
 
         header_text = (
             "# ✦ VEGA ESPORTS — PLAYER REGISTRATION\n"
-            "`[ STATUS: REGISTRATION OPEN ]` `[ 5v5 COMPETITIVE QUEUE ]`\n\n"
+            "`[ STAGE 1 / 10 ]` `[ STATUS: REGISTRATION OPEN ]` `[ 5v5 COMPETITIVE QUEUE ]`\n\n"
             "Welcome to **Vega Esports Matchmaking**. To participate in 10-man pickup games, "
             "automated scrims, and seasonal MMR divisions, you must link your verified in-game account.\n\n"
             "### 📋 Requirements\n"
@@ -148,7 +148,7 @@ class QueueLobbyV2View(ui.LayoutView):
 
         lobby_text = (
             "# ⚔️ VEGA QUEUE [ 7 / 10 ]\n"
-            "🟢 **STATUS: MATCHMAKING ACTIVE** • `AVG MMR: 1,420` • `MAP POOL: ACTIVE 7`\n\n"
+            "`[ STAGE 2 / 10 ]` 🟢 **STATUS: MATCHMAKING ACTIVE** • `AVG MMR: 1,420` • `MAP POOL: ACTIVE 7`\n\n"
             "### 👥 Current Queue Roster\n"
             "`1.` 👑 **KartikSakhuja** — `1,650 ELO` `[IMMORTAL III]` `[EU Central]` • *2m ago*\n"
             "`2.` 🎯 **PhantomSniper** — `1,480 ELO` `[DIAMOND II]` `[EU West]` • *4m ago*\n"
@@ -245,7 +245,7 @@ class VoiceCheckInV2View(ui.LayoutView):
         deadline_ts = int(time.time()) + 120
         checkin_text = (
             "# 🚨 MATCH #420 FOUND — VOICE CHECK-IN\n"
-            f"**ALL 10 PLAYERS MUST CONNECT TO VOICE BEFORE <t:{deadline_ts}:R>**\n"
+            f"`[ STAGE 3 / 10 ]` **ALL 10 PLAYERS MUST CONNECT TO VOICE BEFORE <t:{deadline_ts}:R>**\n"
             f"Lobby Voice Channel: 🔊 `Matchmaking VC #1`\n\n"
             "### 📊 Attendance Status `[ 7 / 10 Connected ]`\n"
             "**TEAM 1 (3/5 In Voice):**\n"
@@ -292,7 +292,7 @@ class VoiceCheckInV2View(ui.LayoutView):
         btn_decline = ui.Button(
             label="Decline (Penalty)",
             style=discord.ButtonStyle.danger,
-            emoji="✕",
+            emoji="❌",
             custom_id="test_ui_decline_btn",
         )
 
@@ -323,7 +323,7 @@ class DraftPhaseV2View(ui.LayoutView):
 
         draft_text = (
             "# 👑 CAPTAIN DRAFT — MATCH #420 [Turn 3 / 7]\n"
-            "⚡ **CURRENT PICK:** `KartikSakhuja (Captain A)` — *25s remaining*\n\n"
+            "`[ STAGE 4 / 10 ]` ⚡ **CURRENT PICK:** `KartikSakhuja (Captain A)` — *25s remaining*\n\n"
             "### 🛡️ Team Rosters\n"
             "**TEAM A (2/5):**\n"
             "👑 `KartikSakhuja (Cap)` • `1,650 ELO`\n"
@@ -412,7 +412,7 @@ class MapVetoV2View(ui.LayoutView):
 
         veto_text = (
             "# 🗺️ MAP VETO — MATCH #420\n"
-            "Captains alternate banning maps until 1 decisive battleground remains.\n\n"
+            "`[ STAGE 5 / 10 ]` Captains alternate banning maps until 1 decisive battleground remains.\n\n"
             "⚡ **CURRENT TURN:** 👑 `ViperMain (Team B)` to **BAN** a map *(30s remaining)*\n\n"
             "### ❌ Banned Maps\n"
             "• ~~Ascent~~ *(Banned by Team A)*\n"
@@ -483,7 +483,7 @@ class LiveMatchRoomV2View(ui.LayoutView):
 
         match_text = (
             "# ⚔️ MATCH #420 — LIVE ON BIND\n"
-            "🔴 **STATUS: IN PROGRESS** • `SERVER: EU Central (Frankfurt)`\n\n"
+            "`[ STAGE 6 / 10 ]` 🔴 **STATUS: IN PROGRESS** • `SERVER: EU Central (Frankfurt)`\n\n"
             "### 🛡️ Team Rosters & Comms\n"
             "**TEAM 1 (Average ELO: 1,495)** • 🔊 `Voice: Team 1 VC`\n"
             "👑 `KartikSakhuja` • ⚔️ `VandalGod` • 🎯 `PhantomSniper` • 🛡️ `FrostBite` • 💣 `BlitzKrieg`\n\n"
@@ -532,7 +532,7 @@ class LiveMatchRoomV2View(ui.LayoutView):
         btn_cancel = ui.Button(
             label="Cancel Match",
             style=discord.ButtonStyle.danger,
-            emoji="✕",
+            emoji="❌",
             custom_id="test_ui_cancel",
         )
 
@@ -563,7 +563,7 @@ class ScoreOCRVerificationV2View(ui.LayoutView):
 
         ocr_text = (
             "# 🏆 MATCH #420 CONCLUDED — 13 : 9 (Team 1 Victory)\n"
-            "✨ **AI VISION OCR ANALYSIS: 98.4% CONFIDENCE (VERIFIED)**\n"
+            "`[ STAGE 7 / 10 ]` ✨ **AI VISION OCR ANALYSIS: 98.4% CONFIDENCE (VERIFIED)**\n"
             "`MAP: BIND` • `ROUNDS: 22` • `DURATION: 34m 12s`\n\n"
             "### 🎖️ Performance & ELO Adjustments\n"
             "**TEAM 1 (VICTORS) — AVERAGE GAIN +20 ELO:**\n"
@@ -648,7 +648,7 @@ class LeaderboardV2View(ui.LayoutView):
 
         lb_text = (
             "# 🏆 VEGA COMPETITIVE LEADERBOARD — SEASON 2\n"
-            "`DIVISION 1 (IMMORTAL & RADIANT)` • `TOTAL RANKED PLAYERS: 148`\n\n"
+            "`[ STAGE 8 / 10 ]` `DIVISION 1 (IMMORTAL & RADIANT)` • `TOTAL RANKED PLAYERS: 148`\n\n"
             "### 👑 The Podium\n"
             "🥇 **1st — KartikSakhuja** • `1,674 ELO` `[72.4% WR • 14 Streak]` `[IMMORTAL III]`\n"
             "🥈 **2nd — ViperMain** • `1,572 ELO` `[65.1% WR • 4 Streak]` `[IMMORTAL II]`\n"
@@ -667,9 +667,9 @@ class LeaderboardV2View(ui.LayoutView):
 
         row = ui.ActionRow()
 
-        btn_prev = ui.Button(label="Prev", style=discord.ButtonStyle.secondary, emoji="◀")
+        btn_prev = ui.Button(label="Prev", style=discord.ButtonStyle.secondary, emoji="⬅️")
         btn_page = ui.Button(label="Page 1 / 6", style=discord.ButtonStyle.secondary, disabled=True)
-        btn_next = ui.Button(label="Next", style=discord.ButtonStyle.secondary, emoji="▶")
+        btn_next = ui.Button(label="Next", style=discord.ButtonStyle.secondary, emoji="➡️")
         btn_filter = ui.Button(label="Filter Division", style=discord.ButtonStyle.primary, emoji="🔍")
 
         async def filter_cb(interaction: discord.Interaction) -> None:
@@ -700,7 +700,7 @@ class PlayerProfileV2View(ui.LayoutView):
 
         profile_text = (
             "# 👤 PLAYER DOSSIER — KartikSakhuja#VEGA\n"
-            "✨ **CURRENT TIER: IMMORTAL III** • `LEADERBOARD RANK: #1 (DIVISION 1)`\n\n"
+            "`[ STAGE 9 / 10 ]` ✨ **CURRENT TIER: IMMORTAL III** • `LEADERBOARD RANK: #1 (DIVISION 1)`\n\n"
             "### 📊 Competitive Metrics\n"
             "• **Current MMR:** `1,674 ELO` *(Peak: 1,710 ELO)*\n"
             "• **Win / Loss Record:** `42W - 16L` **(72.4% Win Rate)**\n"
@@ -757,7 +757,7 @@ class InfractionNoticeV2View(ui.LayoutView):
         expiry_ts = int(time.time()) + 86400
         ban_text = (
             "# ⛔ QUEUE INFRACTION NOTICE\n"
-            "**AN OFFICIAL LEAGUE PENALTY HAS BEEN RECORDED AGAINST THIS ACCOUNT.**\n\n"
+            "`[ STAGE 10 / 10 ]` **AN OFFICIAL LEAGUE PENALTY HAS BEEN RECORDED AGAINST THIS ACCOUNT.**\n\n"
             "### ⚠️ Infraction Breakdown\n"
             "• **Player:** `KartikSakhuja#VEGA`\n"
             "• **Violation:** `Failed Voice Check-in / Match Dodge (#420)`\n"
@@ -934,25 +934,9 @@ class TestUICog(commands.Cog, name="test_ui"):
 
     async def run_full_simulation(self, channel: discord.TextChannel | discord.Thread) -> None:
         """Posts all 10 stages sequentially in match order with a slight delay."""
-        stage_descriptions = [
-            ("Stage 1 / 10", "Player Registration & ID Linking"),
-            ("Stage 2 / 10", "Matchmaking Queue Lobby (VEGA QUEUE)"),
-            ("Stage 3 / 10", "Match Found & Voice Attendance Check-In"),
-            ("Stage 4 / 10", "Captains & Player Draft Phase"),
-            ("Stage 5 / 10", "Tactical Map Veto & Ban"),
-            ("Stage 6 / 10", "Live Match Room (In Progress)"),
-            ("Stage 7 / 10", "Scoreboard Submission & Vision AI OCR"),
-            ("Stage 8 / 10", "Competitive Leaderboard Showcase"),
-            ("Stage 9 / 10", "Player Profile Dossier"),
-            ("Stage 10 / 10", "Queue Infraction & Ban Notice"),
-        ]
-
-        for (stage_tag, subtitle), (name, view_cls) in zip(stage_descriptions, ALL_STAGES):
+        for name, view_cls in ALL_STAGES:
             try:
-                await channel.send(
-                    content=f"**`[{stage_tag}]` {subtitle}**",
-                    view=view_cls(),
-                )
+                await channel.send(view=view_cls())
                 await asyncio.sleep(1.0)
             except Exception as e:
                 log.error("Error posting simulation stage %s: %s", name, e, exc_info=True)
@@ -1032,7 +1016,6 @@ class TestUICog(commands.Cog, name="test_ui"):
         idx = int(stage)
         name, view_cls = ALL_STAGES[idx]
         await interaction.response.send_message(
-            content=f"**`[STAGE {idx + 1} / 10]` {name}**",
             view=view_cls(),
         )
 
