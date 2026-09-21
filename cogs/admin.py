@@ -76,6 +76,8 @@ def _build_admin_commands_embed() -> discord.Embed:
             "Lift an active ban, clear cooldown penalties, and restore normal queue access.\n\n"
             "`/admin check_bans user:<@user>`\n"
             "View a player's ban count history, status, and next escalation duration.\n\n"
+            "`/admin set_bans user:<@user> count:<int>`\n"
+            "Manually set a player's ban count to any specific number (e.g. 1, 2, 3).\n\n"
             "`/admin clear_bans user:<@user> [amount:<int>]`\n"
             "Clear/reduce a player's recorded ban count (resets to 0 if amount is omitted)."
         ),
@@ -736,6 +738,56 @@ class AdminCog(commands.Cog, name="Admin"):
 
         await interaction.followup.send(msg, ephemeral=True)
 
+    async def _handle_set_bans(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        count: int,
+    ) -> None:
+        """Manually set a player's ban history count."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("You do not have permission to use admin commands.", ephemeral=True)
+            return
+
+        if count < 0:
+            await interaction.response.send_message("Ban count must be 0 or greater.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        player_record = await db.get_player(user.id)
+        if not player_record:
+            await interaction.followup.send(f"{user.mention} is not registered in the database.", ephemeral=True)
+            return
+
+        old_count = player_record.get("ban_count") or 0
+        updated = await db.set_player_ban_count(user.id, count)
+        new_count = updated.get("ban_count", count) if updated else count
+
+        next_tier = new_count + 1
+        _, next_dur_label = get_escalated_ban_duration(next_tier)
+
+        msg = (
+            f"✅ Ban count for {user.mention} set to `{new_count}` (was `{old_count}`).\n"
+            f"• **Next Ban Tier (#{next_tier}):** `{next_dur_label}`"
+        )
+
+        await send_log(
+            self.bot,
+            title="⚙️ Ban Count Set",
+            description=(
+                f"Staff {interaction.user.mention} updated ban count for {user.mention}.\n"
+                f"Bans: `{old_count}` ➔ `{new_count}`"
+            ),
+            colour=COL_SUCCESS,
+        )
+
+        await interaction.followup.send(msg, ephemeral=True)
+
     async def _handle_player_unban(
         self,
         interaction: discord.Interaction,
@@ -946,6 +998,40 @@ class AdminCog(commands.Cog, name="Admin"):
     ) -> None:
         """Top-level command alias for /admin clear_bans."""
         await self._handle_clear_bans(interaction, user, amount)
+
+    @admin_group.command(
+        name="set_bans",
+        description="Set a player's recorded ban count to a specific number.",
+    )
+    @app_commands.describe(
+        user="The player whose ban count to set.",
+        count="The new ban count (e.g. 1, 2, 3).",
+    )
+    async def set_bans(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        count: int,
+    ) -> None:
+        """Set a player's ban count."""
+        await self._handle_set_bans(interaction, user, count)
+
+    @app_commands.command(
+        name="admin_set_bans",
+        description="Set a player's recorded ban count to a specific number.",
+    )
+    @app_commands.describe(
+        user="The player whose ban count to set.",
+        count="The new ban count (e.g. 1, 2, 3).",
+    )
+    async def admin_set_bans_command(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        count: int,
+    ) -> None:
+        """Top-level command alias for /admin set_bans."""
+        await self._handle_set_bans(interaction, user, count)
 
     async def _autocomplete_teams(
         self,

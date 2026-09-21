@@ -681,6 +681,28 @@ async def clear_player_bans(discord_id: int, amount: Optional[int] = None) -> Op
         return None
 
 
+async def set_player_ban_count(discord_id: int, count: int) -> Optional[dict]:
+    """
+    Manually set a player's ban_count to an exact integer (>= 0).
+    """
+    try:
+        count = max(0, count)
+        row = await get_pool().fetchrow(
+            """
+            UPDATE players
+            SET ban_count = $1
+            WHERE discord_id = $2
+            RETURNING *
+            """,
+            count,
+            discord_id,
+        )
+        return dict(row) if row else None
+    except Exception as e:
+        log.error("Error setting ban count for player %d: %s", discord_id, e)
+        return None
+
+
 async def unban_player(discord_id: int) -> Optional[dict]:
     """
     Unban a player, clearing the ban status, reason, timestamps, and cooldown penalties.
