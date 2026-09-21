@@ -5035,9 +5035,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             "\n".join(t2_player_lines) if t2_player_lines else "*No players detected*",
         ])
 
-        _title_map = f" — {map_name}" if map_name and map_name.lower() not in ("unknown", "") else ""
         result_embed = discord.Embed(
-            title=f"Match {match['id']} Results{_title_map}",
+            title=f"Match {match['id']} Results",
             description="\n".join(desc_parts),
             colour=discord.Colour(0xE74C3C),
         )
