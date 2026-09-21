@@ -217,9 +217,12 @@ def _extract_json(text: str) -> dict:
     if "```" in clean:
         clean = clean.split("```")[0].strip()
 
+    # Sanitize trailing commas before closing braces/brackets
+    clean_sanitized = re.sub(r",\s*([\}\]])", r"\1", clean)
+
     # 1. Direct parse
     try:
-        return json.loads(clean)
+        return json.loads(clean_sanitized)
     except json.JSONDecodeError:
         pass
 
@@ -227,7 +230,8 @@ def _extract_json(text: str) -> dict:
     m = re.search(r"```(?:json)?\s*([\s\S]+?)```", text, re.IGNORECASE)
     if m:
         try:
-            return json.loads(m.group(1).strip())
+            block = re.sub(r",\s*([\}\]])", r"\1", m.group(1).strip())
+            return json.loads(block)
         except json.JSONDecodeError:
             pass
 
@@ -235,12 +239,13 @@ def _extract_json(text: str) -> dict:
     start, end = clean.find("{"), clean.rfind("}")
     if start != -1 and end > start:
         try:
-            return json.loads(clean[start:end + 1])
+            block = re.sub(r",\s*([\}\]])", r"\1", clean[start:end + 1])
+            return json.loads(block)
         except json.JSONDecodeError:
             pass
 
     # 4. Fallback repair for truncated/incomplete JSON
-    log.warning("JSON parsing failed, attempting fuzzy repair on truncated response...")
+    log.info("Direct JSON parse failed, applying fuzzy repair fallback for truncated LLM output...")
     start_pos = text.find("{")
     if start_pos != -1:
         truncated_body = text[start_pos:]
@@ -540,6 +545,7 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
                 ],
             }
         ],
+        "response_format": {"type": "json_object"},
         "max_tokens": 4096,
         "temperature": 0.05,
     }
