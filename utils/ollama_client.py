@@ -372,22 +372,7 @@ async def analyze_image(image_bytes: bytes, prompt: str = DEFAULT_PROMPT) -> str
     return await _call_ollama(image_bytes, prompt)
 
 
-MAP_NAME_MAP = {
-    "森寒冬港": "Icebox",
-    "极地寒港": "Icebox",
-    "冰箱": "Icebox",
-    "亚海悬城": "Ascent",
-    "隐世修所": "Haven",
-    "源工重镇": "Bind",
-    "霓虹町": "Split",
-    "微风岛屿": "Breeze",
-    "裂变暗区": "Fracture",
-    "深海明珠": "Pearl",
-    "莲华古城": "Lotus",
-    "日落之城": "Sunset",
-    "深邃地窟": "Abyss",
-}
-
+# ── Scoreboard OCR helpers (mirrors openrouter_client.py) ────────────────────
 
 def _extract_json(text: str) -> dict:
     # 1. Direct JSON parse
@@ -644,16 +629,13 @@ def _to_result(data: dict, elapsed_ms: float, image_bytes: Optional[bytes] = Non
     conf         = _confidence(players_raw)
     needs_review = conf < 0.60 or len(players_raw) != 10
 
-    raw_map = str(data.get("map") or "Unknown").strip()
-    clean_map = MAP_NAME_MAP.get(raw_map, raw_map)
-
     return MatchOCRResult(
         success=True,
         engine=f"Ollama/{_MODEL}",
         processing_time_ms=elapsed_ms,
         confidence=conf,
         needs_review=needs_review,
-        map_name=clean_map,
+        map_name=str(data.get("map") or "Unknown"),
         match_date=str(data.get("match_date") or "Unknown"),
         duration=str(data.get("duration") or "Unknown"),
         team1_score=_clean_round_score(data.get("team1_score")),

@@ -192,112 +192,24 @@ def _detect_mime(data: bytes) -> str:
     return "image/jpeg"
 
 
-MAP_NAME_MAP = {
-    "森寒冬港": "Icebox",
-    "极地寒港": "Icebox",
-    "冰箱": "Icebox",
-    "亚海悬城": "Ascent",
-    "隐世修所": "Haven",
-    "源工重镇": "Bind",
-    "霓虹町": "Split",
-    "微风岛屿": "Breeze",
-    "裂变暗区": "Fracture",
-    "深海明珠": "Pearl",
-    "莲华古城": "Lotus",
-    "日落之城": "Sunset",
-    "深邃地窟": "Abyss",
-}
-
-
 # ── JSON extraction ───────────────────────────────────────────────────────────
 def _extract_json(text: str) -> dict:
-    clean = text.strip()
-    if clean.startswith("```"):
-        clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.IGNORECASE)
-    if "```" in clean:
-        clean = clean.split("```")[0].strip()
-
-    # Sanitize trailing commas before closing braces/brackets
-    clean_sanitized = re.sub(r",\s*([\}\]])", r"\1", clean)
-
-    # 1. Direct parse
     try:
-        return json.loads(clean_sanitized)
+        return json.loads(text.strip())
     except json.JSONDecodeError:
         pass
-
-    # 2. Regex codeblock parse
     m = re.search(r"```(?:json)?\s*([\s\S]+?)```", text, re.IGNORECASE)
     if m:
         try:
-            block = re.sub(r",\s*([\}\]])", r"\1", m.group(1).strip())
-            return json.loads(block)
+            return json.loads(m.group(1).strip())
         except json.JSONDecodeError:
             pass
-
-    # 3. Outermost braces parse
-    start, end = clean.find("{"), clean.rfind("}")
+    start, end = text.find("{"), text.rfind("}")
     if start != -1 and end > start:
         try:
-            block = re.sub(r",\s*([\}\]])", r"\1", clean[start:end + 1])
-            return json.loads(block)
+            return json.loads(text[start:end + 1])
         except json.JSONDecodeError:
             pass
-
-    # 4. Fallback repair for truncated/incomplete JSON
-    log.info("Direct JSON parse failed, applying fuzzy repair fallback for truncated LLM output...")
-    start_pos = text.find("{")
-    if start_pos != -1:
-        truncated_body = text[start_pos:]
-
-        t1_m = re.search(r'"team1_score"\s*:\s*(\d+)', truncated_body)
-        t2_m = re.search(r'"team2_score"\s*:\s*(\d+)', truncated_body)
-        map_m = re.search(r'"map"\s*:\s*"([^"]+)"', truncated_body)
-        date_m = re.search(r'"match_date"\s*:\s*"([^"]+)"', truncated_body)
-        dur_m = re.search(r'"duration"\s*:\s*"([^"]+)"', truncated_body)
-        out_m = re.search(r'"outcome"\s*:\s*"([^"]+)"', truncated_body)
-
-        players = []
-        p_match = re.search(r'"players"\s*:\s*\[', truncated_body)
-        if p_match:
-            p_start = p_match.end()
-            depth = 0
-            obj_start = None
-            for i in range(p_start, len(truncated_body)):
-                ch = truncated_body[i]
-                if ch == '{':
-                    if depth == 0:
-                        obj_start = i
-                    depth += 1
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0 and obj_start is not None:
-                        try:
-                            p_obj = json.loads(truncated_body[obj_start:i + 1])
-                            players.append(p_obj)
-                        except Exception:
-                            pass
-                        obj_start = None
-
-        if t1_m or t2_m or map_m or players:
-            log.info(
-                "Recovered truncated JSON structure (scores: %s-%s, map: %s, players: %d)",
-                t1_m.group(1) if t1_m else "N/A",
-                t2_m.group(1) if t2_m else "N/A",
-                map_m.group(1) if map_m else "N/A",
-                len(players),
-            )
-            return {
-                "success": True,
-                "team1_score": int(t1_m.group(1)) if t1_m else None,
-                "team2_score": int(t2_m.group(1)) if t2_m else None,
-                "map": map_m.group(1) if map_m else "Unknown",
-                "match_date": date_m.group(1) if date_m else None,
-                "duration": dur_m.group(1) if dur_m else None,
-                "outcome": out_m.group(1) if out_m else "Unknown",
-                "players": players,
-            }
-
     raise ValueError(f"No valid JSON in response: {text[:300]!r}")
 
 
@@ -490,16 +402,13 @@ def _to_result(
     needs_review = conf < 0.60 or len(players_raw) != 10
     active_model = model or get_model()
 
-    raw_map = str(data.get("map") or "Unknown").strip()
-    clean_map = MAP_NAME_MAP.get(raw_map, raw_map)
-
     return MatchOCRResult(
         success=True,
         engine=f"OpenRouter/{active_model}",
         processing_time_ms=elapsed_ms,
         confidence=conf,
         needs_review=needs_review,
-        map_name=clean_map,
+        map_name=str(data.get("map") or "Unknown"),
         match_date=str(data.get("match_date") or "Unknown"),
         duration=str(data.get("duration") or "Unknown"),
         team1_score=_clean_round_score(data.get("team1_score")),
@@ -545,7 +454,6 @@ async def extract_scoreboard(image_bytes: bytes) -> MatchOCRResult:
                 ],
             }
         ],
-        "response_format": {"type": "json_object"},
         "max_tokens": 4096,
         "temperature": 0.05,
     }
