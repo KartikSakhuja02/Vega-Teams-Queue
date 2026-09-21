@@ -4699,7 +4699,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             "深渊": "Abyss",
             "Summit": "Summit",
         }
-        raw_map = result.map_name or match.get("selected_map") or "Unknown"
+        # selected_map (from veto phase, stored in DB) is the authoritative source.
+        # Only fall back to OCR result.map_name when selected_map is absent.
+        _selected = (match.get("selected_map") or "").strip()
+        _ocr_map = (result.map_name or "").strip()
+        raw_map = _selected or _ocr_map or "Unknown"
         map_name = MAP_TRANSLATIONS.get(raw_map, raw_map)
 
         # 9. Fetch registered player records for the 10 lobby players
