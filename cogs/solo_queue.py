@@ -57,7 +57,7 @@ STAFF_ROLE_IDS: list[int] = list(get_staff_role_ids())
 
 MAP_POOL_RAW = os.environ.get(
     "MAP_POOL",
-    "Ascent, Bind, Haven, Split, Sunset, Lotus, Abyss",
+    "Ascent, Bind, Haven, Split, Sunset, Lotus, Abyss, Summit",
 )
 MAP_POOL: list[str] = [m.strip() for m in MAP_POOL_RAW.split(",") if m.strip()]
 
@@ -4697,6 +4697,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             "日落": "Sunset",
             "幽邃地窟": "Abyss",
             "深渊": "Abyss",
+            "Summit": "Summit",
         }
         raw_map = result.map_name or match.get("selected_map") or "Unknown"
         map_name = MAP_TRANSLATIONS.get(raw_map, raw_map)

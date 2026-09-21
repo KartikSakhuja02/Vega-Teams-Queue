@@ -131,7 +131,7 @@ def _parse_score(txt: str) -> tuple[int, int, str]:
 
 def _parse_meta(txt: str) -> tuple[str, str, str]:
     map_name = match_date = duration = "Unknown"
-    keywords = r"模式|明珠|深海|莲华|古城|Lotus|Pearl|Ascent|Haven|Split|Bind|Breeze|Fracture|Icebox|Sunset|Abyss|微风岛屿|亚海悬城|源工重镇"
+    keywords = r"模式|明珠|深海|莲华|古城|Lotus|Pearl|Ascent|Haven|Split|Bind|Breeze|Fracture|Icebox|Sunset|Abyss|Summit|微风岛屿|亚海悬城|源工重镇"
     m = re.search(rf"([^\n\r]*(?:{keywords})[^\n\r]*)", txt)
     if m:
         map_name = m.group(1).strip()[:60]

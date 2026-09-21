@@ -36,7 +36,7 @@ CANONICAL_AGENTS = [
     "Astra", "Breach", "Brimstone", "Chamber", "Clove", "Cypher", "Deadlock",
     "Fade", "Gekko", "Harbor", "Iso", "Jett", "KAY/O", "Killjoy", "Neon",
     "Omen", "Phoenix", "Raze", "Reyna", "Sage", "Skye", "Sova", "Tejo",
-    "Viper", "Vyse", "Waylay", "Yoru",
+    "Veto", "Viper", "Vyse", "Waylay", "Yoru",
 ]
 
 # Normalization map for aliases, typos, and file naming quirks
@@ -51,6 +51,7 @@ _AGENT_ALIASES: dict[str, str] = {
     "kj": "Killjoy",
     "dead lock": "Deadlock",
     "brim": "Brimstone",
+    "veto": "Veto",
 }
 for agent in CANONICAL_AGENTS:
     _AGENT_ALIASES[agent.lower()] = agent

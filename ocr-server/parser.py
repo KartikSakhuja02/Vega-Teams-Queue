@@ -35,6 +35,7 @@ _MAP_NORMALISE = {
     "天堂": "Haven",
     "日落": "Sunset",
     "深渊": "Abyss",
+    "Summit": "Summit",
 }
 
 

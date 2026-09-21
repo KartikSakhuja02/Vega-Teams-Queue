@@ -2229,6 +2229,7 @@ class AdminCog(commands.Cog, name="Admin"):
             "日落": "Sunset",
             "幽邃地窟": "Abyss",
             "深渊": "Abyss",
+            "Summit": "Summit",
         }
         raw_map = result.map_name or "Unknown"
         map_name = MAP_TRANSLATIONS.get(raw_map, raw_map)
