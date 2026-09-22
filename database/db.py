@@ -92,10 +92,20 @@ async def _apply_schema() -> None:
                 CREATE INDEX IF NOT EXISTS idx_mv_reply_msg ON matchmaking_verifications (reply_message_id);
                 CREATE INDEX IF NOT EXISTS idx_mv_player ON matchmaking_verifications (player_id);
                 CREATE INDEX IF NOT EXISTS idx_mv_status ON matchmaking_verifications (status);
+
+                CREATE TABLE IF NOT EXISTS blacklisted_words (
+                    id         SERIAL PRIMARY KEY,
+                    word       TEXT NOT NULL UNIQUE,
+                    reason     TEXT,
+                    added_by   BIGINT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_blacklisted_words_word ON blacklisted_words (word);
                 """
             )
         except Exception as e:
-            log.warning("Could not ensure matchmaking_verifications table: %s", e)
+            log.warning("Could not ensure schema tables: %s", e)
+
 
 
 
@@ -3122,6 +3132,74 @@ async def get_player_leaderboard_rank(
     """
     row = await pool.fetchrow(query, *params)
     return dict(row) if row else None
+
+
+# =============================================================================
+# Blacklisted Words / Auto-Moderation
+# =============================================================================
+
+async def add_blacklisted_word(
+    word: str,
+    reason: Optional[str] = None,
+    added_by: Optional[int] = None,
+) -> Optional[dict]:
+    """
+    Insert or update a blacklisted word/phrase for queue channel auto-moderation.
+    Stores the word in lowercase for case-insensitive matching.
+    """
+    pool = get_pool()
+    clean_word = word.strip().lower()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO blacklisted_words (word, reason, added_by, created_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (word) DO UPDATE
+            SET reason = EXCLUDED.reason,
+                added_by = EXCLUDED.added_by,
+                created_at = NOW()
+        RETURNING *
+        """,
+        clean_word,
+        reason.strip() if reason else None,
+        added_by,
+    )
+    return dict(row) if row else None
+
+
+async def remove_blacklisted_word(word: str) -> bool:
+    """Delete a blacklisted word. Returns True if a record was removed."""
+    pool = get_pool()
+    res = await pool.execute(
+        """
+        DELETE FROM blacklisted_words
+        WHERE LOWER(word) = LOWER($1)
+        """,
+        word.strip(),
+    )
+    return res != "DELETE 0"
+
+
+async def get_blacklisted_words() -> list[dict]:
+    """Fetch all active blacklisted words with reasons and metadata."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT * FROM blacklisted_words
+        ORDER BY word ASC
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def clear_blacklisted_words() -> int:
+    """Remove all blacklisted words. Returns the count of deleted entries."""
+    pool = get_pool()
+    res = await pool.execute("DELETE FROM blacklisted_words")
+    try:
+        return int(res.split()[-1])
+    except Exception:
+        return 0
+
 
 
 

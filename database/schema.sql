@@ -364,3 +364,20 @@ CREATE TABLE IF NOT EXISTS matchmaking_verifications (
 CREATE INDEX IF NOT EXISTS idx_mv_reply_msg ON matchmaking_verifications (reply_message_id);
 CREATE INDEX IF NOT EXISTS idx_mv_player ON matchmaking_verifications (player_id);
 CREATE INDEX IF NOT EXISTS idx_mv_status ON matchmaking_verifications (status);
+
+
+-- ---------------------------------------------------------------------------
+-- blacklisted_words (Automated Moderation in Queue Text Channels)
+-- ---------------------------------------------------------------------------
+-- Words/phrases banned in queue text channels with auto-escalating bans and logging.
+
+CREATE TABLE IF NOT EXISTS blacklisted_words (
+    id         SERIAL PRIMARY KEY,
+    word       TEXT NOT NULL UNIQUE,
+    reason     TEXT,
+    added_by   BIGINT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_blacklisted_words_word ON blacklisted_words (word);
+

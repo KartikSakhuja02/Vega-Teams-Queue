@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Literal
 
 import discord
 from discord import app_commands
@@ -79,7 +80,9 @@ def _build_admin_commands_embed() -> discord.Embed:
             "`/admin set_bans user:<@user> count:<int>`\n"
             "Manually set a player's ban count to any specific number (e.g. 1, 2, 3).\n\n"
             "`/admin clear_bans user:<@user> [amount:<int>]`\n"
-            "Clear/reduce a player's recorded ban count (resets to 0 if amount is omitted)."
+            "Clear/reduce a player's recorded ban count (resets to 0 if amount is omitted).\n\n"
+            "`/admin blacklist words action:<add|remove|list|clear> [word:<text>] [reason:<text>]`\n"
+            "Auto-ban players for abusive words in queue text channels (auto-escalates by ban count)."
         ),
         inline=False,
     )
@@ -285,6 +288,7 @@ class AdminCog(commands.Cog, name="Admin"):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._panel_posted: bool = False
+        self._blacklisted_words: dict[str, dict] = {}
         self.check_expired_bans.start()
 
     def cog_unload(self) -> None:
@@ -297,10 +301,263 @@ class AdminCog(commands.Cog, name="Admin"):
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
+        await self._load_blacklisted_words()
         if self._panel_posted:
             return
         self._panel_posted = True
         await self._ensure_admin_commands_message()
+
+    async def _load_blacklisted_words(self) -> None:
+        """Load active blacklisted words from the database into in-memory cache."""
+        try:
+            words = await db.get_blacklisted_words()
+            self._blacklisted_words = {w["word"].lower(): w for w in words}
+            log.info("Loaded %d blacklisted words for queue auto-moderation.", len(self._blacklisted_words))
+        except Exception as e:
+            log.warning("Could not load blacklisted words from database: %s", e)
+
+    async def _is_queue_text_channel(self, channel: discord.abc.GuildChannel) -> bool:
+        """
+        Check if a channel is a queue text channel (only in q text channels).
+        Matches active 10-man solo match channels, scrim channels, and queue lobby channels.
+        """
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return False
+
+        # 1. Configured Queue Channel IDs from .env
+        solo_q_id = int(os.environ.get("SOLO_QUEUE_CHANNEL_ID", "0"))
+        team_q_id = int(os.environ.get("TEAM_QUEUE_CHANNEL_ID", "0"))
+        if channel.id in (solo_q_id, team_q_id) and channel.id != 0:
+            return True
+
+        # 2. Match Categories (SOLO_MATCH_CATEGORY_ID or SCRIM_CATEGORY_ID)
+        solo_cat_id = int(os.environ.get("SOLO_MATCH_CATEGORY_ID", "0"))
+        scrim_cat_id = int(os.environ.get("SCRIM_CATEGORY_ID", "0"))
+        if channel.category_id and channel.category_id in (solo_cat_id, scrim_cat_id) and channel.category_id != 0:
+            return True
+        if channel.category and any(kw in channel.category.name.lower() for kw in ("queue #", "queue-", "solo match", "scrim")):
+            return True
+
+        # 3. Channel Name Patterns
+        ch_name = channel.name.lower()
+        if ch_name.startswith("queue-") or ch_name.startswith("q-") or ch_name == "queue" or ch_name == "solo-queue" or ch_name.startswith("scrim-"):
+            return True
+
+        # 4. Channel Topic Patterns
+        topic = getattr(channel, "topic", None)
+        if topic:
+            topic_lower = topic.lower()
+            if "10-man solo ranked queue" in topic_lower or "scrim match" in topic_lower or "queue #" in topic_lower:
+                return True
+
+        # 5. Database lookup for active solo or scrim matches
+        try:
+            solo_match = await db.get_solo_match_by_channel(channel.id)
+            if solo_match:
+                return True
+            scrim_match = await db.get_scrim_match_by_channel(channel.id)
+            if scrim_match:
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    async def _execute_blacklisted_word_auto_ban(
+        self,
+        message: discord.Message,
+        matched_word: str,
+        matched_entry: dict,
+    ) -> None:
+        """
+        Auto-bans a user who used a blacklisted word in a queue text channel.
+        - Deletes the abusive message immediately
+        - Determines escalation duration from previous ban count
+        - Bans the player in the database
+        - Evicts them from active queues
+        - Sends DM with infraction & duration
+        - Announces ban in the designated bans channel
+        - Logs to the bot audit log channel
+        - Posts notification in the queue text channel
+        """
+        member = message.author
+        if not isinstance(member, discord.Member):
+            return
+        channel = message.channel
+        guild = message.guild
+
+        # 1. Immediately delete message
+        try:
+            await message.delete()
+        except Exception as e:
+            log.debug("Could not delete blacklisted message: %s", e)
+
+        # 2. Get player record to check ban tier
+        player_record = await db.get_player(member.id)
+        if not player_record:
+            try:
+                player_record = await db.register_player(
+                    discord_id=member.id,
+                    discord_username=member.name,
+                    ign=member.display_name[:32],
+                    region="India",
+                )
+            except Exception as e:
+                log.warning("Could not auto-register player %d for ban tracking: %s", member.id, e)
+
+        prev_ban_count = player_record.get("ban_count") or 0 if player_record else 0
+        next_ban_tier = prev_ban_count + 1
+
+        # 3. Determine ban duration (auto-escalation)
+        effective_duration, dur_label = get_escalated_ban_duration(next_ban_tier)
+        dur_text = f"`{_fmt_duration(effective_duration)}`" if effective_duration else "`Permanent`"
+
+        # 4. Reason from blacklisted word entry
+        word_reason = (matched_entry.get("reason") or "").strip()
+        if word_reason:
+            ban_reason = f"Blacklisted word: '{matched_word}' — {word_reason}"
+        else:
+            ban_reason = f"Used blacklisted word '{matched_word}' in #{channel.name}"
+
+        # 5. Apply ban in database
+        bot_user_id = self.bot.user.id if self.bot.user else 0
+        updated = await db.ban_player(
+            discord_id=member.id,
+            reason=ban_reason,
+            banned_by=bot_user_id,
+            duration_hours=effective_duration,
+        )
+
+        # 6. Evict from queues
+        try:
+            await db.clear_solo_queue([member.id])
+            await self._refresh_solo_queue()
+            await self._refresh_team_queue()
+        except Exception as e:
+            log.debug("Error during queue eviction for auto-banned user %d: %s", member.id, e)
+
+        banned_until_dt = updated.get("banned_until") if updated else None
+        banned_at_dt = updated.get("banned_at") if updated else datetime.now(timezone.utc)
+        current_ban_count = updated.get("ban_count", next_ban_tier) if updated else next_ban_tier
+
+        # 7. DM to banned user
+        if isinstance(banned_until_dt, datetime):
+            banned_until_ts = int(banned_until_dt.timestamp())
+            dm_dur_str = f"{dur_text} (Expires: <t:{banned_until_ts}:F> • <t:{banned_until_ts}:R>)"
+        else:
+            dm_dur_str = "`Permanent`"
+
+        try:
+            dm_embed = discord.Embed(
+                title="🔨 Account Banned from Matchmaking",
+                description=(
+                    f"You have been banned from Vega Scrims matchmaking queues for prohibited/abusive language in {channel.mention}.\n\n"
+                    f"• **Reason:** {ban_reason}\n"
+                    f"• **Duration:** {dm_dur_str}\n"
+                    f"• **Ban Tier:** #{current_ban_count}\n\n"
+                    "If you believe this is an error or wish to appeal, please contact server staff in help tickets."
+                ),
+                colour=COL_DANGER,
+            )
+            dm_embed.set_footer(text="Vega Scrims Auto-Moderation")
+            await member.send(embed=dm_embed)
+        except Exception:
+            log.info("Could not send ban DM to user %d (DMs closed).", member.id)
+
+        # 8. Announce in the bans channel
+        try:
+            ban_embed = _build_queue_ban_embed(
+                user=member,
+                player_record=player_record or {"ign": member.display_name},
+                reason=ban_reason,
+                duration_hours=effective_duration,
+                banned_until_dt=banned_until_dt,
+                banned_at_dt=banned_at_dt,
+                admin=self.bot.user,
+                guild=guild,
+            )
+            await self._send_ban_channel_ui(guild, ban_embed)
+        except Exception as e:
+            log.error("Failed to announce ban in bans channel for %d: %s", member.id, e)
+
+        # 9. Audit log
+        banned_at_ts = int(banned_at_dt.timestamp()) if isinstance(banned_at_dt, datetime) else int(datetime.now(timezone.utc).timestamp())
+        banned_until_ts = int(banned_until_dt.timestamp()) if isinstance(banned_until_dt, datetime) else None
+        desc_parts = [
+            f"**User:** {member.mention} (`{member.id}`)",
+            f"**IGN:** `{player_record.get('ign') if player_record else member.display_name}`",
+            f"**Channel:** {channel.mention} (`#{channel.name}`)",
+            f"**Ban Tier:** #{current_ban_count}",
+            f"**Duration:** {dur_text}",
+        ]
+        if banned_until_ts:
+            desc_parts.append(f"**Expires:** <t:{banned_until_ts}:F> (<t:{banned_until_ts}:R>)")
+        else:
+            desc_parts.append("**Expires:** `Never (Permanent)`")
+        desc_parts.append(f"**Matched Word:** `{matched_word}`")
+        if word_reason:
+            desc_parts.append(f"**Configured Reason:** `{word_reason}`")
+        desc_parts.append(f"**Recorded Ban Reason:** `{ban_reason}`")
+
+        await send_log(
+            self.bot,
+            title="🔨 Auto-Ban: Blacklisted Word in Queue Channel",
+            description="\n".join(desc_parts),
+            colour=COL_DANGER,
+        )
+
+        # 10. Notify in the queue text channel
+        try:
+            warn_embed = discord.Embed(
+                title="🔨 Player Auto-Banned",
+                description=(
+                    f"{member.mention} has been auto-banned for prohibited/abusive language.\n"
+                    f"• **Ban Tier:** #{current_ban_count} ({dur_text})\n"
+                    f"• **Reason:** {word_reason or 'Blacklisted word violation'}"
+                ),
+                colour=COL_DANGER,
+            )
+            warn_embed.set_footer(text="Vega Scrims Auto-Moderation")
+            await channel.send(embed=warn_embed)
+        except Exception as e:
+            log.warning("Could not send alert in queue channel: %s", e)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Auto-moderation listener that monitors queue text channels for blacklisted words."""
+        if message.author.bot or not message.guild or not isinstance(message.author, discord.Member):
+            return
+
+        # Exempt staff / administrators from auto-ban
+        if _is_admin(message.author):
+            return
+
+        # Ensure blacklist cache is populated
+        if not self._blacklisted_words:
+            return
+
+        # Check if the channel is a queue text channel (only in q text channels)
+        if not await self._is_queue_text_channel(message.channel):
+            return
+
+        # Check message content against blacklisted words using regex word boundary
+        content = message.content
+        if not content:
+            return
+
+        matched_word = None
+        matched_entry = None
+
+        for w_key, w_data in list(self._blacklisted_words.items()):
+            pattern = r'(?<!\w)' + re.escape(w_key) + r'(?!\w)'
+            if re.search(pattern, content, re.IGNORECASE):
+                matched_word = w_data.get("word") or w_key
+                matched_entry = w_data
+                break
+
+        if matched_word and matched_entry:
+            await self._execute_blacklisted_word_auto_ban(message, matched_word, matched_entry)
+
 
     async def _ensure_admin_commands_message(self) -> None:
         """
@@ -859,6 +1116,148 @@ class AdminCog(commands.Cog, name="Admin"):
             ephemeral=True,
         )
 
+    # ── Blacklist Words Action Handler ──────────────────────────────────────
+
+    async def _handle_blacklist_action(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        word: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Central router for blacklisted words moderation commands."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("You do not have permission to use admin commands.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        action_clean = (action or "").lower().strip()
+
+        if action_clean == "add":
+            if not word or not word.strip():
+                await interaction.followup.send("❌ Please specify the word or phrase to blacklist.", ephemeral=True)
+                return
+            clean_word = word.strip().lower()
+            clean_reason = reason.strip() if reason and reason.strip() else None
+
+            row = await db.add_blacklisted_word(
+                word=clean_word,
+                reason=clean_reason,
+                added_by=interaction.user.id,
+            )
+            if not row:
+                await interaction.followup.send("❌ Failed to save blacklisted word to database.", ephemeral=True)
+                return
+
+            self._blacklisted_words[clean_word] = dict(row)
+
+            reason_disp = clean_reason if clean_reason else "None (Default auto-ban)"
+            await send_log(
+                self.bot,
+                title="🛡️ Blacklisted Word Added",
+                description=(
+                    f"**Admin:** {interaction.user.mention} (`{interaction.user.id}`)\n"
+                    f"**Word:** `||{clean_word}||`\n"
+                    f"**Reason:** `{reason_disp}`\n"
+                    f"**Target Channels:** Queue text channels only"
+                ),
+                colour=COL_SUCCESS,
+            )
+
+            await interaction.followup.send(
+                f"✅ **Blacklisted Word Added**\n"
+                f"• **Word:** `||{clean_word}||`\n"
+                f"• **Reason:** `{reason_disp}`\n\n"
+                f"Players using this word in **queue text channels** will be automatically banned according to their ban count tier, with notices sent to the bans channel.",
+                ephemeral=True,
+            )
+
+        elif action_clean == "remove":
+            if not word or not word.strip():
+                await interaction.followup.send("❌ Please specify the word or phrase to remove from the blacklist.", ephemeral=True)
+                return
+            clean_word = word.strip().lower()
+            removed = await db.remove_blacklisted_word(clean_word)
+            self._blacklisted_words.pop(clean_word, None)
+
+            if not removed:
+                await interaction.followup.send(f"⚠️ Word `||{clean_word}||` was not found in the blacklist.", ephemeral=True)
+                return
+
+            await send_log(
+                self.bot,
+                title="🛡️ Blacklisted Word Removed",
+                description=(
+                    f"**Admin:** {interaction.user.mention} (`{interaction.user.id}`)\n"
+                    f"**Removed Word:** `||{clean_word}||`"
+                ),
+                colour=COL_WARNING,
+            )
+
+            await interaction.followup.send(f"✅ Removed `||{clean_word}||` from blacklisted words.", ephemeral=True)
+
+        elif action_clean == "list":
+            words = await db.get_blacklisted_words()
+            self._blacklisted_words = {w["word"].lower(): w for w in words}
+
+            if not words:
+                await interaction.followup.send(
+                    "ℹ️ There are currently no blacklisted words configured.\n"
+                    "Use `/admin blacklist words action:add word:<word> [reason:<text>]` to add one.",
+                    ephemeral=True,
+                )
+                return
+
+            embed = discord.Embed(
+                title="🛡️ Queue Blacklisted Words & Moderation Rules",
+                description=(
+                    f"Total active blacklisted words: **{len(words)}**\n"
+                    f"Monitored Channels: **Queue text channels only** (`queue-*`, scrims, solo queue)\n"
+                    f"Enforcement: **Auto-escalating bans** (#1: 1h -> #2: 6h -> #3: 12h -> #4: 24h -> #5: 7d -> #6: 30d -> Permanent)"
+                ),
+                colour=EMBED_COLOUR,
+            )
+
+            lines = []
+            for idx, w in enumerate(words[:25], start=1):
+                reason_txt = f" *(Reason: {w['reason']})*" if w.get("reason") else ""
+                lines.append(f"`{idx}.` `||{w['word']}||`{reason_txt}")
+
+            embed.add_field(name="Blacklisted Words", value="\n".join(lines), inline=False)
+            if len(words) > 25:
+                embed.set_footer(text=f"Showing 25 of {len(words)} blacklisted words.")
+            else:
+                embed.set_footer(text="Vega Esports • Queue Auto-Moderation")
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        elif action_clean == "clear":
+            count = await db.clear_blacklisted_words()
+            self._blacklisted_words.clear()
+
+            await send_log(
+                self.bot,
+                title="🛡️ Blacklist Cleared",
+                description=(
+                    f"**Admin:** {interaction.user.mention} (`{interaction.user.id}`)\n"
+                    f"**Words Cleared:** `{count}`"
+                ),
+                colour=COL_DANGER,
+            )
+
+            await interaction.followup.send(f"✅ Cleared all `{count}` blacklisted words from the database.", ephemeral=True)
+
+        else:
+            await interaction.followup.send(
+                f"❌ Unknown action `{action}`. Valid options: `add`, `remove`, `list`, or `clear`.",
+                ephemeral=True,
+            )
+
+
     # ── Slash Commands (/admin player_ban & /admin_player_ban) ──────────────
 
     # ── Slash Commands (/admin player_ban & /admin_player_ban) ──────────────
@@ -1032,6 +1431,156 @@ class AdminCog(commands.Cog, name="Admin"):
     ) -> None:
         """Top-level command alias for /admin set_bans."""
         await self._handle_set_bans(interaction, user, count)
+
+    # ── Slash Commands (/admin blacklist ...) ───────────────────────────────
+
+    blacklist_group = app_commands.Group(
+        name="blacklist",
+        description="Manage blacklisted words and moderation rules for queue channels.",
+        parent=admin_group,
+    )
+
+    @blacklist_group.command(
+        name="words",
+        description="Manage blacklisted words for queue channels (add, remove, list, clear).",
+    )
+    @app_commands.describe(
+        action="Choose action: add, remove, list, or clear.",
+        word="The word or phrase to add or remove.",
+        reason="Infraction reason for bot logs and ban card (e.g. Abusive Language, Slurs).",
+    )
+    async def blacklist_words_cmd(
+        self,
+        interaction: discord.Interaction,
+        action: Literal["add", "remove", "list", "clear"],
+        word: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Command /admin blacklist words."""
+        await self._handle_blacklist_action(interaction, action, word, reason)
+
+    @blacklist_group.command(
+        name="add",
+        description="Add a word or phrase to the auto-ban blacklist with optional reason.",
+    )
+    @app_commands.describe(
+        word="The word or phrase to blacklist.",
+        reason="Infraction reason recorded in the bot logs and ban announcements.",
+    )
+    async def blacklist_add_cmd(
+        self,
+        interaction: discord.Interaction,
+        word: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Command /admin blacklist add."""
+        await self._handle_blacklist_action(interaction, "add", word, reason)
+
+    @blacklist_group.command(
+        name="remove",
+        description="Remove a word or phrase from the blacklist.",
+    )
+    @app_commands.describe(
+        word="The word or phrase to remove.",
+    )
+    async def blacklist_remove_cmd(
+        self,
+        interaction: discord.Interaction,
+        word: str,
+    ) -> None:
+        """Command /admin blacklist remove."""
+        await self._handle_blacklist_action(interaction, "remove", word, None)
+
+    @blacklist_group.command(
+        name="list",
+        description="List all currently blacklisted words and their configured reasons.",
+    )
+    async def blacklist_list_cmd(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Command /admin blacklist list."""
+        await self._handle_blacklist_action(interaction, "list", None, None)
+
+    @blacklist_group.command(
+        name="clear",
+        description="Clear all blacklisted words from the database.",
+    )
+    async def blacklist_clear_cmd(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Command /admin blacklist clear."""
+        await self._handle_blacklist_action(interaction, "clear", None, None)
+
+    @admin_group.command(
+        name="blacklist_words",
+        description="Manage blacklisted words for queue auto-moderation.",
+    )
+    @app_commands.describe(
+        action="Choose action: add, remove, list, or clear.",
+        word="The word or phrase to add or remove.",
+        reason="Infraction reason for bot logs and ban card (e.g. Abusive Language, Slurs).",
+    )
+    async def admin_blacklist_words_cmd(
+        self,
+        interaction: discord.Interaction,
+        action: Literal["add", "remove", "list", "clear"],
+        word: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Top-level command alias /admin blacklist_words."""
+        await self._handle_blacklist_action(interaction, action, word, reason)
+
+    @app_commands.command(
+        name="admin_blacklist_words",
+        description="Manage blacklisted words for queue auto-moderation.",
+    )
+    @app_commands.describe(
+        action="Choose action: add, remove, list, or clear.",
+        word="The word or phrase to add or remove.",
+        reason="Infraction reason for bot logs and ban card (e.g. Abusive Language, Slurs).",
+    )
+    async def top_level_admin_blacklist_words(
+        self,
+        interaction: discord.Interaction,
+        action: Literal["add", "remove", "list", "clear"],
+        word: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Global command alias /admin_blacklist_words."""
+        await self._handle_blacklist_action(interaction, action, word, reason)
+
+    async def _autocomplete_blacklisted_words(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        current_lower = current.lower()
+        choices = []
+        for word in self._blacklisted_words.keys():
+            if current_lower in word.lower():
+                choices.append(app_commands.Choice(name=word[:100], value=word[:100]))
+                if len(choices) >= 25:
+                    break
+        return choices
+
+    @blacklist_words_cmd.autocomplete("word")
+    async def blacklist_words_word_ac(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        return await self._autocomplete_blacklisted_words(interaction, current)
+
+    @blacklist_remove_cmd.autocomplete("word")
+    async def blacklist_remove_word_ac(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        return await self._autocomplete_blacklisted_words(interaction, current)
+
+    @admin_blacklist_words_cmd.autocomplete("word")
+    async def admin_blacklist_words_word_ac(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        return await self._autocomplete_blacklisted_words(interaction, current)
+
+    @top_level_admin_blacklist_words.autocomplete("word")
+    async def top_level_blacklist_word_ac(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        return await self._autocomplete_blacklisted_words(interaction, current)
+
 
     async def _autocomplete_teams(
         self,
