@@ -415,9 +415,9 @@ class AdminCog(commands.Cog, name="Admin"):
         # 4. Reason from blacklisted word entry
         word_reason = (matched_entry.get("reason") or "").strip()
         if word_reason:
-            ban_reason = f"Blacklisted word: '{matched_word}' — {word_reason}"
+            ban_reason = f"Used a blacklisted word ({word_reason})"
         else:
-            ban_reason = f"Used blacklisted word '{matched_word}' in #{channel.name}"
+            ban_reason = "Used a blacklisted word"
 
         # 5. Apply ban in database
         bot_user_id = self.bot.user.id if self.bot.user else 0
@@ -494,7 +494,6 @@ class AdminCog(commands.Cog, name="Admin"):
             desc_parts.append(f"**Expires:** <t:{banned_until_ts}:F> (<t:{banned_until_ts}:R>)")
         else:
             desc_parts.append("**Expires:** `Never (Permanent)`")
-        desc_parts.append(f"**Matched Word:** `{matched_word}`")
         if word_reason:
             desc_parts.append(f"**Configured Reason:** `{word_reason}`")
         desc_parts.append(f"**Recorded Ban Reason:** `{ban_reason}`")

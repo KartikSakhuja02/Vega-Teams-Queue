@@ -2834,6 +2834,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         self._pause_cache: Optional[tuple[bool, Optional[float]]] = None
         # Track debounced task to repost queue panel under incoming chat messages
         self._repost_bottom_task: Optional[asyncio.Task] = None
+        # Track active score/screenshot submissions per match to block concurrent submissions
+        self._active_submissions: dict[int, int] = {}
 
     async def cog_load(self) -> None:
         self._auto_clear_loop_task = asyncio.create_task(self._auto_clear_monitor_loop())
@@ -4568,6 +4570,17 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             )
             return
 
+        match_id = match["id"]
+
+        # 2. Check in-memory active submission lock before doing any work
+        active_sub_user_id = self._active_submissions.get(match_id)
+        if active_sub_user_id and active_sub_user_id != interaction.user.id:
+            await interaction.response.send_message(
+                f"❌ A screenshot submission for Match #{match_id} is currently being processed by <@{active_sub_user_id}>. Please wait for them to finish.",
+                ephemeral=True,
+            )
+            return
+
         t1_pids = list(match.get("team1_player_ids") or [])
         t2_pids = list(match.get("team2_player_ids") or [])
         avail_pids = list(match.get("available_player_ids") or [])
@@ -4575,7 +4588,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         c2_id = match.get("captain2_id")
         all_match_pids = list(set(t1_pids + t2_pids + avail_pids + [p for p in (c1_id, c2_id) if p]))
 
-        # 2. Verify authorization (match participant or staff)
+        # 3. Verify authorization (match participant or staff)
         is_participant = interaction.user.id in all_match_pids
         is_staff = _is_admin(interaction.user)
         if not is_participant and not is_staff:
@@ -4585,7 +4598,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             )
             return
 
-        # 3. Validate image format
+        # 4. Validate image format
         if not screenshot.content_type or not screenshot.content_type.startswith("image/"):
             await interaction.response.send_message(
                 "❌ Please upload a valid scoreboard image (PNG, JPG, or WEBP).",
@@ -4593,13 +4606,16 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             )
             return
 
-        # 4. Atomic concurrency claim / lock and IMMEDIATELY release all players to IDLE in database
+        # 5. Atomic concurrency claim / lock in database
         claimed, err_reason, _ = await db.claim_solo_match_result_submission(
-            match["id"], interaction.user.id, is_staff=is_staff
+            match_id, interaction.user.id, is_staff=is_staff
         )
         if not claimed:
             await interaction.response.send_message(f"❌ {err_reason}", ephemeral=True)
             return
+
+        # Lock in memory
+        self._active_submissions[match_id] = interaction.user.id
 
         try:
             await self._run_submit_result_pipeline(
@@ -4611,14 +4627,16 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 t2_pids=t2_pids,
             )
         except Exception as exc:
-            log.exception("Unexpected error in result submission for match #%d: %s", match["id"], exc)
-            await db.release_solo_match_result_submission(match["id"])
+            log.exception("Unexpected error in result submission for match #%d: %s", match_id, exc)
+            await db.release_solo_match_result_submission(match_id)
             try:
                 await interaction.edit_original_response(
                     content=f"❌ **Error processing match result:** `{exc}`\nSubmission lock released. Please try submitting again."
                 )
             except Exception:
                 pass
+        finally:
+            self._active_submissions.pop(match_id, None)
 
     async def _run_submit_result_pipeline(
         self,

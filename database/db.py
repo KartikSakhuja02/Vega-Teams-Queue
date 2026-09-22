@@ -2813,8 +2813,7 @@ async def claim_solo_match_result_submission(
                     status = 'IN_PROGRESS'
                     OR (
                         status = 'PROCESSING_RESULT' AND (
-                            $3::BOOLEAN = TRUE
-                            OR submitted_by = $1
+                            submitted_by = $1
                             OR submitted_at IS NULL
                             OR submitted_at < NOW() - INTERVAL '90 seconds'
                         )
@@ -2824,7 +2823,6 @@ async def claim_solo_match_result_submission(
                 """,
                 user_id,
                 match_id,
-                is_staff,
             )
             if row:
                 m_dict = dict(row)
