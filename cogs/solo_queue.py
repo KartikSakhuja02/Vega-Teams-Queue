@@ -3625,6 +3625,20 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
                 asyncio.create_task(_send_dms_background())
 
+                # Auto-drag all 10 players currently connected to ANY voice channel into the match lobby VC
+                async def _auto_drag_players():
+                    async def _drag_one(mem: discord.Member):
+                        if mem and getattr(mem, "voice", None) and mem.voice.channel and mem.voice.channel.id != lobby_vc.id:
+                            try:
+                                await mem.move_to(lobby_vc, reason=f"Queue #{match['id']} popped — auto-dragged to lobby VC")
+                                log.info("Auto-dragged %s (%d) from VC %s to lobby VC %s", mem.display_name, mem.id, mem.voice.channel.name, lobby_vc.name)
+                            except Exception as exc:
+                                log.warning("Could not auto-drag player %s (%d) to lobby VC: %s", mem.display_name, mem.id, exc)
+
+                    await asyncio.gather(*[_drag_one(m) for m in members if m], return_exceptions=True)
+
+                await _auto_drag_players()
+
                 # Calculate 5-minute check-in deadline
                 deadline = int(time.time()) + 300
                 self._checkin_deadlines[match["id"]] = deadline
@@ -6877,6 +6891,14 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             lobby_vc = interaction.guild.get_channel(v_lobby_id) if v_lobby_id else None
             three_min_deadline = int(time.time()) + 180
             if isinstance(lobby_vc, discord.VoiceChannel):
+                # Auto-drag substitute player if currently in another voice channel
+                if getattr(new_player, "voice", None) and new_player.voice.channel and new_player.voice.channel.id != lobby_vc.id:
+                    try:
+                        await new_player.move_to(lobby_vc, reason=f"Queue #{match['id']} sub accepted — auto-dragged to lobby VC")
+                        log.info("Auto-dragged sub %s (%d) to lobby VC %s", new_player.display_name, new_player.id, lobby_vc.name)
+                    except Exception as exc:
+                        log.warning("Could not auto-drag sub %s (%d) to lobby VC: %s", new_player.display_name, new_player.id, exc)
+
                 await match_ch.send(
                     f"<@{new_player.id}>, please connect to {lobby_vc.mention} within **3 minutes** (<t:{three_min_deadline}:R>)."
                 )
