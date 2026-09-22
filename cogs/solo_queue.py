@@ -2836,6 +2836,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         self._repost_bottom_task: Optional[asyncio.Task] = None
         # Track active score/screenshot submissions per match to block concurrent submissions
         self._active_submissions: dict[int, int] = {}
+        # Track match IDs currently advancing from VOICE_CHECKIN to prevent race-condition duplicate UIs
+        self._starting_matches: set[int] = set()
 
     async def cog_load(self) -> None:
         self._auto_clear_loop_task = asyncio.create_task(self._auto_clear_monitor_loop())
@@ -3784,22 +3786,34 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         players_by_id: Optional[dict[int, dict]] = None,
     ) -> None:
         """Advance match from VOICE_CHECKIN to DRAFTING or AUTO_BALANCE."""
-        # Cancel and cleanup check-in timer
-        timer = self._checkin_timers.pop(match["id"], None)
-        if timer and not timer.done():
-            timer.cancel()
-        self._checkin_deadlines.pop(match["id"], None)
+        match_id = match["id"]
 
-        current_match = await db.get_solo_match_by_id(match["id"])
-        if not current_match or current_match.get("status") != "VOICE_CHECKIN":
+        # Prevent concurrent duplicate transitions (e.g. from match creation + voice_state_update)
+        if match_id in self._starting_matches:
             return
+        self._starting_matches.add(match_id)
 
-        draft_mode, veto_mode, map_pool, colour = await asyncio.gather(
-            get_solo_draft_mode(),
-            get_solo_veto_mode(),
-            get_solo_map_pool(),
-            get_solo_embed_colour(),
-        )
+        try:
+            # Cancel and cleanup check-in timer
+            timer = self._checkin_timers.pop(match_id, None)
+            if timer and not timer.done():
+                timer.cancel()
+            self._checkin_deadlines.pop(match_id, None)
+
+            current_match = await db.get_solo_match_by_id(match_id)
+            if not current_match or current_match.get("status") != "VOICE_CHECKIN":
+                return
+
+            # Mark status in DB immediately before doing any async calls/renders to prevent double-posting
+            await db.set_solo_match_status(match_id, "DRAFTING")
+            current_match["status"] = "DRAFTING"
+
+            draft_mode, veto_mode, map_pool, colour = await asyncio.gather(
+                get_solo_draft_mode(),
+                get_solo_veto_mode(),
+                get_solo_map_pool(),
+                get_solo_embed_colour(),
+            )
 
         all_pids = (
             current_match.get("team1_player_ids", [])
@@ -3932,8 +3946,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             return
 
         # SNAKE or ALTERNATING drafting
-        await db.set_solo_match_status(current_match["id"], "DRAFTING")
-        current_match["status"] = "DRAFTING"
         avail_ids = current_match.get("available_player_ids", [])
         avail_dicts = [players_by_id[pid] for pid in avail_ids if pid in players_by_id]
         embed = build_solo_draft_embed(current_match, players_by_id, colour=colour)
@@ -3956,6 +3968,8 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         )
         await db.update_solo_match_panel(current_match["id"], panel_msg.id)
         log.info("Match #%d started after checkin with drafting.", current_match["id"])
+        finally:
+            self._starting_matches.discard(match_id)
 
     # =========================================================================
     # Admin Commands & Solo Config Suite
