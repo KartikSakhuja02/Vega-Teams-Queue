@@ -528,10 +528,6 @@ class AdminCog(commands.Cog, name="Admin"):
         if message.author.bot or not message.guild or not isinstance(message.author, discord.Member):
             return
 
-        # Exempt staff / administrators from auto-ban
-        if _is_admin(message.author):
-            return
-
         # Ensure blacklist cache is populated
         if not self._blacklisted_words:
             return
