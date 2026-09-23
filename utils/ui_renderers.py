@@ -253,34 +253,26 @@ def render_draft_ui(
     )
 
     t1_lines = []
-    for i in range(5):
-        if i < len(team1_players):
-            p = team1_players[i]
-            is_cap = (p.get("discord_id") == captain1_id or i == 0)
-            prefix = "👑 " if is_cap else "▫️ "
-            ign = p.get("ign") or p.get("discord_username") or "Player"
-            uname = p.get("discord_username") or p.get("username")
-            d_id = p.get("discord_id")
-            user_ref = f"<@{d_id}>" if d_id else (f"@{uname}" if uname else f"@{ign}")
-            elo = p.get("elo", 1000)
-            t1_lines.append(f"{prefix}{user_ref} (**{ign}**) `({elo})`")
-        else:
-            t1_lines.append("▫️ *Empty Slot*")
-            
+    for i, p in enumerate(team1_players):
+        is_cap = (p.get("discord_id") == captain1_id or i == 0)
+        prefix = "👑 " if is_cap else "▫️ "
+        ign = p.get("ign") or p.get("discord_username") or "Player"
+        uname = p.get("discord_username") or p.get("username")
+        d_id = p.get("discord_id")
+        user_ref = f"<@{d_id}>" if d_id else (f"@{uname}" if uname else f"@{ign}")
+        elo = p.get("elo", 1000)
+        t1_lines.append(f"{prefix}{user_ref} (**{ign}**) `({elo})`")
+
     t2_lines = []
-    for i in range(5):
-        if i < len(team2_players):
-            p = team2_players[i]
-            is_cap = (p.get("discord_id") == captain2_id or i == 0)
-            prefix = "👑 " if is_cap else "▫️ "
-            ign = p.get("ign") or p.get("discord_username") or "Player"
-            uname = p.get("discord_username") or p.get("username")
-            d_id = p.get("discord_id")
-            user_ref = f"<@{d_id}>" if d_id else (f"@{uname}" if uname else f"@{ign}")
-            elo = p.get("elo", 1000)
-            t2_lines.append(f"{prefix}{user_ref} (**{ign}**) `({elo})`")
-        else:
-            t2_lines.append("▫️ *Empty Slot*")
+    for i, p in enumerate(team2_players):
+        is_cap = (p.get("discord_id") == captain2_id or i == 0)
+        prefix = "👑 " if is_cap else "▫️ "
+        ign = p.get("ign") or p.get("discord_username") or "Player"
+        uname = p.get("discord_username") or p.get("username")
+        d_id = p.get("discord_id")
+        user_ref = f"<@{d_id}>" if d_id else (f"@{uname}" if uname else f"@{ign}")
+        elo = p.get("elo", 1000)
+        t2_lines.append(f"{prefix}{user_ref} (**{ign}**) `({elo})`")
 
     embed.add_field(name=f"─── TEAM A [{len(team1_players)}/5] ───", value="\n".join(t1_lines), inline=True)
     embed.add_field(name=f"─── TEAM B [{len(team2_players)}/5] ───", value="\n".join(t2_lines), inline=True)

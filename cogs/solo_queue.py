@@ -608,21 +608,13 @@ def build_solo_draft_embed(
 
     # Build Team A list
     t1_lines = []
-    for i in range(5):
-        if i < len(t1_ids):
-            pid = t1_ids[i]
-            t1_lines.append(_player_display(pid, is_cap=(pid == c1_id)))
-        else:
-            t1_lines.append("▫️ *Empty Slot*")
+    for pid in t1_ids:
+        t1_lines.append(_player_display(pid, is_cap=(pid == c1_id)))
 
     # Build Team B list
     t2_lines = []
-    for i in range(5):
-        if i < len(t2_ids):
-            pid = t2_ids[i]
-            t2_lines.append(_player_display(pid, is_cap=(pid == c2_id)))
-        else:
-            t2_lines.append("▫️ *Empty Slot*")
+    for pid in t2_ids:
+        t2_lines.append(_player_display(pid, is_cap=(pid == c2_id)))
 
     picker_p = players_by_id.get(turn_id, {})
     picker_ign = picker_p.get("ign") or picker_p.get("discord_username") or "Captain"
