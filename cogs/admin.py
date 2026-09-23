@@ -1553,10 +1553,6 @@ class AdminCog(commands.Cog, name="Admin"):
     async def blacklist_remove_word_ac(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         return await self._autocomplete_blacklisted_words(interaction, current)
 
-    @admin_blacklist_words_cmd.autocomplete("word")
-    async def admin_blacklist_words_word_ac(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-        return await self._autocomplete_blacklisted_words(interaction, current)
-
     @top_level_admin_blacklist_words.autocomplete("word")
     async def top_level_blacklist_word_ac(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         return await self._autocomplete_blacklisted_words(interaction, current)
