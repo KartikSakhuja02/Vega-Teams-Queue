@@ -3298,7 +3298,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     async def _repost_match_panel(self, match_id: int, channel: discord.TextChannel) -> None:
         """Repost the active match panel at the bottom of the match text channel so it stays under new chat messages."""
         match = await db.get_solo_match_by_id(match_id)
-        if not match or match.get("status") in ("CANCELLED", "COMPLETED"):
+        if not match or match.get("status") not in ("MAP_VETO", "IN_PROGRESS", "SUBMITTED"):
             return
 
         panel_id = match.get("panel_message_id")
@@ -3368,9 +3368,10 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             self._schedule_repost_panel_at_bottom()
             return
 
-        # Check if message is in an active solo match channel
+        # Check if message is in a solo match channel during MAP_VETO, IN_PROGRESS, or SUBMITTED phases
+        # (Excludes player selection/drafting so captain select menus are not interrupted)
         match = await db.get_solo_match_by_channel(message.channel.id)
-        if match and match.get("status") not in ("CANCELLED", "COMPLETED"):
+        if match and match.get("status") in ("MAP_VETO", "IN_PROGRESS", "SUBMITTED"):
             self._schedule_repost_match_panel_at_bottom(match["id"], message.channel)
 
     # =========================================================================
