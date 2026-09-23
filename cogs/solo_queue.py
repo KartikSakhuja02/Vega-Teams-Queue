@@ -3319,16 +3319,14 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await interaction.followup.send("You are banned from queues.", ephemeral=True)
             return
 
-        if player.get("status") == "IN_MATCH":
-            active_m = await db.get_active_solo_match_by_player(user_id)
-            if active_m:
-                ch_id = active_m.get("channel_id")
-                active_ch = interaction.guild.get_channel(ch_id) if (interaction.guild and ch_id) else None
-                if active_ch:
-                    await interaction.followup.send("You are currently in an active match.", ephemeral=True)
-                    return
-            # Previous match concluded, results submitted, or channel deleted — auto-heal to IDLE
-            await db.set_player_status(user_id, "IDLE")
+        active_m = await db.get_active_solo_match_by_player(user_id)
+        if active_m:
+            if player.get("status") != "IN_MATCH":
+                await db.set_player_status(user_id, "IN_MATCH")
+            ch_id = active_m.get("channel_id")
+            ch_hint = f" (<#{ch_id}>)" if ch_id else ""
+            await interaction.followup.send(f"You are currently in an active match{ch_hint}.", ephemeral=True)
+            return
 
         if any(p["discord_id"] == user_id for p in queued_players):
             await interaction.followup.send("You are already in queue.", ephemeral=True)
@@ -4647,11 +4645,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         t1_pids: list[int],
         t2_pids: list[int],
     ) -> None:
-        # 4b. Immediately make all match participants IDLE in the database so they can join a new queue right now
-        try:
-            await db.release_all_match_players_to_idle(match["id"], all_match_pids)
-        except Exception as e:
-            log.warning("Could not set lobby players to IDLE on submission start: %s", e)
+        # 4b. Match is now in PROCESSING_RESULT; players remain IN_MATCH until results are confirmed and posted.
 
         # 4c. Delete all match voice channels immediately; keep only the text channel active while screenshot is processing
         if interaction.guild:
@@ -5917,21 +5911,15 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             match = await db.get_active_solo_match_by_player(old_player.id)
 
         # Check if new player is currently in an active match
-        if new_p_rec.get("status") == "IN_MATCH":
-            new_p_active_m = await db.get_active_solo_match_by_player(new_player.id)
-            if new_p_active_m and (not match or new_p_active_m.get("id") != match.get("id")):
-                ch_id = new_p_active_m.get("channel_id")
-                active_ch = interaction.guild.get_channel(ch_id) if (interaction.guild and ch_id) else None
-                if active_ch:
-                    await interaction.followup.send(
-                        f"<@{new_player.id}> is already in an active match (<#{ch_id}>).",
-                        ephemeral=True,
-                    )
-                    return
-                else:
-                    await db.set_player_status(new_player.id, "IDLE")
-            else:
-                await db.set_player_status(new_player.id, "IDLE")
+        new_p_active_m = await db.get_active_solo_match_by_player(new_player.id)
+        if new_p_active_m and (not match or new_p_active_m.get("id") != match.get("id")):
+            ch_id = new_p_active_m.get("channel_id")
+            ch_hint = f" (<#{ch_id}>)" if ch_id else ""
+            await interaction.followup.send(
+                f"<@{new_player.id}> is already in an active match{ch_hint}.",
+                ephemeral=True,
+            )
+            return
 
         # If still no match, check if old_player is in the waiting queue (0/10)
         if not match:
@@ -6812,21 +6800,15 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             return
 
         # Check if new player is already in an active match
-        if new_p_rec.get("status") == "IN_MATCH":
-            new_p_active_m = await db.get_active_solo_match_by_player(new_player.id)
-            if new_p_active_m and new_p_active_m.get("id") != match.get("id"):
-                ch_id = new_p_active_m.get("channel_id")
-                active_ch = interaction.guild.get_channel(ch_id) if ch_id else None
-                if active_ch:
-                    await interaction.followup.send(
-                        f"<@{new_player.id}> is already in an active match (<#{ch_id}>).",
-                        ephemeral=True,
-                    )
-                    return
-                else:
-                    await db.set_player_status(new_player.id, "IDLE")
-            else:
-                await db.set_player_status(new_player.id, "IDLE")
+        new_p_active_m = await db.get_active_solo_match_by_player(new_player.id)
+        if new_p_active_m and new_p_active_m.get("id") != match.get("id"):
+            ch_id = new_p_active_m.get("channel_id")
+            ch_hint = f" (<#{ch_id}>)" if ch_id else ""
+            await interaction.followup.send(
+                f"<@{new_player.id}> is already in an active match{ch_hint}.",
+                ephemeral=True,
+            )
+            return
 
         # 3. Propagate permissions so new_player can see the channel and interact
         await self._grant_match_permissions(match, interaction.guild, new_player)

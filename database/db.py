@@ -2552,13 +2552,12 @@ async def get_solo_match_by_voice_channel(voice_channel_id: int) -> Optional[dic
 
 
 async def get_active_solo_match_by_player(discord_id: int) -> Optional[dict]:
-    """Fetch any active in-game match (VOICE_CHECKIN, DRAFTING, MAP_VETO, IN_PROGRESS) the player belongs to where results have not been submitted."""
+    """Fetch any active in-game match (VOICE_CHECKIN, DRAFTING, MAP_VETO, IN_PROGRESS, PROCESSING_RESULT) the player belongs to."""
     row = await get_pool().fetchrow(
         """
         SELECT * FROM solo_matches
-        WHERE ($1 = ANY(team1_player_ids) OR $1 = ANY(team2_player_ids) OR $1 = ANY(available_player_ids))
-          AND status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS')
-          AND submitted_by IS NULL
+        WHERE ($1 = ANY(team1_player_ids) OR $1 = ANY(team2_player_ids) OR $1 = ANY(available_player_ids) OR captain1_id = $1 OR captain2_id = $1)
+          AND status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS', 'PROCESSING_RESULT')
         ORDER BY id DESC LIMIT 1
         """,
         discord_id,
