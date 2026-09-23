@@ -791,9 +791,10 @@ def build_solo_map_vote_embed(
         cnt = counts[m]
         bar = "█" * cnt + "░" * (10 - cnt)
         voters = [f"<@{uid}>" for uid, voted_m in votes_by_user.items() if voted_m == m]
-        voters_str = f"  ({', '.join(voters)})" if voters else ""
         selected_mark = "  ◀ YOUR VOTE" if user_voted_map and m == user_voted_map else ""
-        lines.append(f"`{m:<10}` `{bar}` **{cnt} votes**{voters_str}{selected_mark}")
+        lines.append(f"`{m:<10}` `{bar}` **{cnt} votes**{selected_mark}")
+        if voters:
+            lines.append(f"  └ {', '.join(voters)}")
 
     embed = discord.Embed(
         title=f"🗺️ QUEUE #{match['id']} — MAP VOTE",
