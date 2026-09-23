@@ -1510,24 +1510,7 @@ class AdminCog(commands.Cog, name="Admin"):
         """Command /admin blacklist clear."""
         await self._handle_blacklist_action(interaction, "clear", None, None)
 
-    @admin_group.command(
-        name="blacklist_words",
-        description="Manage blacklisted words for queue auto-moderation.",
-    )
-    @app_commands.describe(
-        action="Choose action: add, remove, list, or clear.",
-        word="The word or phrase to add or remove.",
-        reason="Infraction reason for bot logs and ban card (e.g. Abusive Language, Slurs).",
-    )
-    async def admin_blacklist_words_cmd(
-        self,
-        interaction: discord.Interaction,
-        action: Literal["add", "remove", "list", "clear"],
-        word: Optional[str] = None,
-        reason: Optional[str] = None,
-    ) -> None:
-        """Top-level command alias /admin blacklist_words."""
-        await self._handle_blacklist_action(interaction, action, word, reason)
+
 
     @app_commands.command(
         name="admin_blacklist_words",
@@ -3202,34 +3185,6 @@ class AdminCog(commands.Cog, name="Admin"):
     ) -> None:
         """Slash command /admin queue point_buff_status."""
         await self._handle_point_buff_status(interaction)
-
-    @admin_group.command(
-        name="point_buff",
-        description="Activate a points/ELO buff event for queue match winners.",
-    )
-    @app_commands.describe(
-        amount="Percentage buff amount (e.g. 20 for +20% bonus points).",
-        hours="Duration of the buff event in hours (e.g. 2 or 2.5).",
-    )
-    async def admin_point_buff_cmd(
-        self,
-        interaction: discord.Interaction,
-        amount: float,
-        hours: float,
-    ) -> None:
-        """Top-level command alias /admin point_buff <amount> <hours>."""
-        await self._handle_point_buff(interaction, amount, hours)
-
-    @admin_group.command(
-        name="stop_point_buff",
-        description="Stop/cancel the active queue points buff event immediately.",
-    )
-    async def admin_stop_point_buff_cmd(
-        self,
-        interaction: discord.Interaction,
-    ) -> None:
-        """Top-level command alias /admin stop_point_buff."""
-        await self._handle_stop_point_buff(interaction)
 
 
 async def setup(bot: commands.Bot) -> None:
