@@ -1,7 +1,7 @@
 """
 utils/ui_renderers.py
-Modern, compact, Discord-native Components V2 UI renderers for VEGA Esports Matchmaking.
-Produces FACEIT-style information-dense screens with minimal clutter and maximum clarity.
+Modern, compact, ultra-minimalist Discord UI renderers for VEGA Esports Matchmaking.
+Designed for high readability, clean formatting, and modern aesthetic choices.
 """
 
 import os
@@ -10,24 +10,43 @@ from typing import Optional, List, Dict, Any, Tuple
 import discord
 from discord.ui import View, Button, Select
 
-# Visual Accent Colors
-VEGA_PURPLE = discord.Colour.from_str("#8B5CF6")
-VEGA_RED = discord.Colour.from_str("#FF4655")
-VEGA_GREEN = discord.Colour.from_str("#10B981")
-VEGA_DARK = discord.Colour.from_str("#1E1E2E")
+# Theme Palette Definitions
+THEMES = {
+    "NEON": {
+        "primary": discord.Colour.from_str("#7C3AED"),     # Deep Violet
+        "secondary": discord.Colour.from_str("#06B6D4"),   # Cyan
+        "danger": discord.Colour.from_str("#EF4444"),      # Crimson
+        "success": discord.Colour.from_str("#10B981"),     # Emerald
+        "name": "Minimalist Neon Violet & Cyan",
+    },
+    "DARK": {
+        "primary": discord.Colour.from_str("#27272A"),     # Charcoal Obsidian
+        "secondary": discord.Colour.from_str("#E4E4E7"),   # Platinum
+        "danger": discord.Colour.from_str("#DC2626"),      # Dark Red
+        "success": discord.Colour.from_str("#16A34A"),     # Green
+        "name": "Minimalist Dark Slate & Monochrome",
+    },
+    "VALORANT": {
+        "primary": discord.Colour.from_str("#FF4655"),     # Valorant Red
+        "secondary": discord.Colour.from_str("#0F172A"),   # Midnight Slate
+        "danger": discord.Colour.from_str("#991B1B"),      # Deep Red
+        "success": discord.Colour.from_str("#059669"),     # Emerald
+        "name": "Minimalist Esports Crimson",
+    },
+}
 
 
 def _get_progress_bar(current: int, total: int = 10, length: int = 10) -> str:
-    """Generate a clean visual progress bar."""
+    """Generate a clean visual block progress bar."""
     filled = int(round((current / total) * length))
     filled = max(0, min(length, filled))
-    return "🟩" * filled + "⬛" * (length - filled)
+    return "█" * filled + "░" * (length - filled)
 
 
 def _get_dot_indicators(connected: int, total: int = 10) -> str:
-    """Generate visual dot indicators for voice check-in (● connected, ○ missing)."""
+    """Generate clean dot indicators for voice check-in."""
     connected = max(0, min(total, connected))
-    return " ".join(["●" if i < connected else "○" for i in range(total)])
+    return " ".join(["🟢" if i < connected else "🔴" for i in range(total)])
 
 
 # =============================================================================
@@ -40,19 +59,22 @@ class QueueView(View):
         super().__init__(timeout=None)
         
         if not is_in_queue:
-            join_btn = Button(
-                label="JOIN QUEUE",
+            self.add_item(Button(
+                label="⚔️ JOIN QUEUE",
                 style=discord.ButtonStyle.success,
                 custom_id="test_solo_queue_join",
-            )
-            self.add_item(join_btn)
+            ))
         else:
-            leave_btn = Button(
-                label="LEAVE QUEUE",
+            self.add_item(Button(
+                label="🚪 LEAVE QUEUE",
                 style=discord.ButtonStyle.danger,
                 custom_id="test_solo_queue_leave",
-            )
-            self.add_item(leave_btn)
+            ))
+        self.add_item(Button(
+            label="🔄 REFRESH",
+            style=discord.ButtonStyle.secondary,
+            custom_id="test_solo_queue_refresh",
+        ))
 
 
 def render_queue_ui(
@@ -60,51 +82,50 @@ def render_queue_ui(
     is_paused: bool = False,
     pause_until: Optional[float] = None,
     user_is_in_queue: bool = False,
+    theme_key: str = "NEON",
 ) -> Tuple[discord.Embed, View]:
     """
-    Render compact, FACEIT-style Queue UI.
+    Render compact, ultra-minimalist Queue UI.
     Shows 7/10 indicator, progress bar, avg ELO, and visible player list.
     """
+    theme = THEMES.get(theme_key.upper(), THEMES["NEON"])
     count = len(queued_players)
     total = 10
     
-    # Calculate Average ELO
     elos = [p.get("elo", 1000) for p in queued_players]
     avg_elo = round(sum(elos) / len(elos)) if elos else 1000
-    
     progress = _get_progress_bar(count, total, length=10)
 
     if is_paused:
-        title = "VEGA QUEUE • PAUSED"
-        colour = VEGA_RED
+        title = "⚡ VEGA QUEUE — PAUSED"
+        colour = theme["danger"]
+        status_desc = f"**STATUS:** Paused by Staff"
         if pause_until:
-            status_desc = f"**Status:** Paused — Reopens <t:{int(pause_until)}:R>"
-        else:
-            status_desc = "**Status:** Paused indefinitely by staff"
+            status_desc += f" • Reopens <t:{int(pause_until)}:R>"
     else:
-        title = "VEGA QUEUE"
-        colour = VEGA_PURPLE
-        status_desc = f"**{count} / {total}**   `{progress}`   **Avg ELO:** `{avg_elo}`"
+        title = "⚡ VEGA COMPETITIVE QUEUE"
+        colour = theme["primary"]
+        status_desc = f"`[ {progress} ]` **{count} / {total} Players** • Avg `{avg_elo} ELO`"
 
     lines = [status_desc, ""]
 
     if queued_players:
-        lines.append("**Queued Players**")
+        lines.append("**PLAYERS IN QUEUE**")
         for idx, p in enumerate(queued_players, 1):
             pid = p.get("discord_id")
             ign = p.get("ign") or p.get("discord_username") or f"Player{idx}"
             elo = p.get("elo", 1000)
             user_part = f"<@{pid}>" if pid else f"**{ign}**"
-            lines.append(f"`{idx}.` {user_part} — `{elo} ELO`")
+            lines.append(f"`▸ {idx:02d}` │ {user_part} — `{elo} ELO`")
     else:
-        lines.append("*Queue is currently empty. Click below to join.*")
+        lines.append("*Queue is currently empty. Click Join Queue below.*")
 
     embed = discord.Embed(
         title=title,
         description="\n".join(lines),
         colour=colour,
     )
-    embed.set_footer(text="VEGA Esports • Competitive Matchmaking")
+    embed.set_footer(text=f"VEGA ESPORTS • {theme['name'].upper()}")
 
     view = QueueView(is_in_queue=user_is_in_queue)
     return embed, view
@@ -119,19 +140,17 @@ class CheckInView(View):
     def __init__(self, lobby_vc_id: Optional[int] = None):
         super().__init__(timeout=None)
         if lobby_vc_id:
-            vc_button = Button(
-                label="JOIN VOICE",
+            self.add_item(Button(
+                label="🎙️ JOIN LOBBY VC",
                 style=discord.ButtonStyle.link,
                 url=f"https://discord.com/channels/@me/{lobby_vc_id}",
-            )
-            self.add_item(vc_button)
+            ))
         else:
-            vc_button = Button(
-                label="JOIN VOICE",
+            self.add_item(Button(
+                label="🎙️ JOIN LOBBY VC",
                 style=discord.ButtonStyle.primary,
                 custom_id="test_join_voice",
-            )
-            self.add_item(vc_button)
+            ))
 
 
 def render_checkin_ui(
@@ -140,32 +159,34 @@ def render_checkin_ui(
     total_players: int = 10,
     lobby_vc_id: Optional[int] = None,
     deadline_ts: Optional[int] = None,
+    theme_key: str = "NEON",
 ) -> Tuple[discord.Embed, View]:
     """
-    Render visual Voice Check-in UI with dot indicators (● ● ● ○ ○).
+    Render visual Voice Check-in UI with status indicators.
     """
+    theme = THEMES.get(theme_key.upper(), THEMES["NEON"])
     dots = _get_dot_indicators(connected_count, total_players)
     is_ready = (connected_count >= total_players)
     
-    colour = VEGA_GREEN if is_ready else VEGA_RED
-    status_header = "10 / 10 READY" if is_ready else f"{connected_count} / {total_players} CONNECTED"
+    colour = theme["success"] if is_ready else theme["danger"]
+    status_header = "10 / 10 READY — COMMENCING DRAFT" if is_ready else f"{connected_count} / {total_players} PLAYERS IN VOICE"
     
     desc_lines = [
         f"**{status_header}**",
-        f"`{dots}`",
+        f"{dots}",
         "",
     ]
     if lobby_vc_id:
         desc_lines.append(f"**Lobby VC:** <#{lobby_vc_id}>")
     if deadline_ts and not is_ready:
-        desc_lines.append(f"**Check-in Deadline:** <t:{deadline_ts}:R>")
+        desc_lines.append(f"⏰ **Check-in Deadline:** <t:{deadline_ts}:R> (<t:{deadline_ts}:T>)")
 
     embed = discord.Embed(
-        title=f"QUEUE #{match_id} — VOICE CHECK-IN",
+        title=f"🔊 QUEUE #{match_id} — VOICE CHECK-IN",
         description="\n".join(desc_lines),
         colour=colour,
     )
-    embed.set_footer(text="VEGA Esports • Voice Verification")
+    embed.set_footer(text="VEGA ESPORTS • Connect to lobby VC to confirm check-in")
 
     view = CheckInView(lobby_vc_id=lobby_vc_id)
     return embed, view
@@ -191,7 +212,7 @@ class DraftSelect(Select):
                 )
             )
         super().__init__(
-            placeholder="SELECT PLAYER...",
+            placeholder="SELECT PLAYER TO PICK...",
             min_values=1,
             max_values=1,
             options=options if options else [discord.SelectOption(label="None", value="0")],
@@ -217,50 +238,50 @@ def render_draft_ui(
     available_players: List[Dict[str, Any]],
     captain1_id: int = 0,
     captain2_id: int = 0,
+    theme_key: str = "NEON",
 ) -> Tuple[discord.Embed, View]:
     """
     Render clean two-column Team A vs Team B Draft UI with slots and captain indicators.
     """
+    theme = THEMES.get(theme_key.upper(), THEMES["NEON"])
     embed = discord.Embed(
-        title=f"QUEUE #{match_id} — DRAFT · {step} / {total_steps}",
-        description=f"**PICK · {picker_name.upper()}**",
-        colour=VEGA_PURPLE,
+        title=f"⚔️ QUEUE #{match_id} — CAPTAIN DRAFT  [{step}/{total_steps}]",
+        description=f"🎯 **CURRENT TURN:** `{picker_name.upper()}`",
+        colour=theme["primary"],
     )
 
-    # Format Team A Column
     t1_lines = []
     for i in range(5):
         if i < len(team1_players):
             p = team1_players[i]
             is_cap = (p.get("discord_id") == captain1_id or i == 0)
-            prefix = "👑 " if is_cap else "● "
+            prefix = "👑 " if is_cap else "▸ "
             ign = p.get("ign") or p.get("discord_username") or "Player"
             elo = p.get("elo", 1000)
-            t1_lines.append(f"{prefix}**{ign}** `{elo}`")
+            t1_lines.append(f"{prefix}**{ign}** (`{elo}`)")
         else:
-            t1_lines.append("○ *Empty Slot*")
+            t1_lines.append("▫ *Empty Slot*")
             
-    # Format Team B Column
     t2_lines = []
     for i in range(5):
         if i < len(team2_players):
             p = team2_players[i]
             is_cap = (p.get("discord_id") == captain2_id or i == 0)
-            prefix = "👑 " if is_cap else "● "
+            prefix = "👑 " if is_cap else "▸ "
             ign = p.get("ign") or p.get("discord_username") or "Player"
             elo = p.get("elo", 1000)
-            t2_lines.append(f"{prefix}**{ign}** `{elo}`")
+            t2_lines.append(f"{prefix}**{ign}** (`{elo}`)")
         else:
-            t2_lines.append("○ *Empty Slot*")
+            t2_lines.append("▫ *Empty Slot*")
 
-    embed.add_field(name="TEAM A", value="\n".join(t1_lines), inline=True)
-    embed.add_field(name="TEAM B", value="\n".join(t2_lines), inline=True)
+    embed.add_field(name="─── TEAM A ───", value="\n".join(t1_lines), inline=True)
+    embed.add_field(name="─── TEAM B ───", value="\n".join(t2_lines), inline=True)
 
     if available_players:
-        avail_text = ", ".join(f"`{p.get('ign', 'Player')}` ({p.get('elo', 1000)})" for p in available_players)
-        embed.add_field(name="Remaining Pool", value=avail_text, inline=False)
+        avail_text = " • ".join(f"`{p.get('ign', 'Player')}` ({p.get('elo', 1000)})" for p in available_players)
+        embed.add_field(name="AVAILABLE PLAYERS", value=avail_text, inline=False)
 
-    embed.set_footer(text="VEGA Esports • Captain Draft")
+    embed.set_footer(text="VEGA ESPORTS • Select player from dropdown below")
     view = DraftView(available_players)
     return embed, view
 
@@ -289,27 +310,28 @@ def render_map_vote_ui(
     votes_by_map: Dict[str, int],
     end_time_ts: int,
     user_voted_map: Optional[str] = None,
+    theme_key: str = "NEON",
 ) -> Tuple[discord.Embed, View]:
     """
     Render clean Map Voting UI with live tally and compact timer.
     """
+    theme = THEMES.get(theme_key.upper(), THEMES["NEON"])
     lines = [
-        f"**Voting Ends:** <t:{end_time_ts}:R>",
+        f"⏳ **Voting Deadline:** <t:{end_time_ts}:R>",
         "",
-        "```",
     ]
     for m in map_options:
         tally = votes_by_map.get(m, 0)
-        selected_mark = "  [YOUR VOTE]" if m == user_voted_map else ""
-        lines.append(f"{m:<12} {tally:>2}{selected_mark}")
-    lines.append("```")
+        selected_mark = "  ◀ YOUR VOTE" if m == user_voted_map else ""
+        bar = "█" * tally + "░" * (10 - tally)
+        lines.append(f"`{m:<10}` `{bar}` **{tally} votes**{selected_mark}")
 
     embed = discord.Embed(
-        title=f"QUEUE #{match_id} — MAP VOTE",
+        title=f"🗺️ QUEUE #{match_id} — MAP VOTE",
         description="\n".join(lines),
-        colour=VEGA_PURPLE,
+        colour=theme["secondary"],
     )
-    embed.set_footer(text="VEGA Esports • Map Veto")
+    embed.set_footer(text="VEGA ESPORTS • Click a map button below to vote")
     view = MapVoteView(map_options, user_voted_map=user_voted_map)
     return embed, view
 
@@ -323,7 +345,7 @@ class MatchReadyView(View):
     def __init__(self):
         super().__init__(timeout=None)
         submit_btn = Button(
-            label="SUBMIT RESULT",
+            label="🏆 SUBMIT RESULT",
             style=discord.ButtonStyle.danger,
             custom_id="test_submit_result",
         )
@@ -337,43 +359,46 @@ def render_match_ready_ui(
     team2_players: List[Dict[str, Any]],
     team1_avg_elo: int,
     team2_avg_elo: int,
+    theme_key: str = "NEON",
 ) -> Tuple[discord.Embed, View]:
     """
     Render Match Ready presentation with map banner and Team A vs Team B rosters.
     """
+    theme = THEMES.get(theme_key.upper(), THEMES["NEON"])
     t1_lines = []
     for p in team1_players:
         pid = p.get("discord_id")
-        ign = p.get("ign") or p.get("discord_username") or f"<@{pid}>"
-        t1_lines.append(f"<@{pid}>" if pid else f"**{ign}**")
+        ign = p.get("ign") or p.get("discord_username") or f"Player"
+        elo = p.get("elo", 1000)
+        t1_lines.append(f"<@{pid}>" if pid else f"**{ign}** (`{elo}`)")
 
     t2_lines = []
     for p in team2_players:
         pid = p.get("discord_id")
-        ign = p.get("ign") or p.get("discord_username") or f"<@{pid}>"
-        t2_lines.append(f"<@{pid}>" if pid else f"**{ign}**")
+        ign = p.get("ign") or p.get("discord_username") or f"Player"
+        elo = p.get("elo", 1000)
+        t2_lines.append(f"<@{pid}>" if pid else f"**{ign}** (`{elo}`)")
 
     embed = discord.Embed(
-        title=f"QUEUE #{match_id} — MATCH READY",
-        description=f"📍 **MAP: {selected_map.upper()}**",
-        colour=VEGA_RED,
+        title=f"🏆 QUEUE #{match_id} — MATCH READY",
+        description=f"📍 **SELECTED MAP:** `{selected_map.upper()}`\n> Use `/submit-result` when the match concludes.",
+        colour=theme["primary"],
         timestamp=datetime.now(timezone.utc),
     )
     
     embed.add_field(
-        name=f"TEAM A (`{team1_avg_elo} ELO`)",
+        name=f"─── TEAM A (`{team1_avg_elo} ELO`) ───",
         value="\n".join(t1_lines) if t1_lines else "—",
         inline=True,
     )
     embed.add_field(
-        name=f"TEAM B (`{team2_avg_elo} ELO`)",
+        name=f"─── TEAM B (`{team2_avg_elo} ELO`) ───",
         value="\n".join(t2_lines) if t2_lines else "—",
         inline=True,
     )
     
-    embed.set_footer(text="VEGA Esports • Match In Progress")
+    embed.set_footer(text="VEGA ESPORTS • Match In Progress")
     
-    # Attach map thumbnail if available
     clean_map = selected_map.strip().lower()
     map_filename = f"{clean_map}.png"
     maps_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "maps")
@@ -383,3 +408,34 @@ def render_match_ready_ui(
 
     view = MatchReadyView()
     return embed, view
+
+
+# =============================================================================
+# 6. MATCH RESULT UI RENDERER
+# =============================================================================
+
+def render_match_result_ui(
+    match_id: int,
+    winning_team: int,
+    team1_score: int,
+    team2_score: int,
+    selected_map: str,
+    mvp_name: str,
+    theme_key: str = "NEON",
+) -> discord.Embed:
+    """
+    Render clean Match Result Scorecard embed.
+    """
+    theme = THEMES.get(theme_key.upper(), THEMES["NEON"])
+    winner_str = "TEAM A VICTORY" if winning_team == 1 else ("TEAM B VICTORY" if winning_team == 2 else "DRAW")
+    score_str = f"**TEAM A** `{team1_score}`  —  `{team2_score}` **TEAM B**"
+
+    embed = discord.Embed(
+        title=f"🏆 MATCH #{match_id} RESULTS — {winner_str}",
+        description=f"📍 **MAP:** `{selected_map.upper()}`\n\n{score_str}\n\n🌟 **MVP:** `{mvp_name}` (+25 ELO)",
+        colour=theme["success"] if winning_team != 0 else theme["secondary"],
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_footer(text="VEGA ESPORTS • Official Match Record")
+    return embed
+

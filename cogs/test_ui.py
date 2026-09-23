@@ -1,7 +1,7 @@
 """
 cogs/test_ui.py
 Test & Simulation cog to preview redesigned Discord Components V2 UIs in a dedicated channel.
-Allows testing all 5 matchmaking UI states without modifying production queue code.
+Allows testing all 6 matchmaking UI states without modifying production queue code.
 """
 
 import os
@@ -19,6 +19,8 @@ from utils.ui_renderers import (
     render_draft_ui,
     render_map_vote_ui,
     render_match_ready_ui,
+    render_match_result_ui,
+    THEMES,
 )
 
 log = logging.getLogger(__name__)
@@ -60,6 +62,7 @@ class TestUICog(commands.Cog, name="TestUI"):
     )
     @app_commands.describe(
         screen="Select which UI screen state to simulate (or 'ALL' for complete flow).",
+        theme="Select visual color theme palette for testing.",
     )
     @app_commands.choices(
         screen=[
@@ -69,12 +72,19 @@ class TestUICog(commands.Cog, name="TestUI"):
             app_commands.Choice(name="3. Draft UI (Pick Step)", value="draft"),
             app_commands.Choice(name="4. Map Vote UI", value="map_vote"),
             app_commands.Choice(name="5. Match Ready UI", value="match_ready"),
+            app_commands.Choice(name="6. Match Result UI", value="match_result"),
+        ],
+        theme=[
+            app_commands.Choice(name="Neon Violet & Cyan (Recommended)", value="NEON"),
+            app_commands.Choice(name="Dark Slate Monochrome", value="DARK"),
+            app_commands.Choice(name="Valorant Esports Crimson", value="VALORANT"),
         ]
     )
     async def test_ui_preview(
         self,
         interaction: discord.Interaction,
         screen: str = "all",
+        theme: str = "NEON",
     ) -> None:
         """Command handler for previewing redesigned UIs."""
         await interaction.response.defer(ephemeral=True)
@@ -87,12 +97,22 @@ class TestUICog(commands.Cog, name="TestUI"):
 
         sent_count = 0
 
+        # Header intro notice for simulation
+        theme_info = THEMES.get(theme, THEMES["NEON"])
+        intro_embed = discord.Embed(
+            title=f"🎨 UI PREVIEW SIMULATION — {theme_info['name'].upper()}",
+            description=f"Previewing redesigned minimalistic matchmaking cards in {target_name}.\nSelected Theme Palette: `{theme}`",
+            colour=theme_info["primary"],
+        )
+        await target_channel.send(embed=intro_embed)
+
         # 1. Queue UI
         if screen in ("all", "queue"):
             embed, view = render_queue_ui(
                 queued_players=MOCK_PLAYERS[:7],
                 is_paused=False,
                 user_is_in_queue=False,
+                theme_key=theme,
             )
             await target_channel.send(embed=embed, view=view)
             sent_count += 1
@@ -105,6 +125,7 @@ class TestUICog(commands.Cog, name="TestUI"):
                 total_players=10,
                 lobby_vc_id=None,
                 deadline_ts=deadline_ts,
+                theme_key=theme,
             )
             await target_channel.send(embed=embed, view=view)
             sent_count += 1
@@ -121,6 +142,7 @@ class TestUICog(commands.Cog, name="TestUI"):
                 available_players=MOCK_PLAYERS[2:],
                 captain1_id=MOCK_PLAYERS[0]["discord_id"],
                 captain2_id=MOCK_PLAYERS[1]["discord_id"],
+                theme_key=theme,
             )
             await target_channel.send(embed=embed, view=view)
             sent_count += 1
@@ -133,6 +155,7 @@ class TestUICog(commands.Cog, name="TestUI"):
                 votes_by_map={"ABYSS": 1, "ASCENT": 6, "ICEBOX": 2, "LOTUS": 1},
                 end_time_ts=now_ts + 60,
                 user_voted_map="ASCENT",
+                theme_key=theme,
             )
             await target_channel.send(embed=embed, view=view)
             sent_count += 1
@@ -152,9 +175,9 @@ class TestUICog(commands.Cog, name="TestUI"):
                 team2_players=t2,
                 team1_avg_elo=t1_avg,
                 team2_avg_elo=t2_avg,
+                theme_key=theme,
             )
             
-            # Check for Ascent thumbnail
             maps_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "maps")
             ascent_path = os.path.join(maps_dir, "ascent.png")
             if os.path.exists(ascent_path):
@@ -164,11 +187,26 @@ class TestUICog(commands.Cog, name="TestUI"):
                 await target_channel.send(embed=embed, view=view)
             sent_count += 1
 
+        # 6. Match Result UI
+        if screen in ("all", "match_result"):
+            result_embed = render_match_result_ui(
+                match_id=80,
+                winning_team=1,
+                team1_score=13,
+                team2_score=9,
+                selected_map="ASCENT",
+                mvp_name="Kringzee",
+                theme_key=theme,
+            )
+            await target_channel.send(embed=result_embed)
+            sent_count += 1
+
         await interaction.followup.send(
-            f"✅ Posted {sent_count} redesigned UI preview card(s) to {target_name}.",
+            f"✅ Posted {sent_count} redesigned UI preview card(s) (Theme: `{theme}`) to {target_name}.",
             ephemeral=True,
         )
 
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(TestUICog(bot))
+
