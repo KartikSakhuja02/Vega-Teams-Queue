@@ -1230,10 +1230,15 @@ class PlayerDraftSelect(discord.ui.Select):
                     colour=colour,
                 )
                 vote_content = "**TEAMS DRAFTED • MAP VOTING ACTIVE**\nVote for the map below (1 min). Map with the highest votes will be played!"
-                await _safe_edit_draft_message(content=vote_content, embed=embed, view=vote_view)
                 if interaction.message:
-                    vote_view.message = interaction.message
-                    await db.update_solo_match_panel(self.match_id, interaction.message.id)
+                    try:
+                        await interaction.message.edit(content=None, embed=None, view=None)
+                    except Exception:
+                        pass
+                if interaction.channel:
+                    vote_msg = await interaction.channel.send(content=vote_content, embed=embed, view=vote_view)
+                    vote_view.message = vote_msg
+                    await db.update_solo_match_panel(self.match_id, vote_msg.id)
                 return
 
             # Move to MAP_VETO
@@ -1258,7 +1263,18 @@ class PlayerDraftSelect(discord.ui.Select):
 
             embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
             veto_view = SoloMapVetoView(updated_match, self.players_by_id, veto_mode=veto_mode, colour=colour)
-            await _safe_edit_draft_message(content=None, embed=embed, view=veto_view)
+            if interaction.message:
+                try:
+                    await interaction.message.edit(content=None, embed=None, view=None)
+                except Exception:
+                    pass
+            if interaction.channel:
+                veto_msg = await interaction.channel.send(
+                    content=f"**TEAMS DRAFTED • MAP VETO COMMENCING**\n<@{c1_id}> Please ban the first map below.",
+                    embed=embed,
+                    view=veto_view,
+                )
+                await db.update_solo_match_panel(self.match_id, veto_msg.id)
             return
 
         # Advance draft step
@@ -1399,22 +1415,27 @@ class SoloMapVetoView(discord.ui.View):
             colour = self.colour or await get_solo_embed_colour()
             embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
 
-            map_file = get_solo_map_file(chosen_map)
-            files_arg = [map_file] if map_file else []
-            if not interaction.response.is_done():
-                await interaction.response.edit_message(content=None, embed=embed, view=None, attachments=files_arg)
-            else:
-                await interaction.edit_original_response(content=None, embed=embed, view=None, attachments=files_arg)
-
             if interaction.message:
-                await db.update_solo_match_panel(match["id"], interaction.message.id)
+                try:
+                    await interaction.message.edit(view=None)
+                except Exception:
+                    pass
 
-            if interaction.channel:
-                await interaction.channel.send(
+            map_file = get_solo_map_file(chosen_map)
+            send_kwargs = {
+                "content": (
                     f"**MATCH READY • MAP: {chosen_map.upper()}**\n"
                     f"Captains: <@{c1_id}> and <@{c2_id}>\n"
                     f"Queue ready on **{chosen_map}**. Use `/submit-result` when done."
-                )
+                ),
+                "embed": embed,
+            }
+            if map_file:
+                send_kwargs["file"] = map_file
+
+            if interaction.channel:
+                ready_msg = await interaction.channel.send(**send_kwargs)
+                await db.update_solo_match_panel(match["id"], ready_msg.id)
         return callback
 
     def _create_map_ban_callback(self, map_to_ban: str):
@@ -1489,22 +1510,27 @@ class SoloMapVetoView(discord.ui.View):
 
                 embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
 
-                map_file = get_solo_map_file(final_map)
-                files_arg = [map_file] if map_file else []
-                if not interaction.response.is_done():
-                    await interaction.response.edit_message(content=None, embed=embed, view=None, attachments=files_arg)
-                else:
-                    await interaction.edit_original_response(content=None, embed=embed, view=None, attachments=files_arg)
-
                 if interaction.message:
-                    await db.update_solo_match_panel(match["id"], interaction.message.id)
+                    try:
+                        await interaction.message.edit(view=None)
+                    except Exception:
+                        pass
 
-                if interaction.channel:
-                    await interaction.channel.send(
+                map_file = get_solo_map_file(final_map)
+                send_kwargs = {
+                    "content": (
                         f"**MATCH READY • MAP: {final_map.upper()}**\n"
                         f"Captains: <@{c1_id}> and <@{c2_id}>\n"
                         f"Queue ready on **{final_map}**. Use `/submit-result` when done."
-                    )
+                    ),
+                    "embed": embed,
+                }
+                if map_file:
+                    send_kwargs["file"] = map_file
+
+                if interaction.channel:
+                    ready_msg = await interaction.channel.send(**send_kwargs)
+                    await db.update_solo_match_panel(match["id"], ready_msg.id)
                 return
 
             # Continue veto
@@ -1841,63 +1867,30 @@ class SoloMapVoteView(discord.ui.View):
                 # Build the final Match Ready embed with teams and map name
                 embed = build_solo_map_veto_embed(updated_match, self.players_by_id, colour=colour)
 
-                # Transition panel message in-place to the Match Ready embed
-                edited_panel = False
-                if interaction and not interaction.is_expired():
+                # Remove buttons from old vote message
+                if panel_msg:
                     try:
-                        map_file = get_solo_map_file(final_map)
-                        edit_kwargs = {"content": None, "embed": embed, "view": None}
-                        if map_file:
-                            edit_kwargs["attachments"] = [map_file]
-                        if not interaction.response.is_done():
-                            await interaction.response.edit_message(**edit_kwargs)
-                            edited_panel = True
-                            log.info("SoloMapVoteView._finalize: transitioned message via interaction response")
-                        else:
-                            await interaction.edit_original_response(**edit_kwargs)
-                            edited_panel = True
-                            log.info("SoloMapVoteView._finalize: transitioned message via interaction original_response")
+                        await panel_msg.edit(view=None)
                     except Exception as e:
-                        log.debug("Could not edit via interaction in SoloMapVoteView: %s", e)
+                        log.debug("Could not remove view from old vote message: %s", e)
 
-                if not edited_panel and panel_msg:
-                    try:
-                        map_file = get_solo_map_file(final_map)
-                        edit_kwargs = {"content": None, "embed": embed, "view": None}
-                        if map_file:
-                            edit_kwargs["attachments"] = [map_file]
-                        await panel_msg.edit(**edit_kwargs)
-                        edited_panel = True
-                        log.info("SoloMapVoteView._finalize: transitioned panel_msg (ID: %s) in-place to Match Ready", panel_msg.id)
-                    except Exception as e:
-                        log.warning("Could not edit panel_msg (ID: %s) in SoloMapVoteView: %s", getattr(panel_msg, "id", None), e)
-
-                if not edited_panel and target_ch and hasattr(target_ch, "send"):
-                    try:
-                        map_file = get_solo_map_file(final_map)
-                        send_kwargs = {"embed": embed}
-                        if map_file:
-                            send_kwargs["file"] = map_file
-                        ready_msg = await target_ch.send(**send_kwargs)
-                        await db.update_solo_match_panel(current_match["id"], ready_msg.id)
-                        edited_panel = True
-                        log.info("SoloMapVoteView._finalize: sent new Match Ready embed to target_ch (ID: %s)", ready_msg.id)
-                    except Exception as e:
-                        log.error("Failed to send Match Ready embed to channel: %s", e)
-
-                log.info("SoloMapVoteView._finalize: panel transition done, edited_panel=%s", edited_panel)
-
-                # Announce match ready in channel
+                # Send new Match Ready UI message at bottom of channel
                 if target_ch and hasattr(target_ch, "send"):
                     try:
-                        await target_ch.send(
+                        map_file = get_solo_map_file(final_map)
+                        content_str = (
                             f"**MATCH READY • MAP: {final_map.upper()}**\n"
                             f"Captains: <@{c1_id}> and <@{c2_id}>\n"
                             f"Queue ready on **{final_map}**. Use `/submit-result` when done."
                         )
-                        log.info("SoloMapVoteView._finalize: sent ready announcement text to channel")
+                        send_kwargs = {"content": content_str, "embed": embed}
+                        if map_file:
+                            send_kwargs["file"] = map_file
+                        ready_msg = await target_ch.send(**send_kwargs)
+                        await db.update_solo_match_panel(current_match["id"], ready_msg.id)
+                        log.info("SoloMapVoteView._finalize: sent new Match Ready embed to bottom of channel (ID: %s)", ready_msg.id)
                     except Exception as e:
-                        log.error("Failed to send ready announcement: %s", e)
+                        log.error("Failed to send Match Ready embed to channel: %s", e)
 
             log.info("SoloMapVoteView._finalize: finished successfully for match #%s", self.match.get("id"))
         except Exception as e:
@@ -3367,12 +3360,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         if main_queue_channel and message.channel.id == main_queue_channel.id:
             self._schedule_repost_panel_at_bottom()
             return
-
-        # Check if message is in a solo match channel during MAP_VETO, IN_PROGRESS, or SUBMITTED phases
-        # (Excludes player selection/drafting so captain select menus are not interrupted)
-        match = await db.get_solo_match_by_channel(message.channel.id)
-        if match and match.get("status") in ("MAP_VETO", "IN_PROGRESS", "SUBMITTED"):
-            self._schedule_repost_match_panel_at_bottom(match["id"], message.channel)
 
     # =========================================================================
     # Queue Actions
