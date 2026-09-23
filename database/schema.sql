@@ -341,6 +341,13 @@ CREATE TABLE IF NOT EXISTS solo_matches (
 
 CREATE INDEX IF NOT EXISTS idx_solo_matches_channel ON solo_matches (channel_id);
 CREATE INDEX IF NOT EXISTS idx_solo_matches_status ON solo_matches (status);
+CREATE INDEX IF NOT EXISTS idx_solo_matches_status_created ON solo_matches (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_solo_matches_captains ON solo_matches (captain1_id, captain2_id);
+CREATE INDEX IF NOT EXISTS idx_solo_matches_t1_pids ON solo_matches USING GIN (team1_player_ids);
+CREATE INDEX IF NOT EXISTS idx_solo_matches_t2_pids ON solo_matches USING GIN (team2_player_ids);
+CREATE INDEX IF NOT EXISTS idx_solo_matches_avail_pids ON solo_matches USING GIN (available_player_ids);
+CREATE INDEX IF NOT EXISTS idx_players_status ON players (status);
+CREATE INDEX IF NOT EXISTS idx_solo_queue_discord_id ON solo_queue (discord_id);
 
 
 -- ---------------------------------------------------------------------------

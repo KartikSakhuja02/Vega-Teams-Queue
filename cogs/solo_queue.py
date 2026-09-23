@@ -3285,12 +3285,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         user_id = interaction.user.id
 
-        # Parallelise ALL independent pre-checks in a single round-trip:
-        # pause state (served from cache if warm), player record, and current queue.
-        (is_paused, pause_until), player, queued_players = await asyncio.gather(
+        # Parallelise ALL independent pre-checks in a single DB round-trip:
+        # pause state, player record, current queue, and active match.
+        (is_paused, pause_until), player, queued_players, active_m = await asyncio.gather(
             self.is_queue_paused(),
             db.get_player(user_id),
             db.get_solo_queue(),
+            db.get_active_solo_match_by_player(user_id),
         )
 
         if is_paused:
@@ -3319,7 +3320,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
             await interaction.followup.send("You are banned from queues.", ephemeral=True)
             return
 
-        active_m = await db.get_active_solo_match_by_player(user_id)
         if active_m:
             ch_id = active_m.get("channel_id")
             is_channel_alive = False
@@ -3327,7 +3327,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 ch = interaction.guild.get_channel(ch_id)
                 if ch is None:
                     try:
-                        ch = await interaction.guild.fetch_channel(ch_id)
+                        ch = await asyncio.wait_for(interaction.guild.fetch_channel(ch_id), timeout=1.0)
                     except Exception:
                         ch = None
                 if ch is not None:
@@ -3335,12 +3335,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
             if not is_channel_alive:
                 log.warning("Match #%s channel %s missing. Auto-cancelling stale match for user %s.", active_m.get("id"), ch_id, user_id)
-                await db.cancel_solo_match(active_m["id"])
-                await db.set_player_status(user_id, "IDLE")
-                active_m = None
+                asyncio.create_task(db.cancel_solo_match(active_m["id"]))
+                asyncio.create_task(db.set_player_status(user_id, "IDLE"))
             else:
                 if player.get("status") != "IN_MATCH":
-                    await db.set_player_status(user_id, "IN_MATCH")
+                    asyncio.create_task(db.set_player_status(user_id, "IN_MATCH"))
                 ch_hint = f" (<#{ch_id}>)" if ch_id else ""
                 await interaction.followup.send(f"You are currently in an active match{ch_hint}.", ephemeral=True)
                 return
