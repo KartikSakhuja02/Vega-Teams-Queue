@@ -3085,7 +3085,26 @@ class AdminCog(commands.Cog, name="Admin"):
                     if interaction.guild and interaction.guild.icon:
                         embed.set_thumbnail(url=interaction.guild.icon.url)
 
-                    msg = await ch.send(content="🎉 @everyone **NEW EVENT ACTIVATED!**", embed=embed)
+                    # Find Matchmaking Verified role to ping instead of @everyone
+                    role_ping = None
+                    verified_role_id = int(os.environ.get("MATCHMAKING_VERIFIED_ROLE_ID", "0") or "0")
+                    if interaction.guild:
+                        if verified_role_id != 0:
+                            role_obj = interaction.guild.get_role(verified_role_id)
+                            if role_obj:
+                                role_ping = role_obj.mention
+                        if not role_ping:
+                            role_obj = discord.utils.get(interaction.guild.roles, name="Matchmaking Verified")
+                            if role_obj:
+                                role_ping = role_obj.mention
+
+                    if not role_ping:
+                        if verified_role_id != 0:
+                            role_ping = f"<@&{verified_role_id}>"
+                        else:
+                            role_ping = "@everyone"
+
+                    msg = await ch.send(content=f"🎉 {role_ping} **NEW EVENT ACTIVATED!**", embed=embed)
                     await db.set_config("point_buff_msg_id", str(msg.id))
                     await db.set_config("point_buff_ch_id", str(ch.id))
                     announcement_sent = True
