@@ -2826,20 +2826,6 @@ async def claim_solo_match_result_submission(
             )
             if row:
                 m_dict = dict(row)
-                t1 = list(m_dict.get("team1_player_ids") or [])
-                t2 = list(m_dict.get("team2_player_ids") or [])
-                avail = list(m_dict.get("available_player_ids") or [])
-                all_pids = list(set(t1 + t2 + avail))
-                if all_pids:
-                    await conn.execute(
-                        """
-                        UPDATE players
-                        SET status = 'IDLE',
-                            status_since = NOW()
-                        WHERE discord_id = ANY($1::BIGINT[]) AND status = 'IN_MATCH'
-                        """,
-                        all_pids,
-                    )
                 return True, "", m_dict
 
     # Could not claim lock — inspect current status to give clear error
@@ -2943,7 +2929,7 @@ async def complete_solo_match_with_stats(
                                 SELECT 1 FROM solo_matches sm
                                 WHERE sm.id != $8
                                   AND ($7 = ANY(sm.team1_player_ids) OR $7 = ANY(sm.team2_player_ids) OR $7 = ANY(sm.available_player_ids))
-                                  AND sm.status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS')
+                                  AND sm.status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS', 'PROCESSING_RESULT')
                             ) THEN 'IDLE'
                             ELSE status
                         END,
@@ -2960,7 +2946,7 @@ async def complete_solo_match_with_stats(
                     match_id,
                 )
 
-            # 3. Ensure any other lobby participants (e.g. if undetected by OCR) are set to IDLE
+            # 3. Ensure all lobby participants are set to IDLE when match results are finalized
             if all_lobby_player_ids:
                 await conn.execute(
                     """
@@ -2968,12 +2954,11 @@ async def complete_solo_match_with_stats(
                     SET status = 'IDLE',
                         status_since = NOW()
                     WHERE discord_id = ANY($1::BIGINT[])
-                      AND status = 'IN_MATCH'
                       AND NOT EXISTS (
                           SELECT 1 FROM solo_matches sm
                           WHERE sm.id != $2
                             AND (players.discord_id = ANY(sm.team1_player_ids) OR players.discord_id = ANY(sm.team2_player_ids) OR players.discord_id = ANY(sm.available_player_ids))
-                            AND sm.status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS')
+                            AND sm.status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS', 'PROCESSING_RESULT')
                       )
                     """,
                     all_lobby_player_ids,

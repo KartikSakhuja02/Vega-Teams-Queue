@@ -5198,12 +5198,6 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         f_sc = discord.File(io.BytesIO(image_bytes), filename="scoreboard.png")
         files_to_send = [f for f in [f_map, f_sc] if f]
 
-        # Release all match players to IDLE immediately so they can join another queue
-        try:
-            await db.set_players_status_bulk(all_match_pids, "IDLE")
-        except Exception as e:
-            log.warning("Could not set lobby players to IDLE on /submit-result: %s", e)
-
         edited = False
         try:
             await interaction.edit_original_response(
