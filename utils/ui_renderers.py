@@ -243,52 +243,47 @@ def render_draft_ui(
     theme_key: str = "NEON",
 ) -> Tuple[discord.Embed, View]:
     """
-    Render clean two-column Team A vs Team B Draft UI with slots, Discord ID + IGN, and captain indicators.
+    Render clean two-column Team A vs Team B Draft UI matching original screenshot layout with Discord tags.
     """
     theme = THEMES.get(theme_key.upper(), THEMES["NEON"])
     embed = discord.Embed(
-        title=f"⚔️ QUEUE #{match_id} — CAPTAIN DRAFT [{step}/{total_steps}]",
-        description=f"🎯 **CURRENT TURN:** **{picker_name}**",
+        title=f"Queue {match_id}  —  Draft [{step}/{total_steps}]",
+        description=f"{picker_name}'s pick",
         colour=theme["primary"],
     )
 
-    t1_lines = []
-    for i, p in enumerate(team1_players):
-        is_cap = (p.get("discord_id") == captain1_id or i == 0)
-        prefix = "👑 " if is_cap else "▫️ "
-        ign = p.get("ign") or p.get("discord_username") or "Player"
-        uname = p.get("discord_username") or p.get("username")
+    def _user_ref(p: dict) -> str:
         d_id = p.get("discord_id")
-        user_ref = f"<@{d_id}>" if d_id else (f"@{uname}" if uname else f"@{ign}")
-        elo = p.get("elo", 1000)
-        t1_lines.append(f"{prefix}{user_ref} (**{ign}**) `({elo})`")
+        uname = p.get("discord_username") or p.get("username") or p.get("ign")
+        return f"<@{d_id}>" if d_id else f"@{uname}"
+
+    t1_lines = []
+    for i in range(5):
+        if i < len(team1_players):
+            p = team1_players[i]
+            is_cap = (p.get("discord_id") == captain1_id or i == 0)
+            tag_str = f"{_user_ref(p)} (cap)" if is_cap else _user_ref(p)
+            t1_lines.append(tag_str)
+        else:
+            t1_lines.append("-")
 
     t2_lines = []
-    for i, p in enumerate(team2_players):
-        is_cap = (p.get("discord_id") == captain2_id or i == 0)
-        prefix = "👑 " if is_cap else "▫️ "
-        ign = p.get("ign") or p.get("discord_username") or "Player"
-        uname = p.get("discord_username") or p.get("username")
-        d_id = p.get("discord_id")
-        user_ref = f"<@{d_id}>" if d_id else (f"@{uname}" if uname else f"@{ign}")
-        elo = p.get("elo", 1000)
-        t2_lines.append(f"{prefix}{user_ref} (**{ign}**) `({elo})`")
+    for i in range(5):
+        if i < len(team2_players):
+            p = team2_players[i]
+            is_cap = (p.get("discord_id") == captain2_id or i == 0)
+            tag_str = f"{_user_ref(p)} (cap)" if is_cap else _user_ref(p)
+            t2_lines.append(tag_str)
+        else:
+            t2_lines.append("-")
 
-    embed.add_field(name=f"─── TEAM A [{len(team1_players)}/5] ───", value="\n".join(t1_lines), inline=True)
-    embed.add_field(name=f"─── TEAM B [{len(team2_players)}/5] ───", value="\n".join(t2_lines), inline=True)
+    embed.add_field(name=f"Team A  {len(team1_players)}/5", value="\n".join(t1_lines), inline=True)
+    embed.add_field(name=f"Team B  {len(team2_players)}/5", value="\n".join(t2_lines), inline=True)
 
     if available_players:
-        avail_items = []
-        for p in available_players:
-            ign = p.get("ign") or p.get("discord_username") or "Player"
-            uname = p.get("discord_username") or p.get("username")
-            d_id = p.get("discord_id")
-            user_ref = f"<@{d_id}>" if d_id else (f"@{uname}" if uname else f"@{ign}")
-            elo = p.get("elo", 1000)
-            avail_items.append(f"{user_ref} (**{ign}**) `({elo})`")
-        embed.add_field(name="─── AVAILABLE PLAYERS ───", value=" • ".join(avail_items), inline=False)
+        avail_items = [_user_ref(p) for p in available_players]
+        embed.add_field(name="Available", value=",  ".join(avail_items), inline=False)
 
-    embed.set_footer(text="VEGA ESPORTS • Select player from dropdown below")
     view = DraftView(available_players)
     return embed, view
 

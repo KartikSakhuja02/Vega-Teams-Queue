@@ -589,7 +589,7 @@ def build_solo_draft_embed(
     players_by_id: dict[int, dict],
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Clean simplified draft embed with Discord Mention + IGN + ELO."""
+    """Minimalist draft embed using Discord tags only, matching original layout."""
     c1_id = match["captain1_id"]
     c2_id = match["captain2_id"]
     turn_id = match["current_turn_captain_id"]
@@ -599,49 +599,30 @@ def build_solo_draft_embed(
     t2_ids = match.get("team2_player_ids", [])
     avail_ids = match.get("available_player_ids", [])
 
-    def _player_display(pid: int, is_cap: bool = False) -> str:
-        p = players_by_id.get(pid, {})
-        ign = p.get("ign") or p.get("discord_username") or "Player"
-        elo = p.get("elo", 1000)
-        prefix = "👑 " if is_cap else "▫️ "
-        return f"{prefix}<@{pid}> (**{ign}**) `({elo})`"
+    def _tag(pid: int) -> str:
+        return f"<@{pid}>"
 
-    # Build Team A list
-    t1_lines = []
-    for pid in t1_ids:
-        t1_lines.append(_player_display(pid, is_cap=(pid == c1_id)))
+    # Build team columns: captain first, then picks, then dash for empty slots
+    def _team_col(cap_id: int, ids: list[int]) -> str:
+        rows = [f"{_tag(cap_id)} (cap)"]
+        rows += [_tag(p) for p in ids if p != cap_id]
+        rows += ["-" for _ in range(5 - len(ids))]
+        return "\n".join(rows)
 
-    # Build Team B list
-    t2_lines = []
-    for pid in t2_ids:
-        t2_lines.append(_player_display(pid, is_cap=(pid == c2_id)))
-
-    picker_p = players_by_id.get(turn_id, {})
-    picker_ign = picker_p.get("ign") or picker_p.get("discord_username") or "Captain"
-    picker_str = f"<@{turn_id}> (**{picker_ign}**)" if turn_id else "Captain"
-
+    picker = _tag(turn_id) if turn_id else "Captain"
     embed = discord.Embed(
-        title=f"⚔️ QUEUE #{match['id']} — CAPTAIN DRAFT [{step}/7]",
-        description=f"🎯 **CURRENT TURN:** {picker_str}",
-        colour=colour or discord.Colour.from_str("#27272A"),
+        title=f"Queue {match['id']}  —  Draft [{step}/7]",
+        description=f"{picker}'s pick",
+        colour=colour or EMBED_COLOUR,
     )
-    embed.add_field(name=f"─── TEAM A [{len(t1_ids)}/5] ───", value="\n".join(t1_lines), inline=True)
-    embed.add_field(name=f"─── TEAM B [{len(t2_ids)}/5] ───", value="\n".join(t2_lines), inline=True)
-
+    embed.add_field(name=f"Team A  {len(t1_ids)}/5", value=_team_col(c1_id, t1_ids), inline=True)
+    embed.add_field(name=f"Team B  {len(t2_ids)}/5", value=_team_col(c2_id, t2_ids), inline=True)
     if avail_ids:
-        avail_items = []
-        for pid in avail_ids:
-            p = players_by_id.get(pid, {})
-            ign = p.get("ign") or p.get("discord_username") or "Player"
-            elo = p.get("elo", 1000)
-            avail_items.append(f"<@{pid}> (**{ign}**) `({elo})`")
         embed.add_field(
-            name="─── AVAILABLE PLAYERS ───",
-            value=" • ".join(avail_items),
+            name="Available",
+            value=",  ".join(_tag(p) for p in avail_ids),
             inline=False,
         )
-
-    embed.set_footer(text="VEGA ESPORTS • Select player from dropdown below")
     return embed
 
 
