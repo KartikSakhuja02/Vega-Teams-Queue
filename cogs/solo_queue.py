@@ -848,9 +848,11 @@ async def finalize_teams_and_move(
     """
     v1_id = match.get("voice_team1_id")
     v2_id = match.get("voice_team2_id")
+    vl_id = match.get("voice_lobby_id")
 
     t1_vc: Optional[discord.VoiceChannel] = None
     t2_vc: Optional[discord.VoiceChannel] = None
+    lobby_vc: Optional[discord.VoiceChannel] = None
 
     if v1_id:
         ch1 = guild.get_channel(v1_id)
@@ -860,6 +862,10 @@ async def finalize_teams_and_move(
         ch2 = guild.get_channel(v2_id)
         if isinstance(ch2, discord.VoiceChannel):
             t2_vc = ch2
+    if vl_id:
+        chl = guild.get_channel(vl_id)
+        if isinstance(chl, discord.VoiceChannel):
+            lobby_vc = chl
 
     async def _safe_set_perm(vc: discord.VoiceChannel, member: discord.Member, overwrite: discord.PermissionOverwrite) -> None:
         for attempt in range(3):
@@ -885,7 +891,7 @@ async def finalize_teams_and_move(
         stream=True,
         use_voice_activation=True,
     )
-    # Opposing team permissions (cannot join enemy team VC during active match)
+    # Opposing team permissions / lobby permissions after teams divided (cannot join enemy team VC or lobby VC during active match)
     deny_perms = discord.PermissionOverwrite(
         view_channel=True,
         connect=False,
@@ -907,6 +913,11 @@ async def finalize_teams_and_move(
         for m in mems1:
             if m:
                 perm_tasks.append(_safe_set_perm(t2_vc, m, deny_perms))
+
+    if lobby_vc:
+        for m in mems1 + mems2:
+            if m:
+                perm_tasks.append(_safe_set_perm(lobby_vc, m, deny_perms))
 
     if perm_tasks:
         await asyncio.gather(*perm_tasks, return_exceptions=True)
@@ -3523,7 +3534,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                         )
                         team_voice_overwrites[mem] = discord.PermissionOverwrite(
                             view_channel=True,
-                            connect=True,
+                            connect=False,
                             speak=True,
                             stream=True,
                             use_voice_activation=True,
