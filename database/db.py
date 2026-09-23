@@ -2552,12 +2552,13 @@ async def get_solo_match_by_voice_channel(voice_channel_id: int) -> Optional[dic
 
 
 async def get_active_solo_match_by_player(discord_id: int) -> Optional[dict]:
-    """Fetch any active in-game match (VOICE_CHECKIN, DRAFTING, MAP_VETO, IN_PROGRESS, PROCESSING_RESULT) the player belongs to."""
+    """Fetch any active in-game match (VOICE_CHECKIN, DRAFTING, MAP_VETO, IN_PROGRESS, PROCESSING_RESULT) created within the last 6 hours the player belongs to."""
     row = await get_pool().fetchrow(
         """
         SELECT * FROM solo_matches
         WHERE ($1 = ANY(team1_player_ids) OR $1 = ANY(team2_player_ids) OR $1 = ANY(available_player_ids) OR captain1_id = $1 OR captain2_id = $1)
           AND status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS', 'PROCESSING_RESULT')
+          AND created_at > NOW() - INTERVAL '6 hours'
         ORDER BY id DESC LIMIT 1
         """,
         discord_id,
@@ -2619,6 +2620,20 @@ async def cleanup_stale_match_statuses() -> None:
         log.warning("Could not reset PROCESSING_RESULT matches on startup: %s", e)
 
     try:
+        # 2. Auto-cancel old uncompleted matches (> 6 hours)
+        await pool.execute(
+            """
+            UPDATE solo_matches
+            SET status = 'CANCELLED',
+                completed_at = NOW()
+            WHERE status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS', 'PROCESSING_RESULT')
+              AND created_at < NOW() - INTERVAL '6 hours';
+            """
+        )
+    except Exception as e:
+        log.warning("Could not auto-cancel old matches on startup: %s", e)
+
+    try:
         await pool.execute(
             """
             UPDATE players
@@ -2629,9 +2644,10 @@ async def cleanup_stale_match_statuses() -> None:
                   SELECT 1 FROM solo_matches sm
                   WHERE (players.discord_id = ANY(sm.team1_player_ids)
                       OR players.discord_id = ANY(sm.team2_player_ids)
-                      OR players.discord_id = ANY(sm.available_player_ids))
-                    AND sm.status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS')
-                    AND sm.submitted_by IS NULL
+                      OR players.discord_id = ANY(sm.available_player_ids)
+                      OR sm.captain1_id = players.discord_id
+                      OR sm.captain2_id = players.discord_id)
+                    AND sm.status IN ('VOICE_CHECKIN', 'DRAFTING', 'MAP_VETO', 'IN_PROGRESS', 'PROCESSING_RESULT')
               );
             """
         )

@@ -3321,12 +3321,29 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         active_m = await db.get_active_solo_match_by_player(user_id)
         if active_m:
-            if player.get("status") != "IN_MATCH":
-                await db.set_player_status(user_id, "IN_MATCH")
             ch_id = active_m.get("channel_id")
-            ch_hint = f" (<#{ch_id}>)" if ch_id else ""
-            await interaction.followup.send(f"You are currently in an active match{ch_hint}.", ephemeral=True)
-            return
+            is_channel_alive = False
+            if interaction.guild and ch_id:
+                ch = interaction.guild.get_channel(ch_id)
+                if ch is None:
+                    try:
+                        ch = await interaction.guild.fetch_channel(ch_id)
+                    except Exception:
+                        ch = None
+                if ch is not None:
+                    is_channel_alive = True
+
+            if not is_channel_alive:
+                log.warning("Match #%s channel %s missing. Auto-cancelling stale match for user %s.", active_m.get("id"), ch_id, user_id)
+                await db.cancel_solo_match(active_m["id"])
+                await db.set_player_status(user_id, "IDLE")
+                active_m = None
+            else:
+                if player.get("status") != "IN_MATCH":
+                    await db.set_player_status(user_id, "IN_MATCH")
+                ch_hint = f" (<#{ch_id}>)" if ch_id else ""
+                await interaction.followup.send(f"You are currently in an active match{ch_hint}.", ephemeral=True)
+                return
 
         if any(p["discord_id"] == user_id for p in queued_players):
             await interaction.followup.send("You are already in queue.", ephemeral=True)
