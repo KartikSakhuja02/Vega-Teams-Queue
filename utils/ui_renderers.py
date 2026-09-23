@@ -297,8 +297,8 @@ class MapVoteView(View):
         for m in map_options:
             is_selected = (m == user_voted_map)
             btn = Button(
-                label=f"✓ {m}" if is_selected else m,
-                style=discord.ButtonStyle.success if is_selected else discord.ButtonStyle.secondary,
+                label=m,
+                style=discord.ButtonStyle.primary if is_selected else discord.ButtonStyle.secondary,
                 custom_id=f"test_map_vote_{m.lower()}",
             )
             self.add_item(btn)

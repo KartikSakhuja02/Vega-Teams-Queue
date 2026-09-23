@@ -737,9 +737,11 @@ def build_solo_map_vote_embed(
     end_time: float,
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Minimalist map voting embed — 4 random maps, 1-minute countdown, live vote counts."""
-    t1_ids = match.get("team1_player_ids", [])
-    t2_ids = match.get("team2_player_ids", [])
+    """Dark Slate Monochrome map voting embed — 4 random maps, 1-minute countdown, live vote counts."""
+    c1_id = match.get("captain1_id")
+    c2_id = match.get("captain2_id")
+    t1_ids = match.get("team1_player_ids") or ([c1_id] if c1_id else [])
+    t2_ids = match.get("team2_player_ids") or ([c2_id] if c2_id else [])
 
     def _names(ids: list) -> str:
         parts = [players_by_id.get(pid, {}).get("ign") or str(pid) for pid in ids]
@@ -755,19 +757,23 @@ def build_solo_map_vote_embed(
 
     total_voted = len(votes_by_user)
     lines = [
-        f"Voting ends <t:{int(end_time)}:R>  ({total_voted}/10 voted)\n",
+        f"⏳ **Voting Deadline:** <t:{int(end_time)}:R> ({total_voted}/10 voted)",
+        "",
     ]
     for m in map_options:
-        lines.append(f"**{m}** — {counts[m]} votes")
+        cnt = counts[m]
+        bar = "█" * cnt + "░" * (10 - cnt)
+        lines.append(f"`{m:<10}` `{bar}` **{cnt} votes**")
 
-    lines.append(f"\nTeam A — {t1}")
-    lines.append(f"Team B — {t2}")
-
-    return discord.Embed(
-        title=f"Queue {match['id']}  —  Map Vote",
+    embed = discord.Embed(
+        title=f"🗺️ QUEUE #{match['id']} — MAP VOTE",
         description="\n".join(lines),
-        colour=colour or EMBED_COLOUR,
+        colour=colour or discord.Colour.from_str("#27272A"),
     )
+    embed.add_field(name="─── TEAM A ───", value=t1, inline=True)
+    embed.add_field(name="─── TEAM B ───", value=t2, inline=True)
+    embed.set_footer(text="VEGA ESPORTS • Click a map button below to vote")
+    return embed
 
 
 def build_solo_config_embed(
@@ -2845,6 +2851,10 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
         self._pause_cache: Optional[tuple[bool, Optional[float]]] = None
         # Track debounced task to repost queue panel under incoming chat messages
         self._repost_bottom_task: Optional[asyncio.Task] = None
+        # Track debounced tasks to repost match panel under incoming chat messages per match channel
+        self._match_repost_tasks: dict[int, asyncio.Task] = {}
+        # Track active match views in memory for instant panel reposting
+        self._match_active_views: dict[int, discord.ui.View] = {}
         # Track active score/screenshot submissions per match to block concurrent submissions
         self._active_submissions: dict[int, int] = {}
 
@@ -2854,6 +2864,9 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
     async def cog_unload(self) -> None:
         if self._repost_bottom_task and not self._repost_bottom_task.done():
             self._repost_bottom_task.cancel()
+        for task in self._match_repost_tasks.values():
+            if task and not task.done():
+                task.cancel()
         if self._auto_clear_loop_task and not self._auto_clear_loop_task.done():
             self._auto_clear_loop_task.cancel()
         if self._auto_clear_task and not self._auto_clear_task.done():
@@ -3265,26 +3278,100 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         self._repost_bottom_task = asyncio.create_task(_runner())
 
+    def _schedule_repost_match_panel_at_bottom(self, match_id: int, channel: discord.TextChannel, delay: float = 0.5) -> None:
+        """Debounced schedule to repost an active match panel (Captain Select, Draft, Map Veto/Vote, Check-in) at bottom of match channel."""
+        existing_task = self._match_repost_tasks.get(match_id)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
+        async def _runner() -> None:
+            try:
+                await asyncio.sleep(delay)
+                await self._repost_match_panel(match_id, channel)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.error("Error reposting match panel for match #%d: %s", match_id, e)
+
+        self._match_repost_tasks[match_id] = asyncio.create_task(_runner())
+
+    async def _repost_match_panel(self, match_id: int, channel: discord.TextChannel) -> None:
+        """Repost the active match panel at the bottom of the match text channel so it stays under new chat messages."""
+        match = await db.get_solo_match_by_id(match_id)
+        if not match or match.get("status") in ("CANCELLED", "COMPLETED"):
+            return
+
+        panel_id = match.get("panel_message_id")
+        if not panel_id:
+            return
+
+        # Fast check: if panel is already the last message in channel, skip
+        if channel.last_message_id == panel_id:
+            return
+
+        try:
+            old_msg = await channel.fetch_message(panel_id)
+        except discord.NotFound:
+            log.warning("Match #%d panel message %d not found for reposting.", match_id, panel_id)
+            return
+        except Exception as e:
+            log.error("Error fetching match #%d panel message %d: %s", match_id, panel_id, e)
+            return
+
+        if old_msg.id == channel.last_message_id:
+            return
+
+        # Delete old panel message so only 1 active panel exists at the bottom
+        try:
+            await old_msg.delete()
+        except Exception as e:
+            log.debug("Failed deleting old match panel message %d: %s", panel_id, e)
+
+        # Send new message at bottom
+        content = old_msg.content or None
+        embeds = old_msg.embeds
+        active_view = self._match_active_views.get(match_id)
+
+        try:
+            if active_view and not active_view.is_finished():
+                new_msg = await channel.send(content=content, embeds=embeds, view=active_view)
+                if hasattr(active_view, "message"):
+                    active_view.message = new_msg
+            elif old_msg.components:
+                reconstructed_view = discord.ui.View.from_message(old_msg)
+                new_msg = await channel.send(content=content, embeds=embeds, view=reconstructed_view)
+            else:
+                new_msg = await channel.send(content=content, embeds=embeds)
+
+            await db.update_solo_match_panel(match_id, new_msg.id)
+            log.info("Reposted match panel at bottom of channel #%s for match #%d (New Msg ID: %d).", channel.name, match_id, new_msg.id)
+        except Exception as e:
+            log.error("Failed to repost match panel at bottom of channel #%s: %s", channel.name, e)
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         """
-        When anyone messages in the solo queue channel, repost the Join/Leave queue UI
-        directly under their message so it's always at the bottom of the chat.
+        When anyone messages in the solo queue channel or an active solo match text channel,
+        repost the relevant UI directly under their message so it's always at the bottom of the chat.
         """
         if message.author.bot or (self.bot.user and message.author.id == self.bot.user.id):
             return
         if not message.guild:
             return
 
-        channel = await self._get_channel()
-        if not channel or message.channel.id != channel.id:
-            return
-
         # Ignore system messages like pins
         if message.type not in (discord.MessageType.default, discord.MessageType.reply):
             return
 
-        self._schedule_repost_panel_at_bottom()
+        main_queue_channel = await self._get_channel()
+        if main_queue_channel and message.channel.id == main_queue_channel.id:
+            self._schedule_repost_panel_at_bottom()
+            return
+
+        # Check if message is in an active solo match channel
+        match = await db.get_solo_match_by_channel(message.channel.id)
+        if match and match.get("status") not in ("CANCELLED", "COMPLETED"):
+            self._schedule_repost_match_panel_at_bottom(match["id"], message.channel)
 
     # =========================================================================
     # Queue Actions
