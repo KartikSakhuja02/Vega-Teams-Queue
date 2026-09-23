@@ -203,7 +203,7 @@ async def generate_profile_card(
         "created_at": created_at_str,
         "discord_id": masked_id,
         "ign":        profile.get("ign", "—"),
-        "rank":       f"#{profile.get('regional_rank', '—')}",
+        "rank":       f"#{profile.get('leaderboard_rank') or profile.get('regional_rank', '—')}",
         "points":     str(profile.get("elo", 0)),
         "region":     profile.get("region", "—"),
         "kills":      str(kills),

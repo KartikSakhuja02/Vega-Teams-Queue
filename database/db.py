@@ -416,8 +416,8 @@ async def get_all_players(region: Optional[str] = None) -> list:
 
 async def get_player_profile(discord_id: int) -> Optional[dict]:
     """
-    Fetch a player profile including calculated regional ranking.
-    Regional ranking partitions by the player's region and ranks by ELO descending.
+    Fetch a player profile including calculated global MMR leaderboard ranking.
+    Global rank orders by ELO DESC, wins DESC, kills DESC matching the competitive leaderboard.
     """
     row = await get_pool().fetchrow(
         """
@@ -437,7 +437,8 @@ async def get_player_profile(discord_id: int) -> Optional[dict]:
                 matches_played,
                 wins,
                 mvp_count,
-                ROW_NUMBER() OVER (PARTITION BY region ORDER BY elo DESC) as regional_rank
+                ROW_NUMBER() OVER (ORDER BY elo DESC, wins DESC, kills DESC) as leaderboard_rank,
+                ROW_NUMBER() OVER (PARTITION BY region ORDER BY elo DESC, wins DESC, kills DESC) as regional_rank
             FROM players
             WHERE is_active = TRUE
         )
