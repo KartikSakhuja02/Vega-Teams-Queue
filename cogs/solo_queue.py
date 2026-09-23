@@ -5020,6 +5020,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
 
         # 13. Calculate ELO & stats for all 10 players
         scoring_mode = await get_solo_scoring_mode()
+        buff_pct, _ = await db.get_active_point_buff()
         player_updates: list[dict] = []
         overall_mvp_pid = None
 
@@ -5055,6 +5056,11 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 first_bloods=fb,
             )
 
+            buff_bonus = 0
+            if elo_delta > 0 and buff_pct > 0:
+                buff_bonus = round(elo_delta * (buff_pct / 100.0))
+                elo_delta += buff_bonus
+
             player_updates.append({
                 "discord_id": pid,
                 "kills": kills,
@@ -5063,6 +5069,7 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 "is_winner": is_win,
                 "is_mvp": is_match_mvp or is_mvp,
                 "elo_delta": elo_delta,
+                "buff_bonus": buff_bonus,
                 "stats_obj": stats,
             })
 
@@ -5124,7 +5131,13 @@ class SoloQueueCog(commands.Cog, name="SoloQueue"):
                 pid = u["discord_id"]
                 k, d, a = u["kills"], u["deaths"], u["assists"]
                 delta = u["elo_delta"]
-                elo_str = f"+{delta} Elo" if delta >= 0 else f"{delta} Elo"
+                buff_b = u.get("buff_bonus", 0)
+                if buff_b > 0:
+                    elo_str = f"+{delta} Elo (🔥+{buff_b} Buff)"
+                elif delta >= 0:
+                    elo_str = f"+{delta} Elo"
+                else:
+                    elo_str = f"{delta} Elo"
 
                 # Rating formula
                 rating = round((k + a * 0.25) / max(1, d), 2)

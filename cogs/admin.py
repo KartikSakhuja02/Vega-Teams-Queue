@@ -290,9 +290,11 @@ class AdminCog(commands.Cog, name="Admin"):
         self._panel_posted: bool = False
         self._blacklisted_words: dict[str, dict] = {}
         self.check_expired_bans.start()
+        self.check_expired_point_buffs.start()
 
     def cog_unload(self) -> None:
         self.check_expired_bans.cancel()
+        self.check_expired_point_buffs.cancel()
 
     admin_group = app_commands.Group(
         name="admin",
@@ -2967,6 +2969,267 @@ class AdminCog(commands.Cog, name="Admin"):
                 msg += f" ...and {len(failed) - 5} more"
 
         await interaction.followup.send(msg, ephemeral=True)
+
+
+    # ── Point Buff Event Management (/admin queue point_buff ...) ───────────
+
+    @tasks.loop(minutes=1.0)
+    async def check_expired_point_buffs(self) -> None:
+        """Periodically check if an active point buff event has expired and clean up announcement."""
+        try:
+            pct_str = await db.get_config("point_buff_pct")
+            until_str = await db.get_config("point_buff_until")
+            if not pct_str or not until_str:
+                return
+
+            end_time = datetime.fromisoformat(until_str)
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=timezone.utc)
+
+            now = datetime.now(timezone.utc)
+            if now >= end_time:
+                log.info("Point buff event of +%s%% has expired.", pct_str)
+                await db.clear_point_buff()
+                await self._update_buff_announcement_ended(float(pct_str))
+        except Exception as e:
+            log.warning("Error checking expired point buffs: %s", e)
+
+    @check_expired_point_buffs.before_loop
+    async def _before_check_expired_point_buffs(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _update_buff_announcement_ended(self, pct: float) -> None:
+        """Update the buff announcement embed to show that the event has ended."""
+        try:
+            msg_id_str = await db.get_config("point_buff_msg_id")
+            ch_id_str = await db.get_config("point_buff_ch_id")
+            await db.delete_config("point_buff_msg_id")
+            await db.delete_config("point_buff_ch_id")
+
+            if not ch_id_str:
+                ch_env = os.environ.get("POINT_BUFF_CHANNEL_ID", "0")
+                if ch_env != "0":
+                    ch_id_str = ch_env
+
+            if not ch_id_str:
+                return
+
+            ch = self.bot.get_channel(int(ch_id_str))
+            if not ch and hasattr(self.bot, "fetch_channel"):
+                try:
+                    ch = await self.bot.fetch_channel(int(ch_id_str))
+                except Exception:
+                    ch = None
+
+            if isinstance(ch, discord.TextChannel) and msg_id_str:
+                try:
+                    msg = await ch.fetch_message(int(msg_id_str))
+                    embed = discord.Embed(
+                        title="❌ QUEUE POINTS BUFF EVENT ENDED",
+                        description=f"The **+{pct:g}% Points Buff** event has concluded!\nThank you to everyone who participated.",
+                        colour=discord.Colour(0x7F8C8D),
+                    )
+                    embed.set_footer(text="Vega Queue Events • Event Ended")
+                    await msg.edit(content="📢 **EVENT CONCLUDED**", embed=embed)
+                except Exception as e:
+                    log.warning("Could not edit ended buff announcement message: %s", e)
+        except Exception as e:
+            log.warning("Failed updating buff announcement on expiry: %s", e)
+
+    admin_queue_group = app_commands.Group(
+        name="queue",
+        description="Queue event and administration commands.",
+        parent=admin_group,
+    )
+
+    async def _handle_point_buff(
+        self,
+        interaction: discord.Interaction,
+        amount: float,
+        hours: float,
+    ) -> None:
+        if not (is_staff(interaction.user) or (interaction.user.guild_permissions and interaction.user.guild_permissions.administrator)):
+            await interaction.response.send_message(
+                "❌ Only staff members and admins can activate point buffs.",
+                ephemeral=True,
+            )
+            return
+
+        if amount <= 0:
+            await interaction.response.send_message(
+                "❌ Buff amount must be greater than 0%.",
+                ephemeral=True,
+            )
+            return
+
+        if hours <= 0:
+            await interaction.response.send_message(
+                "❌ Duration hours must be greater than 0.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        end_time = await db.set_point_buff(amount, hours)
+        end_unix = int(end_time.timestamp())
+
+        ch_id_str = os.environ.get("POINT_BUFF_CHANNEL_ID", "0")
+        announcement_sent = False
+        ch_mention = "configured channel"
+
+        if ch_id_str and ch_id_str != "0":
+            try:
+                ch_id = int(ch_id_str)
+                ch = interaction.guild.get_channel(ch_id) if interaction.guild else None
+                if not ch:
+                    ch = self.bot.get_channel(ch_id)
+                if not ch and hasattr(self.bot, "fetch_channel"):
+                    try:
+                        ch = await self.bot.fetch_channel(ch_id)
+                    except Exception:
+                        ch = None
+
+                if isinstance(ch, discord.TextChannel):
+                    ch_mention = ch.mention
+                    embed = discord.Embed(
+                        title="🔥 QUEUE POINTS BUFF ACTIVATED!",
+                        description=(
+                            f"⚡ **+{amount:g}% Extra Points / ELO** is now active for all queue match winners!\n\n"
+                            f"⏰ **Event Duration:** `{hours:g} Hours`\n"
+                            f"⏳ **Event Ends:** <t:{end_unix}:R> (<t:{end_unix}:F>)\n\n"
+                            f"Play ranked queue matches during this event to earn boosted score points!"
+                        ),
+                        colour=discord.Colour(0xFF6B00),
+                    )
+                    embed.set_footer(text="Vega Queue Events • Active Event")
+                    if interaction.guild and interaction.guild.icon:
+                        embed.set_thumbnail(url=interaction.guild.icon.url)
+
+                    msg = await ch.send(content="🎉 @everyone **NEW EVENT ACTIVATED!**", embed=embed)
+                    await db.set_config("point_buff_msg_id", str(msg.id))
+                    await db.set_config("point_buff_ch_id", str(ch.id))
+                    announcement_sent = True
+            except Exception as e:
+                log.warning("Could not post point buff announcement: %s", e)
+
+        ch_info = f"in {ch_mention}" if announcement_sent else f"(Channel ID `{ch_id_str}` unreachable or not found)."
+        await interaction.followup.send(
+            f"✅ **Points Buff Activated!**\n"
+            f"• **Bonus:** `+{amount:g}%`\n"
+            f"• **Duration:** `{hours:g} hours` (Ends <t:{end_unix}:R>)\n"
+            f"• **Announcement:** {ch_info}",
+            ephemeral=True,
+        )
+
+    async def _handle_stop_point_buff(self, interaction: discord.Interaction) -> None:
+        if not (is_staff(interaction.user) or (interaction.user.guild_permissions and interaction.user.guild_permissions.administrator)):
+            await interaction.response.send_message(
+                "❌ Only staff members and admins can stop point buffs.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        pct, _ = await db.get_active_point_buff()
+
+        if pct <= 0:
+            await interaction.followup.send(
+                "ℹ️ There is currently no active points buff event.",
+                ephemeral=True,
+            )
+            return
+
+        await db.clear_point_buff()
+        await self._update_buff_announcement_ended(pct)
+
+        await interaction.followup.send(
+            "✅ **Points Buff Stopped.** Active percentage buff has been canceled.",
+            ephemeral=True,
+        )
+
+    async def _handle_point_buff_status(self, interaction: discord.Interaction) -> None:
+        pct, end_time = await db.get_active_point_buff()
+        if pct > 0 and end_time:
+            end_unix = int(end_time.timestamp())
+            await interaction.response.send_message(
+                f"🔥 **Points Buff Status: ACTIVE**\n"
+                f"• **Bonus:** `+{pct:g}%` extra points on match wins\n"
+                f"• **Event Ends:** <t:{end_unix}:R> (<t:{end_unix}:F>)",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "ℹ️ **Points Buff Status: INACTIVE**\nNo point buff event is currently active.",
+                ephemeral=True,
+            )
+
+    @admin_queue_group.command(
+        name="point_buff",
+        description="Activate a points/ELO buff event for queue match winners.",
+    )
+    @app_commands.describe(
+        amount="Percentage buff amount (e.g. 20 for +20% bonus points).",
+        hours="Duration of the buff event in hours (e.g. 2 or 2.5).",
+    )
+    async def queue_point_buff_cmd(
+        self,
+        interaction: discord.Interaction,
+        amount: float,
+        hours: float,
+    ) -> None:
+        """Slash command /admin queue point_buff <amount> <hours>."""
+        await self._handle_point_buff(interaction, amount, hours)
+
+    @admin_queue_group.command(
+        name="stop_point_buff",
+        description="Stop/cancel the active queue points buff event immediately.",
+    )
+    async def queue_stop_point_buff_cmd(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Slash command /admin queue stop_point_buff."""
+        await self._handle_stop_point_buff(interaction)
+
+    @admin_queue_group.command(
+        name="point_buff_status",
+        description="Check current active queue points buff event status.",
+    )
+    async def queue_point_buff_status_cmd(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Slash command /admin queue point_buff_status."""
+        await self._handle_point_buff_status(interaction)
+
+    @admin_group.command(
+        name="point_buff",
+        description="Activate a points/ELO buff event for queue match winners.",
+    )
+    @app_commands.describe(
+        amount="Percentage buff amount (e.g. 20 for +20% bonus points).",
+        hours="Duration of the buff event in hours (e.g. 2 or 2.5).",
+    )
+    async def admin_point_buff_cmd(
+        self,
+        interaction: discord.Interaction,
+        amount: float,
+        hours: float,
+    ) -> None:
+        """Top-level command alias /admin point_buff <amount> <hours>."""
+        await self._handle_point_buff(interaction, amount, hours)
+
+    @admin_group.command(
+        name="stop_point_buff",
+        description="Stop/cancel the active queue points buff event immediately.",
+    )
+    async def admin_stop_point_buff_cmd(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """Top-level command alias /admin stop_point_buff."""
+        await self._handle_stop_point_buff(interaction)
 
 
 async def setup(bot: commands.Bot) -> None:

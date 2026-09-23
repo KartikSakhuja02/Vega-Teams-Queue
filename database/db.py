@@ -5,7 +5,7 @@ Async PostgreSQL connection pool and CRUD helpers for the Vega Queue Bot.
 
 import os
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import asyncpg
@@ -3198,6 +3198,78 @@ async def clear_blacklisted_words() -> int:
         return int(res.split()[-1])
     except Exception:
         return 0
+
+
+# =============================================================================
+# Bot Config & Point Buff Helpers
+# =============================================================================
+
+async def get_config(key: str) -> Optional[str]:
+    """Fetch a configuration value from bot_config by key."""
+    row = await get_pool().fetchrow("SELECT value FROM bot_config WHERE key = $1", key)
+    return row["value"] if row else None
+
+
+async def set_config(key: str, value: str) -> None:
+    """Upsert a configuration key-value pair in bot_config."""
+    await get_pool().execute(
+        """
+        INSERT INTO bot_config (key, value)
+        VALUES ($1, $2)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """,
+        key,
+        value,
+    )
+
+
+async def delete_config(key: str) -> None:
+    """Delete a configuration key from bot_config."""
+    await get_pool().execute("DELETE FROM bot_config WHERE key = $1", key)
+
+
+async def set_point_buff(percentage: float, hours: float) -> datetime:
+    """
+    Set an active points buff event.
+    Returns the end_time (datetime in UTC).
+    """
+    now = datetime.now(timezone.utc)
+    end_time = now + timedelta(hours=hours)
+    await set_config("point_buff_pct", str(percentage))
+    await set_config("point_buff_until", end_time.isoformat())
+    return end_time
+
+
+async def clear_point_buff() -> None:
+    """Clear/cancel active points buff event."""
+    await delete_config("point_buff_pct")
+    await delete_config("point_buff_until")
+
+
+async def get_active_point_buff() -> tuple[float, Optional[datetime]]:
+    """
+    Get current active point buff.
+    Returns (percentage, end_time). If inactive or expired, returns (0.0, None).
+    """
+    try:
+        pct_str = await get_config("point_buff_pct")
+        until_str = await get_config("point_buff_until")
+        if not pct_str or not until_str:
+            return 0.0, None
+
+        end_time = datetime.fromisoformat(until_str)
+        if end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        if now < end_time:
+            return float(pct_str), end_time
+        else:
+            return 0.0, None
+    except Exception as e:
+        log.warning("Error fetching point buff status: %s", e)
+        return 0.0, None
+
 
 
 
