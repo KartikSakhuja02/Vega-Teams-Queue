@@ -203,12 +203,14 @@ class DraftSelect(Select):
         for p in available_players[:25]:
             pid = p.get("discord_id")
             ign = p.get("ign") or p.get("discord_username") or str(pid)
+            uname = p.get("discord_username") or p.get("username")
             elo = p.get("elo", 1000)
+            label = f"{ign} (@{uname})" if uname else f"{ign} ({pid})"
             options.append(
                 discord.SelectOption(
-                    label=f"{ign}",
+                    label=label[:100],
                     value=str(pid),
-                    description=f"Rating: {elo} ELO",
+                    description=f"IGN: {ign} | ID: {pid} | ELO: {elo}"[:100],
                 )
             )
         super().__init__(
@@ -241,12 +243,12 @@ def render_draft_ui(
     theme_key: str = "NEON",
 ) -> Tuple[discord.Embed, View]:
     """
-    Render clean two-column Team A vs Team B Draft UI with slots and captain indicators.
+    Render clean two-column Team A vs Team B Draft UI with slots, Discord ID + IGN, and captain indicators.
     """
     theme = THEMES.get(theme_key.upper(), THEMES["NEON"])
     embed = discord.Embed(
-        title=f"⚔️ QUEUE #{match_id} — CAPTAIN DRAFT  [{step}/{total_steps}]",
-        description=f"🎯 **CURRENT TURN:** `{picker_name.upper()}`",
+        title=f"⚔️ QUEUE #{match_id} — CAPTAIN DRAFT [{step}/{total_steps}]",
+        description=f"🎯 **CURRENT TURN:** **{picker_name}**",
         colour=theme["primary"],
     )
 
@@ -255,31 +257,44 @@ def render_draft_ui(
         if i < len(team1_players):
             p = team1_players[i]
             is_cap = (p.get("discord_id") == captain1_id or i == 0)
-            prefix = "👑 " if is_cap else "▸ "
+            prefix = "👑 " if is_cap else "▫️ "
             ign = p.get("ign") or p.get("discord_username") or "Player"
+            uname = p.get("discord_username") or p.get("username")
+            d_id = p.get("discord_id")
+            user_ref = f"<@{d_id}>" if d_id else (f"@{uname}" if uname else f"@{ign}")
             elo = p.get("elo", 1000)
-            t1_lines.append(f"{prefix}**{ign}** (`{elo}`)")
+            t1_lines.append(f"{prefix}{user_ref} (**{ign}**) `({elo})`")
         else:
-            t1_lines.append("▫ *Empty Slot*")
+            t1_lines.append("▫️ *Empty Slot*")
             
     t2_lines = []
     for i in range(5):
         if i < len(team2_players):
             p = team2_players[i]
             is_cap = (p.get("discord_id") == captain2_id or i == 0)
-            prefix = "👑 " if is_cap else "▸ "
+            prefix = "👑 " if is_cap else "▫️ "
             ign = p.get("ign") or p.get("discord_username") or "Player"
+            uname = p.get("discord_username") or p.get("username")
+            d_id = p.get("discord_id")
+            user_ref = f"<@{d_id}>" if d_id else (f"@{uname}" if uname else f"@{ign}")
             elo = p.get("elo", 1000)
-            t2_lines.append(f"{prefix}**{ign}** (`{elo}`)")
+            t2_lines.append(f"{prefix}{user_ref} (**{ign}**) `({elo})`")
         else:
-            t2_lines.append("▫ *Empty Slot*")
+            t2_lines.append("▫️ *Empty Slot*")
 
-    embed.add_field(name="─── TEAM A ───", value="\n".join(t1_lines), inline=True)
-    embed.add_field(name="─── TEAM B ───", value="\n".join(t2_lines), inline=True)
+    embed.add_field(name=f"─── TEAM A [{len(team1_players)}/5] ───", value="\n".join(t1_lines), inline=True)
+    embed.add_field(name=f"─── TEAM B [{len(team2_players)}/5] ───", value="\n".join(t2_lines), inline=True)
 
     if available_players:
-        avail_text = " • ".join(f"`{p.get('ign', 'Player')}` ({p.get('elo', 1000)})" for p in available_players)
-        embed.add_field(name="AVAILABLE PLAYERS", value=avail_text, inline=False)
+        avail_items = []
+        for p in available_players:
+            ign = p.get("ign") or p.get("discord_username") or "Player"
+            uname = p.get("discord_username") or p.get("username")
+            d_id = p.get("discord_id")
+            user_ref = f"<@{d_id}>" if d_id else (f"@{uname}" if uname else f"@{ign}")
+            elo = p.get("elo", 1000)
+            avail_items.append(f"{user_ref} (**{ign}**) `({elo})`")
+        embed.add_field(name="─── AVAILABLE PLAYERS ───", value=" • ".join(avail_items), inline=False)
 
     embed.set_footer(text="VEGA ESPORTS • Select player from dropdown below")
     view = DraftView(available_players)
@@ -313,16 +328,19 @@ def render_map_vote_ui(
     theme_key: str = "NEON",
 ) -> Tuple[discord.Embed, View]:
     """
-    Render clean Map Voting UI with live tally and compact timer.
+    Render clean Map Voting UI with live tally, user vote indicator, and compact timer.
     """
     theme = THEMES.get(theme_key.upper(), THEMES["NEON"])
     lines = [
         f"⏳ **Voting Deadline:** <t:{end_time_ts}:R>",
-        "",
     ]
+    if user_voted_map:
+        lines.append(f"🎯 **Your Vote:** **{user_voted_map}**")
+    lines.append("")
+
     for m in map_options:
         tally = votes_by_map.get(m, 0)
-        selected_mark = "  ◀ YOUR VOTE" if m == user_voted_map else ""
+        selected_mark = "  ◀ YOUR VOTE" if user_voted_map and m == user_voted_map else ""
         bar = "█" * tally + "░" * (10 - tally)
         lines.append(f"`{m:<10}` `{bar}` **{tally} votes**{selected_mark}")
 

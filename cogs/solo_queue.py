@@ -589,7 +589,7 @@ def build_solo_draft_embed(
     players_by_id: dict[int, dict],
     colour: Optional[discord.Colour] = None,
 ) -> discord.Embed:
-    """Ultra-minimalist draft embed — no emojis, plain text only."""
+    """Clean simplified draft embed with Discord Mention + IGN + ELO."""
     c1_id = match["captain1_id"]
     c2_id = match["captain2_id"]
     turn_id = match["current_turn_captain_id"]
@@ -599,30 +599,57 @@ def build_solo_draft_embed(
     t2_ids = match.get("team2_player_ids", [])
     avail_ids = match.get("available_player_ids", [])
 
-    def _name(pid: int) -> str:
-        return players_by_id.get(pid, {}).get("ign") or str(pid)
+    def _player_display(pid: int, is_cap: bool = False) -> str:
+        p = players_by_id.get(pid, {})
+        ign = p.get("ign") or p.get("discord_username") or "Player"
+        elo = p.get("elo", 1000)
+        prefix = "👑 " if is_cap else "▫️ "
+        return f"{prefix}<@{pid}> (**{ign}**) `({elo})`"
 
-    # Build team columns: captain first, then picks, then empty slots
-    def _team_col(cap_id: int, ids: list[int]) -> str:
-        rows = [f"{_name(cap_id)} (cap)"]
-        rows += [_name(p) for p in ids if p != cap_id]
-        rows += ["-" for _ in range(5 - len(ids))]
-        return "\n".join(rows)
+    # Build Team A list
+    t1_lines = []
+    for i in range(5):
+        if i < len(t1_ids):
+            pid = t1_ids[i]
+            t1_lines.append(_player_display(pid, is_cap=(pid == c1_id)))
+        else:
+            t1_lines.append("▫️ *Empty Slot*")
 
-    picker = _name(turn_id)
+    # Build Team B list
+    t2_lines = []
+    for i in range(5):
+        if i < len(t2_ids):
+            pid = t2_ids[i]
+            t2_lines.append(_player_display(pid, is_cap=(pid == c2_id)))
+        else:
+            t2_lines.append("▫️ *Empty Slot*")
+
+    picker_p = players_by_id.get(turn_id, {})
+    picker_ign = picker_p.get("ign") or picker_p.get("discord_username") or "Captain"
+    picker_str = f"<@{turn_id}> (**{picker_ign}**)" if turn_id else "Captain"
+
     embed = discord.Embed(
-        title=f"Queue {match['id']}  —  Draft  [{step}/7]",
-        description=f"{picker}'s pick",
-        colour=colour or EMBED_COLOUR,
+        title=f"⚔️ QUEUE #{match['id']} — CAPTAIN DRAFT [{step}/7]",
+        description=f"🎯 **CURRENT TURN:** {picker_str}",
+        colour=colour or discord.Colour.from_str("#27272A"),
     )
-    embed.add_field(name=f"Team A  {len(t1_ids)}/5", value=_team_col(c1_id, t1_ids), inline=True)
-    embed.add_field(name=f"Team B  {len(t2_ids)}/5", value=_team_col(c2_id, t2_ids), inline=True)
+    embed.add_field(name=f"─── TEAM A [{len(t1_ids)}/5] ───", value="\n".join(t1_lines), inline=True)
+    embed.add_field(name=f"─── TEAM B [{len(t2_ids)}/5] ───", value="\n".join(t2_lines), inline=True)
+
     if avail_ids:
+        avail_items = []
+        for pid in avail_ids:
+            p = players_by_id.get(pid, {})
+            ign = p.get("ign") or p.get("discord_username") or "Player"
+            elo = p.get("elo", 1000)
+            avail_items.append(f"<@{pid}> (**{ign}**) `({elo})`")
         embed.add_field(
-            name="Available",
-            value=",  ".join(_name(p) for p in avail_ids),
+            name="─── AVAILABLE PLAYERS ───",
+            value=" • ".join(avail_items),
             inline=False,
         )
+
+    embed.set_footer(text="VEGA ESPORTS • Select player from dropdown below")
     return embed
 
 
@@ -654,34 +681,34 @@ def build_solo_map_veto_embed(
         ordered_t1 = ([c1_id] if c1_id in t1_ids else []) + [pid for pid in t1_ids if pid != c1_id]
         ordered_t2 = ([c2_id] if c2_id in t2_ids else []) + [pid for pid in t2_ids if pid != c2_id]
 
-        t1_mentions = " , ".join(f"<@{pid}>" for pid in ordered_t1) if ordered_t1 else "-"
-        t2_mentions = " , ".join(f"<@{pid}>" for pid in ordered_t2) if ordered_t2 else "-"
+        t1_mentions = "\n".join(f"▫️ <@{pid}> (**{players_by_id.get(pid, {}).get('ign', 'Player')}**) `({players_by_id.get(pid, {}).get('elo', 1000)})`" for pid in ordered_t1) if ordered_t1 else "-"
+        t2_mentions = "\n".join(f"▫️ <@{pid}> (**{players_by_id.get(pid, {}).get('ign', 'Player')}**) `({players_by_id.get(pid, {}).get('elo', 1000)})`" for pid in ordered_t2) if ordered_t2 else "-"
 
         v1_id = match.get("voice_team1_id")
         v2_id = match.get("voice_team2_id")
 
         details_lines = []
         if v1_id:
-            details_lines.append(f"<#{v1_id}>")
+            details_lines.append(f"Team 1 VC: <#{v1_id}>")
         if v2_id:
-            details_lines.append(f"<#{v2_id}>")
+            details_lines.append(f"Team 2 VC: <#{v2_id}>")
         if selected_map:
-            details_lines.append(f"Map: **{selected_map}**")
+            details_lines.append(f"Selected Map: **{selected_map}**")
         details_lines.append("\n> Use `/submit-result` when the match concludes.")
 
         desc = (
-            f"**__Team 1 - {t1_avg}__**\n"
+            f"**__Team 1 (Avg ELO: {t1_avg})__**\n"
             f"{t1_mentions}\n\n"
-            f"**__Team 2 - {t2_avg}__**\n"
+            f"**__Team 2 (Avg ELO: {t2_avg})__**\n"
             f"{t2_mentions}\n\n"
             f"**Match Details**\n"
             + "\n".join(details_lines)
         )
 
         embed = discord.Embed(
-            title=f"⚔️ Queue#{match['id']}",
+            title=f"⚔️ QUEUE #{match['id']} — MATCH READY",
             description=desc,
-            colour=discord.Colour(0xE74C3C),
+            colour=colour or discord.Colour.from_str("#27272A"),
             timestamp=datetime.now(timezone.utc),
         )
 
@@ -697,35 +724,31 @@ def build_solo_map_veto_embed(
             parts = []
             for pid in ids:
                 p = players_by_id.get(pid, {})
-                name = p.get("ign") or p.get("username") or f"<@{pid}>"
+                ign = p.get("ign") or f"<@{pid}>"
                 if pid in (c1_id, c2_id):
-                    parts.append(f"{name} (cap)")
+                    parts.append(f"<@{pid}> (**{ign}**) (cap)")
                 else:
-                    parts.append(name)
-            return ",  ".join(parts) or "-"
+                    parts.append(f"<@{pid}> (**{ign}**)")
+            return "\n".join(parts) or "-"
 
         t1 = _names(t1_ids)
         t2 = _names(t2_ids)
         action = "Pick" if len(avail_maps) == 2 else "Ban"
-        picker = players_by_id.get(turn_id, {}).get("ign") if turn_id else None
-        if not picker and turn_id:
-            picker = f"<@{turn_id}>"
-        elif not picker:
-            picker = "Captain"
+        picker = f"<@{turn_id}>" if turn_id else "Captain"
         avail_str = ",  ".join(avail_maps) if avail_maps else "-"
         banned_str = ",  ".join(f"~~{m}~~" for m in banned_maps) if banned_maps else "-"
         desc = (
-            f"{picker} — {action}\n\n"
-            f"Maps: {avail_str}\n"
-            f"Banned: {banned_str}\n\n"
-            f"Team A — {t1}\n"
-            f"Team B — {t2}"
+            f"🎯 **CURRENT TURN:** {picker} — {action}\n\n"
+            f"🗺️ **Available Maps:** {avail_str}\n"
+            f"🚫 **Banned Maps:** {banned_str}\n"
         )
         embed = discord.Embed(
-            title=f"Queue {match['id']}  —  Map Veto",
+            title=f"🗺️ QUEUE #{match['id']} — MAP VETO",
             description=desc,
-            colour=colour or EMBED_COLOUR,
+            colour=colour or discord.Colour.from_str("#27272A"),
         )
+        embed.add_field(name="─── TEAM A ───", value=t1, inline=True)
+        embed.add_field(name="─── TEAM B ───", value=t2, inline=True)
         return embed
 
 
@@ -736,6 +759,7 @@ def build_solo_map_vote_embed(
     votes_by_user: dict[int, str],
     end_time: float,
     colour: Optional[discord.Colour] = None,
+    user_voted_map: Optional[str] = None,
 ) -> discord.Embed:
     """Dark Slate Monochrome map voting embed — 4 random maps, 1-minute countdown, live vote counts."""
     c1_id = match.get("captain1_id")
@@ -744,8 +768,8 @@ def build_solo_map_vote_embed(
     t2_ids = match.get("team2_player_ids") or ([c2_id] if c2_id else [])
 
     def _names(ids: list) -> str:
-        parts = [players_by_id.get(pid, {}).get("ign") or str(pid) for pid in ids]
-        return ",  ".join(parts) or "-"
+        parts = [f"<@{pid}> (**{players_by_id.get(pid, {}).get('ign') or pid}**)" for pid in ids]
+        return "\n".join(parts) or "-"
 
     t1 = _names(t1_ids)
     t2 = _names(t2_ids)
@@ -758,12 +782,18 @@ def build_solo_map_vote_embed(
     total_voted = len(votes_by_user)
     lines = [
         f"⏳ **Voting Deadline:** <t:{int(end_time)}:R> ({total_voted}/10 voted)",
-        "",
     ]
+    if user_voted_map:
+        lines.append(f"🎯 **Your Vote:** **{user_voted_map}**")
+    lines.append("")
+
     for m in map_options:
         cnt = counts[m]
         bar = "█" * cnt + "░" * (10 - cnt)
-        lines.append(f"`{m:<10}` `{bar}` **{cnt} votes**")
+        voters = [f"<@{uid}>" for uid, voted_m in votes_by_user.items() if voted_m == m]
+        voters_str = f"  ({', '.join(voters)})" if voters else ""
+        selected_mark = "  ◀ YOUR VOTE" if user_voted_map and m == user_voted_map else ""
+        lines.append(f"`{m:<10}` `{bar}` **{cnt} votes**{voters_str}{selected_mark}")
 
     embed = discord.Embed(
         title=f"🗺️ QUEUE #{match['id']} — MAP VOTE",
@@ -1021,14 +1051,21 @@ class PlayerDraftSelect(discord.ui.Select):
         colour: Optional[discord.Colour] = None,
         draft_mode: Optional[str] = None,
     ) -> None:
-        options = [
-            discord.SelectOption(
-                label=f"{p.get('ign') or p.get('discord_username') or 'Player'} (ELO: {p.get('elo', 1000)})",
-                value=str(p["discord_id"]),
-                description=f"Region: {p.get('region', 'Global')} | Wins: {p.get('wins', 0)}",
+        options = []
+        for p in available_players[:25]:
+            ign = p.get("ign") or "Player"
+            uname = p.get("discord_username") or p.get("username")
+            pid = p.get("discord_id")
+            elo = p.get("elo", 1000)
+            label_str = f"{ign} (@{uname})" if uname else f"{ign} ({pid})"
+            desc_str = f"IGN: {ign} | ID: {pid} | ELO: {elo}"
+            options.append(
+                discord.SelectOption(
+                    label=label_str[:100],
+                    value=str(pid),
+                    description=desc_str[:100],
+                )
             )
-            for p in available_players[:25]
-        ]
         super().__init__(
             placeholder="Select a player for your team...",
             min_values=1,
