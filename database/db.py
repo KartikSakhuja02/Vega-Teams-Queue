@@ -3314,13 +3314,41 @@ async def revert_solo_match(match_id: int) -> tuple[bool, str, Optional[dict]]:
                 return False, f"Match #{match_id} has already been reverted.", match_dict
 
             results_raw = match_dict.get("player_results")
-            if not results_raw:
-                return False, f"Match #{match_id} does not have saved player result breakdown data.", match_dict
+            player_updates = []
+            if results_raw:
+                try:
+                    player_updates = json.loads(results_raw) if isinstance(results_raw, str) else results_raw
+                except Exception:
+                    player_updates = []
 
-            try:
-                player_updates = json.loads(results_raw) if isinstance(results_raw, str) else results_raw
-            except Exception as e:
-                return False, f"Could not parse player results for match #{match_id}: {e}", match_dict
+            if not player_updates:
+                # Legacy match fallback: reconstruct player updates from stored team rosters & outcome
+                t1_pids = list(match_dict.get("team1_player_ids") or [])
+                t2_pids = list(match_dict.get("team2_player_ids") or [])
+                all_pids = t1_pids + t2_pids
+                winning_team = match_dict.get("winning_team")
+                mvp_pid = match_dict.get("mvp_player_id")
+                is_draw = (winning_team == 0)
+
+                for pid in all_pids:
+                    is_t1 = (pid in t1_pids)
+                    is_win = (not is_draw) and ((is_t1 and winning_team == 1) or ((not is_t1) and winning_team == 2))
+                    is_mvp = (pid == mvp_pid) if mvp_pid else False
+                    mvp_bonus = 5 if is_mvp else 0
+                    base_elo = (25 if is_win else (-20 if not is_draw else 0)) + mvp_bonus
+
+                    player_updates.append({
+                        "discord_id": pid,
+                        "kills": 0,
+                        "deaths": 0,
+                        "assists": 0,
+                        "is_winner": is_win,
+                        "is_mvp": is_mvp,
+                        "elo_delta": base_elo,
+                    })
+
+            if not player_updates:
+                return False, f"Match #{match_id} does not have registered player roster data.", match_dict
 
             # Revert each player's recorded stats & ELO delta
             for p in player_updates:
