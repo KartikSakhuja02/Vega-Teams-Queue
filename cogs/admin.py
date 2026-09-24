@@ -8,6 +8,7 @@ Administrative moderation cog — /admin command group (player_ban, player_unban
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -3200,6 +3201,210 @@ class AdminCog(commands.Cog, name="Admin"):
     ) -> None:
         """Slash command /admin queue point_buff_status."""
         await self._handle_point_buff_status(interaction)
+
+    @admin_queue_group.command(
+        name="match_revert",
+        description="Revert a completed queue match, restoring player ELO and match statistics.",
+    )
+    @app_commands.describe(
+        match_id="The ID of the match to revert (e.g. 42).",
+    )
+    async def queue_match_revert_cmd(
+        self,
+        interaction: discord.Interaction,
+        match_id: int,
+    ) -> None:
+        """Command /admin queue match_revert <match_id>."""
+        if not (is_staff(interaction.user) or (interaction.user.guild_permissions and interaction.user.guild_permissions.administrator)):
+            await interaction.response.send_message("❌ Only staff members and admins can revert match results.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        success, msg, match = await db.revert_solo_match(match_id)
+
+        if not success:
+            await interaction.followup.send(f"❌ {msg}", ephemeral=True)
+            return
+
+        # Trigger real-time leaderboard auto-update
+        lb_cog = self.bot.get_cog("Leaderboard")
+        if lb_cog and hasattr(lb_cog, "refresh_all_leaderboards"):
+            asyncio.create_task(lb_cog.refresh_all_leaderboards())
+
+        # Audit log
+        await send_log(
+            self.bot,
+            title="🔄 Match Result Reverted",
+            description=f"Staff reverted match #{match_id}.",
+            colour=COL_WARNING,
+            fields=[
+                ("Match ID", f"#{match_id}", True),
+                ("Status", "REVERTED", True),
+                ("Staff", f"{interaction.user.mention} (`{interaction.user.id}`)", False),
+            ],
+        )
+
+        await interaction.followup.send(f"✅ **Match #{match_id} Reverted!**\n{msg}", ephemeral=True)
+
+    @admin_queue_group.command(
+        name="match_edit",
+        description="Correct/edit the winner and score of a completed or misdetected queue match.",
+    )
+    @app_commands.describe(
+        match_id="The ID of the match to edit.",
+        winning_team="Winning team (1 for Team 1, 2 for Team 2, 0 for Draw).",
+        team1_score="Score for Team 1 (e.g. 13).",
+        team2_score="Score for Team 2 (e.g. 11).",
+    )
+    @app_commands.choices(winning_team=[
+        app_commands.Choice(name="Team 1 Win", value=1),
+        app_commands.Choice(name="Team 2 Win", value=2),
+        app_commands.Choice(name="Draw (Tie)", value=0),
+    ])
+    async def queue_match_edit_cmd(
+        self,
+        interaction: discord.Interaction,
+        match_id: int,
+        winning_team: app_commands.Choice[int],
+        team1_score: int = 13,
+        team2_score: int = 0,
+    ) -> None:
+        """Command /admin queue match_edit <match_id> <winning_team> [team1_score] [team2_score]."""
+        if not (is_staff(interaction.user) or (interaction.user.guild_permissions and interaction.user.guild_permissions.administrator)):
+            await interaction.response.send_message("❌ Only staff members and admins can edit match results.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        success, msg, match = await db.edit_solo_match_result(
+            match_id=match_id,
+            winning_team=winning_team.value,
+            team1_score=team1_score,
+            team2_score=team2_score,
+        )
+
+        if not success:
+            await interaction.followup.send(f"❌ {msg}", ephemeral=True)
+            return
+
+        # Trigger real-time leaderboard auto-update
+        lb_cog = self.bot.get_cog("Leaderboard")
+        if lb_cog and hasattr(lb_cog, "refresh_all_leaderboards"):
+            asyncio.create_task(lb_cog.refresh_all_leaderboards())
+
+        # Audit log
+        await send_log(
+            self.bot,
+            title="✏️ Match Result Corrected",
+            description=f"Staff updated result for match #{match_id}.",
+            colour=COL_SUCCESS,
+            fields=[
+                ("Match ID", f"#{match_id}", True),
+                ("Winner", f"Team {winning_team.value}" if winning_team.value != 0 else "Draw", True),
+                ("Score", f"{team1_score} - {team2_score}", True),
+                ("Staff", f"{interaction.user.mention} (`{interaction.user.id}`)", False),
+            ],
+        )
+
+        await interaction.followup.send(f"✅ **Match #{match_id} Corrected!**\n{msg}", ephemeral=True)
+
+    @admin_queue_group.command(
+        name="match_info",
+        description="Inspect detailed record, stored player results, scores, and status of a match.",
+    )
+    @app_commands.describe(
+        match_id="The ID of the match to inspect.",
+    )
+    async def queue_match_info_cmd(
+        self,
+        interaction: discord.Interaction,
+        match_id: int,
+    ) -> None:
+        """Command /admin queue match_info <match_id>."""
+        match = await db.get_solo_match_by_id(match_id)
+        if not match:
+            await interaction.response.send_message(f"❌ Match #{match_id} not found.", ephemeral=True)
+            return
+
+        t1_pids = list(match.get("team1_player_ids") or [])
+        t2_pids = list(match.get("team2_player_ids") or [])
+        status = match.get("status", "N/A")
+        map_name = match.get("selected_map", "N/A")
+        t1_score = match.get("team1_score", 0)
+        t2_score = match.get("team2_score", 0)
+        winner = match.get("winning_team")
+        winner_str = f"Team {winner}" if winner in (1, 2) else ("Draw" if winner == 0 else "Pending")
+
+        t1_mentions = ", ".join(f"<@{p}>" for p in t1_pids) or "None"
+        t2_mentions = ", ".join(f"<@{p}>" for p in t2_pids) or "None"
+
+        embed = discord.Embed(
+            title=f"🎮 Solo Match #{match_id} Info",
+            description=(
+                f"**Status:** `{status}`\n"
+                f"**Map:** `{map_name}` • **Winner:** `{winner_str}`\n"
+                f"**Score:** `{t1_score} - {t2_score}`\n"
+                f"**Submitted By:** <@{match.get('submitted_by') or 0}>\n\n"
+                f"**Team 1:** {t1_mentions}\n\n"
+                f"**Team 2:** {t2_mentions}"
+            ),
+            colour=discord.Colour.from_str("#5B4FCF"),
+        )
+        if match.get("screenshot_url"):
+            embed.set_thumbnail(url=match.get("screenshot_url"))
+
+        results_raw = match.get("player_results")
+        if results_raw:
+            try:
+                p_updates = json.loads(results_raw) if isinstance(results_raw, str) else results_raw
+                lines = []
+                for p in p_updates:
+                    pid = p.get("discord_id")
+                    delta = p.get("elo_delta", 0)
+                    buff = p.get("buff_bonus", 0)
+                    delta_str = f"+{delta}" if delta >= 0 else f"{delta}"
+                    buff_str = f" (🔥+{buff} Buff)" if buff > 0 else ""
+                    lines.append(f"• <@{pid}>: `{delta_str} ELO`{buff_str}")
+                embed.add_field(name="Stored Player ELO Breakdown", value="\n".join(lines[:10]), inline=False)
+            except Exception:
+                pass
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @admin_queue_group.command(
+        name="match_list",
+        description="View recent queue match IDs, status, maps, and winners.",
+    )
+    @app_commands.describe(
+        limit="Number of recent matches to list (Default: 10).",
+    )
+    async def queue_match_list_cmd(
+        self,
+        interaction: discord.Interaction,
+        limit: int = 10,
+    ) -> None:
+        """Command /admin queue match_list [limit]."""
+        matches = await db.get_recent_solo_matches(min(25, max(1, limit)))
+        if not matches:
+            await interaction.response.send_message("No matches found in database.", ephemeral=True)
+            return
+
+        lines = []
+        for m in matches:
+            mid = m.get("id")
+            st = m.get("status")
+            winner = m.get("winning_team")
+            w_str = f"Team {winner}" if winner in (1, 2) else ("Draw" if winner == 0 else "N/A")
+            map_str = m.get("selected_map") or "No Map"
+            t1_s = m.get("team1_score", 0)
+            t2_s = m.get("team2_score", 0)
+            lines.append(f"• **Match #{mid}**: `{st}` | Map: `{map_str}` | Winner: `{w_str}` (`{t1_s}-{t2_s}`)")
+
+        embed = discord.Embed(
+            title="📋 Recent Queue Match History",
+            description="\n".join(lines),
+            colour=discord.Colour.from_str("#5B4FCF"),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

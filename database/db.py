@@ -4,6 +4,7 @@ Async PostgreSQL connection pool and CRUD helpers for the Vega Queue Bot.
 """
 
 import os
+import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -64,6 +65,7 @@ async def _apply_schema() -> None:
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS screenshot_url TEXT;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS mvp_player_id BIGINT;
                 ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS voice_lobby_id BIGINT;
+                ALTER TABLE solo_matches ADD COLUMN IF NOT EXISTS player_results TEXT;
 
                 ALTER TABLE players ADD COLUMN IF NOT EXISTS ban_count INT NOT NULL DEFAULT 0;
                 UPDATE players SET ban_count = 1 WHERE (is_banned = TRUE OR banned_at IS NOT NULL) AND (ban_count IS NULL OR ban_count = 0);
@@ -2892,6 +2894,20 @@ async def complete_solo_match_with_stats(
     Atomically finalize a solo match and update player stats, ELO, and status in a single transaction.
     """
     pool = get_pool()
+    serializable_updates = []
+    for p in player_updates:
+        serializable_updates.append({
+            "discord_id": p.get("discord_id"),
+            "kills": p.get("kills", 0),
+            "deaths": p.get("deaths", 0),
+            "assists": p.get("assists", 0),
+            "is_winner": bool(p.get("is_winner", False)),
+            "is_mvp": bool(p.get("is_mvp", False)),
+            "elo_delta": p.get("elo_delta", 0),
+            "buff_bonus": p.get("buff_bonus", 0),
+        })
+    player_results_json = json.dumps(serializable_updates)
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             # 1. Update solo_matches
@@ -2906,7 +2922,8 @@ async def complete_solo_match_with_stats(
                     selected_map = COALESCE($4, selected_map),
                     submitted_by = $5,
                     screenshot_url = $6,
-                    mvp_player_id = $7
+                    mvp_player_id = $7,
+                    player_results = $9
                 WHERE id = $8
                 RETURNING *
                 """,
@@ -2918,6 +2935,7 @@ async def complete_solo_match_with_stats(
                 screenshot_url,
                 mvp_player_id,
                 match_id,
+                player_results_json,
             )
 
             # 2. Update each player's stats & ELO
@@ -3269,6 +3287,163 @@ async def get_active_point_buff() -> tuple[float, Optional[datetime]]:
     except Exception as e:
         log.warning("Error fetching point buff status: %s", e)
         return 0.0, None
+
+
+# =============================================================================
+# Match Reversal & Edit Helpers
+# =============================================================================
+
+async def revert_solo_match(match_id: int) -> tuple[bool, str, Optional[dict]]:
+    """
+    Revert a completed solo match.
+    Reverses all player stats (kills, deaths, assists, wins, mvp_count) and ELO adjustments.
+    Returns (success, message, match_data).
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            match = await conn.fetchrow("SELECT * FROM solo_matches WHERE id = $1", match_id)
+            if not match:
+                return False, f"Match #{match_id} not found.", None
+
+            match_dict = dict(match)
+            if match_dict.get("status") not in ("COMPLETED", "REVERTED"):
+                return False, f"Match #{match_id} is not in COMPLETED status (current status: `{match_dict.get('status')}`).", match_dict
+
+            if match_dict.get("status") == "REVERTED":
+                return False, f"Match #{match_id} has already been reverted.", match_dict
+
+            results_raw = match_dict.get("player_results")
+            if not results_raw:
+                return False, f"Match #{match_id} does not have saved player result breakdown data.", match_dict
+
+            try:
+                player_updates = json.loads(results_raw) if isinstance(results_raw, str) else results_raw
+            except Exception as e:
+                return False, f"Could not parse player results for match #{match_id}: {e}", match_dict
+
+            # Revert each player's recorded stats & ELO delta
+            for p in player_updates:
+                pid = p["discord_id"]
+                kills = p.get("kills", 0)
+                deaths = p.get("deaths", 0)
+                assists = p.get("assists", 0)
+                is_win = p.get("is_winner", False)
+                is_mvp = p.get("is_mvp", False)
+                elo_delta = p.get("elo_delta", 0)
+
+                await conn.execute(
+                    """
+                    UPDATE players
+                    SET kills = GREATEST(0, kills - $1),
+                        deaths = GREATEST(0, deaths - $2),
+                        assists = GREATEST(0, assists - $3),
+                        matches_played = GREATEST(0, matches_played - 1),
+                        wins = GREATEST(0, wins - (CASE WHEN $4::BOOLEAN THEN 1 ELSE 0 END)),
+                        mvp_count = GREATEST(0, mvp_count - (CASE WHEN $5::BOOLEAN THEN 1 ELSE 0 END)),
+                        elo = GREATEST(100, elo - $6)
+                    WHERE discord_id = $7
+                    """,
+                    kills,
+                    deaths,
+                    assists,
+                    is_win,
+                    is_mvp,
+                    elo_delta,
+                    pid,
+                )
+
+            # Mark match status as REVERTED
+            reverted_match = await conn.fetchrow(
+                """
+                UPDATE solo_matches
+                SET status = 'REVERTED'
+                WHERE id = $1
+                RETURNING *
+                """,
+                match_id,
+            )
+            return True, f"Successfully reverted match #{match_id} and restored stats/ELO for {len(player_updates)} players.", dict(reverted_match)
+
+
+async def edit_solo_match_result(
+    match_id: int,
+    winning_team: int,
+    team1_score: int,
+    team2_score: int,
+) -> tuple[bool, str, Optional[dict]]:
+    """
+    Correct/edit the outcome of a solo match.
+    If the match was previously completed, first reverts its stats, then applies new scores & ELO deltas.
+    """
+    match = await get_solo_match_by_id(match_id)
+    if not match:
+        return False, f"Match #{match_id} not found.", None
+
+    if match.get("status") == "COMPLETED":
+        success, msg, _ = await revert_solo_match(match_id)
+        if not success:
+            return False, f"Could not revert previous match results: {msg}", match
+
+    # Re-fetch match after potential revert
+    match = await get_solo_match_by_id(match_id)
+    t1_pids = list(match.get("team1_player_ids") or [])
+    t2_pids = list(match.get("team2_player_ids") or [])
+    all_pids = t1_pids + t2_pids
+    is_draw = (winning_team == 0)
+
+    # Recalculate ELO deltas with active point buff
+    buff_pct, _ = await get_active_point_buff()
+    player_updates = []
+
+    for pid in all_pids:
+        is_t1 = (pid in t1_pids)
+        is_win = (not is_draw) and ((is_t1 and winning_team == 1) or ((not is_t1) and winning_team == 2))
+
+        base_elo = 25 if is_win else (-20 if not is_draw else 0)
+        buff_bonus = 0
+        if base_elo > 0 and buff_pct > 0:
+            buff_bonus = round(base_elo * (buff_pct / 100.0))
+            base_elo += buff_bonus
+
+        player_updates.append({
+            "discord_id": pid,
+            "kills": 0,
+            "deaths": 0,
+            "assists": 0,
+            "is_winner": is_win,
+            "is_mvp": False,
+            "elo_delta": base_elo,
+            "buff_bonus": buff_bonus,
+        })
+
+    updated = await complete_solo_match_with_stats(
+        match_id=match_id,
+        winning_team=winning_team,
+        team1_score=team1_score,
+        team2_score=team2_score,
+        map_name=match.get("selected_map"),
+        submitted_by=match.get("submitted_by") or 0,
+        screenshot_url=match.get("screenshot_url") or "",
+        mvp_player_id=match.get("mvp_player_id"),
+        player_updates=player_updates,
+        all_lobby_player_ids=all_pids,
+    )
+    return True, f"Successfully edited match #{match_id} score to [{team1_score} - {team2_score}] (Winner: Team {winning_team}).", updated
+
+
+async def get_recent_solo_matches(limit: int = 10) -> list[dict]:
+    """Fetch the most recent solo matches regardless of status."""
+    rows = await get_pool().fetch(
+        """
+        SELECT * FROM solo_matches
+        ORDER BY id DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    return [dict(r) for r in rows]
+
 
 
 
