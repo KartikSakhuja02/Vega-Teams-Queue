@@ -13,7 +13,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Optional, Literal
+from typing import Optional, Literal, Any
 
 import discord
 from discord import app_commands
@@ -3405,6 +3405,411 @@ class AdminCog(commands.Cog, name="Admin"):
             colour=discord.Colour.from_str("#5B4FCF"),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+    # ── Match Recalculation Handler ──────────────────────────────────────────
+
+    async def _handle_recalculate_match(
+        self,
+        interaction: discord.Interaction,
+        match_id: int,
+        image: Optional[discord.Attachment] = None,
+    ) -> None:
+        """
+        Recalculate OCR results for a match, update stats/ELO, and post approved result to the results channel.
+        """
+        if not (is_staff(interaction.user) or (interaction.user.guild_permissions and interaction.user.guild_permissions.administrator)):
+            await interaction.response.send_message("❌ Only staff members and admins can recalculate match results.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        match = await db.get_solo_match_by_id(match_id)
+        if not match:
+            await interaction.followup.send(f"❌ Match #{match_id} not found in database.", ephemeral=True)
+            return
+
+        # 1. Obtain image bytes from attachment or stored screenshot URL
+        image_bytes: Optional[bytes] = None
+        screenshot_url = match.get("screenshot_url") or ""
+
+        if image:
+            try:
+                image_bytes = await image.read()
+                screenshot_url = image.url
+            except Exception as e:
+                await interaction.followup.send(f"❌ Failed to read attached image: {e}", ephemeral=True)
+                return
+        elif screenshot_url:
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(screenshot_url) as resp:
+                        if resp.status == 200:
+                            image_bytes = await resp.read()
+            except Exception as e:
+                log.warning("Could not fetch screenshot from URL %s: %s", screenshot_url, e)
+
+        if not image_bytes:
+            await interaction.followup.send(
+                f"❌ Could not obtain screenshot image for Match #{match_id}.\n"
+                "Please attach a scoreboard image when running `/admin queue recalculate`.",
+                ephemeral=True,
+            )
+            return
+
+        # 2. Run OCR Pipeline
+        from utils.match_ocr import process_match_screenshot
+        result = await process_match_screenshot(image_bytes)
+
+        if not result.success or (not result.team1_players and not result.team2_players):
+            await interaction.followup.send(
+                f"❌ **OCR Parsing Failed**: {result.error or 'Could not detect scoreboard table.'}\n"
+                f"• Engine: `{result.engine}`\n"
+                f"• Time: `{result.processing_time_ms} ms`",
+                ephemeral=True,
+            )
+            return
+
+        # 3. If match was previously completed, revert previous stats/ELO first
+        if match.get("status") == "COMPLETED":
+            rev_ok, rev_msg, _ = await db.revert_solo_match(match_id)
+            if not rev_ok:
+                log.warning("Could not revert previous match stats during recalculate: %s", rev_msg)
+
+        # 4. Map OCR names to the 10 lobby players
+        t1_pids = list(match.get("team1_player_ids") or [])
+        t2_pids = list(match.get("team2_player_ids") or [])
+        all_match_pids = t1_pids + t2_pids
+
+        lobby_player_records: dict[int, dict] = {}
+        for pid in all_match_pids:
+            p_rec = await db.get_player(pid)
+            if p_rec:
+                lobby_player_records[pid] = dict(p_rec)
+
+        import difflib
+
+        def _clean_str(s: str) -> str:
+            if not s:
+                return ""
+            s = s.split("#")[0]
+            s = re.sub(r"[^\w\u4e00-\u9fff]", "", s, flags=re.UNICODE)
+            return s.lower()
+
+        clean_to_pid: dict[str, int] = {}
+        for pid, prec in lobby_player_records.items():
+            ign_clean = _clean_str(prec.get("ign", ""))
+            if ign_clean:
+                clean_to_pid[ign_clean] = pid
+            user_clean = _clean_str(prec.get("discord_username", ""))
+            if user_clean and user_clean not in clean_to_pid:
+                clean_to_pid[user_clean] = pid
+
+        def _find_best_player(ocr_ign: str, candidate_pids: set[int]) -> Optional[int]:
+            ocr_c = _clean_str(ocr_ign)
+            if not ocr_c:
+                return None
+            for p_c, pid in clean_to_pid.items():
+                if pid in candidate_pids and p_c == ocr_c:
+                    return pid
+            if len(ocr_c) >= 3:
+                for p_c, pid in clean_to_pid.items():
+                    if pid in candidate_pids and (ocr_c in p_c or p_c in ocr_c):
+                        return pid
+            best_pid = None
+            best_sim = 0.0
+            for p_c, pid in clean_to_pid.items():
+                if pid in candidate_pids:
+                    sim = difflib.SequenceMatcher(None, ocr_c, p_c).ratio()
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_pid = pid
+            if best_sim >= 0.70:
+                return best_pid
+            return None
+
+        # Determine Team Alignment
+        t1_set = set(t1_pids)
+        t2_set = set(t2_pids)
+        ocr_t1_in_lobby_t1 = 0
+        ocr_t1_in_lobby_t2 = 0
+
+        for p in result.team1_players:
+            matched = _find_best_player(p.ign, set(all_match_pids))
+            if matched:
+                if matched in t1_set:
+                    ocr_t1_in_lobby_t1 += 1
+                elif matched in t2_set:
+                    ocr_t1_in_lobby_t2 += 1
+
+        if ocr_t1_in_lobby_t2 > ocr_t1_in_lobby_t1:
+            result.team1_players, result.team2_players = result.team2_players, result.team1_players
+            result.team1_score, result.team2_score = result.team2_score, result.team1_score
+
+        matched_stats_by_pid: dict[int, Any] = {}
+        avail_t1 = set(t1_pids)
+        avail_t2 = set(t2_pids)
+
+        for p in result.team1_players:
+            mpid = _find_best_player(p.ign, avail_t1)
+            if mpid:
+                avail_t1.discard(mpid)
+                matched_stats_by_pid[mpid] = p
+
+        for p in result.team2_players:
+            mpid = _find_best_player(p.ign, avail_t2)
+            if mpid:
+                avail_t2.discard(mpid)
+                matched_stats_by_pid[mpid] = p
+
+        unmatched_ocr_t1_rem = [p for p in result.team1_players if p not in matched_stats_by_pid.values()]
+        for pid in list(avail_t1):
+            if unmatched_ocr_t1_rem:
+                matched_stats_by_pid[pid] = unmatched_ocr_t1_rem.pop(0)
+                avail_t1.remove(pid)
+
+        unmatched_ocr_t2_rem = [p for p in result.team2_players if p not in matched_stats_by_pid.values()]
+        for pid in list(avail_t2):
+            if unmatched_ocr_t2_rem:
+                matched_stats_by_pid[pid] = unmatched_ocr_t2_rem.pop(0)
+                avail_t2.remove(pid)
+
+        t1_score = result.team1_score or 0
+        t2_score = result.team2_score or 0
+        is_draw = (t1_score == t2_score)
+        winning_team = 0 if is_draw else (1 if t1_score > t2_score else 2)
+
+        # 5. Calculate ELO deltas
+        from cogs.solo_queue import calculate_player_elo, get_solo_scoring_mode
+        scoring_mode = await get_solo_scoring_mode()
+        buff_pct, _ = await db.get_active_point_buff()
+
+        player_updates: list[dict] = []
+        overall_mvp_pid = None
+
+        for pid in all_match_pids:
+            is_t1 = (pid in t1_pids)
+            is_win = (not is_draw) and ((is_t1 and winning_team == 1) or ((not is_t1) and winning_team == 2))
+
+            stats = matched_stats_by_pid.get(pid)
+            kills = stats.kills if stats else 0
+            deaths = stats.deaths if stats else 0
+            assists = stats.assists if stats else 0
+            acs = stats.acs if stats else 0
+            damage = stats.damage if stats else 0
+            fb = stats.first_bloods if stats else 0
+            is_mvp = stats.is_mvp if stats else False
+            mvp_type = stats.mvp_type if stats else None
+
+            is_match_mvp = is_mvp and (mvp_type == "Match MVP" or "match" in str(mvp_type).lower())
+            if is_match_mvp:
+                overall_mvp_pid = pid
+
+            elo_delta = calculate_player_elo(
+                scoring_mode=scoring_mode,
+                is_winner=is_win,
+                is_draw=is_draw,
+                is_mvp=is_mvp,
+                mvp_type=mvp_type,
+                kills=kills,
+                deaths=deaths,
+                assists=assists,
+                acs=acs,
+                damage=damage,
+                first_bloods=fb,
+            )
+
+            buff_bonus = 0
+            if elo_delta > 0 and buff_pct > 0:
+                buff_bonus = round(elo_delta * (buff_pct / 100.0))
+                elo_delta += buff_bonus
+
+            player_updates.append({
+                "discord_id": pid,
+                "kills": kills,
+                "deaths": deaths,
+                "assists": assists,
+                "is_winner": is_win,
+                "is_mvp": is_match_mvp or is_mvp,
+                "elo_delta": elo_delta,
+                "buff_bonus": buff_bonus,
+                "stats_obj": stats,
+            })
+
+        # Determine MVP
+        overall_top_u = max(
+            player_updates,
+            key=lambda x: (
+                x.get("stats_obj").acs if x.get("stats_obj") else 0,
+                x.get("kills", 0),
+            ),
+        ) if player_updates else None
+        overall_mvp_pid = overall_top_u["discord_id"] if overall_top_u else None
+
+        t1_updates = [u for u in player_updates if u["discord_id"] in t1_pids]
+        t1_tagged = [u for u in t1_updates if u.get("stats_obj") and u.get("stats_obj").is_mvp]
+        t1_mvp_u = max(t1_tagged or t1_updates, key=lambda x: (x.get("stats_obj").acs if x.get("stats_obj") else 0, x.get("kills", 0))) if t1_updates else None
+        t1_mvp_pid = t1_mvp_u["discord_id"] if t1_mvp_u else None
+
+        t2_updates = [u for u in player_updates if u["discord_id"] in t2_pids]
+        t2_tagged = [u for u in t2_updates if u.get("stats_obj") and u.get("stats_obj").is_mvp]
+        t2_mvp_u = max(t2_tagged or t2_updates, key=lambda x: (x.get("stats_obj").acs if x.get("stats_obj") else 0, x.get("kills", 0))) if t2_updates else None
+        t2_mvp_pid = t2_mvp_u["discord_id"] if t2_mvp_u else None
+
+        for u in player_updates:
+            if u["discord_id"] in (overall_mvp_pid, t1_mvp_pid, t2_mvp_pid):
+                u["is_mvp"] = True
+
+        # 6. Commit to database
+        map_name = match.get("selected_map") or result.map_name or "Unknown"
+        await db.complete_solo_match_with_stats(
+            match_id=match_id,
+            winning_team=winning_team,
+            team1_score=t1_score,
+            team2_score=t2_score,
+            map_name=map_name,
+            submitted_by=interaction.user.id,
+            screenshot_url=screenshot_url,
+            mvp_player_id=overall_mvp_pid,
+            player_updates=player_updates,
+            all_lobby_player_ids=all_match_pids,
+        )
+
+        # 7. Build Recalculated Result Embed
+        c1_id = match.get("captain1_id")
+        c2_id = match.get("captain2_id")
+        c1_name = lobby_player_records.get(c1_id, {}).get("ign") or lobby_player_records.get(c1_id, {}).get("discord_username") or "1"
+        c2_name = lobby_player_records.get(c2_id, {}).get("ign") or lobby_player_records.get(c2_id, {}).get("discord_username") or "2"
+        t1_team_name = f"Team {c1_name}"
+        t2_team_name = f"Team {c2_name}"
+
+        def _format_recalc_team_lines(team_pids: list[int]) -> list[str]:
+            lines = []
+            t_updates = [u for u in player_updates if u["discord_id"] in team_pids]
+            t_updates.sort(key=lambda x: (x["kills"], x.get("stats_obj").acs if x.get("stats_obj") else 0), reverse=True)
+            for u in t_updates:
+                pid = u["discord_id"]
+                k, d, a = u["kills"], u["deaths"], u["assists"]
+                delta = u["elo_delta"]
+                buff_b = u.get("buff_bonus", 0)
+                elo_str = f"+{delta} Elo (🔥+{buff_b} Buff)" if buff_b > 0 else (f"+{delta} Elo" if delta >= 0 else f"{delta} Elo")
+                rating = round((k + a * 0.25) / max(1, d), 2)
+                badges = []
+                if pid == overall_mvp_pid:
+                    badges.append("👑 `Match MVP`")
+                elif pid in (t1_mvp_pid, t2_mvp_pid):
+                    badges.append("⭐ `Team MVP`")
+                mvp_badge = f" {' '.join(badges)}" if badges else ""
+                ign = lobby_player_records.get(pid, {}).get("ign") or ""
+                lines.append(f"<@{pid}> **{ign}**{mvp_badge}")
+                lines.append(f"└ [{k}/{d}/{a}] {rating:.2f}r {elo_str}")
+            return lines
+
+        t1_lines = _format_recalc_team_lines(t1_pids)
+        t2_lines = _format_recalc_team_lines(t2_pids)
+
+        desc_parts = [
+            f"**Score:** {t1_team_name} [{t1_score}] – [{t2_score}] {t2_team_name}",
+            f"**Status:** ✅ `Recalculated & Approved by Staff ({interaction.user.name})`",
+        ]
+        if overall_mvp_pid:
+            p_ign = lobby_player_records.get(overall_mvp_pid, {}).get("ign") or ""
+            desc_parts.append(f"👑 **Match MVP:** <@{overall_mvp_pid}> **{p_ign}**")
+        desc_parts.extend([
+            "",
+            f"**{t1_team_name}**",
+            "\n".join(t1_lines) if t1_lines else "*No players*",
+            "",
+            f"**{t2_team_name}**",
+            "\n".join(t2_lines) if t2_lines else "*No players*",
+        ])
+
+        recalc_embed = discord.Embed(
+            title=f"Match #{match_id} Results (Recalculated)",
+            description="\n".join(desc_parts),
+            colour=discord.Colour(0x2ECC71),
+        )
+        recalc_embed.set_footer(text=f"Vega Queue • Recalculated & Approved by {interaction.user.display_name}")
+
+        # 8. Post to Faceit / Dedicated Results Channel
+        from cogs.solo_queue import get_solo_results_channel_id
+        results_ch_id = await get_solo_results_channel_id()
+        posted_ch_mention = "*None*"
+
+        if results_ch_id and interaction.guild:
+            results_channel = interaction.guild.get_channel(results_ch_id)
+            if isinstance(results_channel, discord.TextChannel):
+                try:
+                    posted_ch_mention = results_channel.mention
+                    await results_channel.send(
+                        content=f"📢 **RECALCULATED MATCH RESULT (APPROVED)** — Match #{match_id}",
+                        embed=recalc_embed,
+                    )
+                    log.info("Posted recalculated result for Match #%d to results channel #%s.", match_id, results_channel.name)
+                except Exception as e:
+                    log.warning("Could not post recalculated result to channel %d: %s", results_ch_id, e)
+
+        # 9. Trigger Leaderboard Refresh
+        lb_cog = self.bot.get_cog("Leaderboard")
+        if lb_cog and hasattr(lb_cog, "refresh_all_leaderboards"):
+            asyncio.create_task(lb_cog.refresh_all_leaderboards())
+
+        # 10. Log to Queue Audit Log
+        await send_log(
+            self.bot,
+            title=f"🏆 Match #{match_id} Recalculated & Approved",
+            description=f"Staff recalculated screenshot OCR results for Match #{match_id}.",
+            colour=COL_SUCCESS,
+            fields=[
+                ("Match ID", f"#{match_id}", True),
+                ("Score", f"{t1_score} - {t2_score}", True),
+                ("Results Channel", posted_ch_mention, True),
+                ("Staff", f"{interaction.user.mention} (`{interaction.user.id}`)", False),
+            ],
+        )
+
+        await interaction.followup.send(
+            f"✅ **Match #{match_id} Recalculated & Approved!**\n"
+            f"• **Score:** `{t1_score} - {t2_score}`\n"
+            f"• **Results Channel:** {posted_ch_mention}\n"
+            f"• Player ELO and statistics have been updated and leaderboards refreshed.",
+            ephemeral=True,
+        )
+
+    @admin_queue_group.command(
+        name="recalculate",
+        description="Recalculate match screenshot OCR results and post approved results to the results channel.",
+    )
+    @app_commands.describe(
+        match_id="The ID of the match to recalculate (e.g. 42).",
+        image="Optional new/clearer scoreboard screenshot (leave empty to reuse saved screenshot).",
+    )
+    async def queue_recalculate_cmd(
+        self,
+        interaction: discord.Interaction,
+        match_id: int,
+        image: Optional[discord.Attachment] = None,
+    ) -> None:
+        """Slash command /admin queue recalculate <match_id> [image]."""
+        await self._handle_recalculate_match(interaction, match_id, image)
+
+    @admin_queue_group.command(
+        name="match_recalculate",
+        description="Recalculate match screenshot OCR results and post approved results to the results channel.",
+    )
+    @app_commands.describe(
+        match_id="The ID of the match to recalculate (e.g. 42).",
+        image="Optional new/clearer scoreboard screenshot (leave empty to reuse saved screenshot).",
+    )
+    async def queue_match_recalculate_cmd(
+        self,
+        interaction: discord.Interaction,
+        match_id: int,
+        image: Optional[discord.Attachment] = None,
+    ) -> None:
+        """Slash command /admin queue match_recalculate <match_id> [image]."""
+        await self._handle_recalculate_match(interaction, match_id, image)
 
 
 async def setup(bot: commands.Bot) -> None:
