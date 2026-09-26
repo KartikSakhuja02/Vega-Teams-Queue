@@ -133,7 +133,7 @@ async def _apply_schema() -> None:
                            ELSE 'UNBANNED_MANUAL'
                        END
                 FROM players
-                WHERE (is_banned = TRUE OR banned_at IS NOT NULL)
+                WHERE (is_banned = TRUE OR banned_at IS NOT NULL OR ban_reason IS NOT NULL OR ban_count > 0)
                   AND NOT EXISTS (
                     SELECT 1 FROM player_ban_history pbh WHERE pbh.discord_id = players.discord_id
                   );
@@ -776,8 +776,35 @@ async def unban_player(discord_id: int, unbanned_by: Optional[int] = None) -> Op
     """
     Unban a player, clearing the ban status, reason, timestamps, and cooldown penalties.
     Also updates active records in player_ban_history to UNBANNED_MANUAL or EXPIRED.
+    Ensures active ban_reason is captured in player_ban_history prior to clearing players table.
     """
     try:
+        # Check active ban info in players table before clearing so legacy ban reason is never lost
+        p = await get_player(discord_id)
+        if p and p.get("is_banned"):
+            try:
+                active_hist = await get_pool().fetchrow(
+                    "SELECT id FROM player_ban_history WHERE discord_id = $1 AND status = 'ACTIVE'",
+                    discord_id,
+                )
+                if not active_hist:
+                    tier = p.get("ban_count") or 1
+                    await get_pool().execute(
+                        """
+                        INSERT INTO player_ban_history
+                        (discord_id, ban_tier, ban_reason, banned_by, duration_hours, banned_at, banned_until, status)
+                        VALUES ($1, $2, $3, $4, NULL, $5, $6, 'ACTIVE')
+                        """,
+                        discord_id,
+                        tier,
+                        p.get("ban_reason") or "No reason specified",
+                        p.get("banned_by") or 0,
+                        p.get("banned_at") or datetime.now(timezone.utc),
+                        p.get("banned_until"),
+                    )
+            except Exception as h_err:
+                log.warning("Could not auto-capture active ban before unban for %d: %s", discord_id, h_err)
+
         row = await get_pool().fetchrow(
             """
             UPDATE players

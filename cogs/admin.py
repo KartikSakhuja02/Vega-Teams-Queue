@@ -1052,10 +1052,10 @@ class AdminCog(commands.Cog, name="Admin"):
                     status_str = f"🟡 **EXPIRED NATURALLY**{exp_str}"
 
                 field_body = (
-                    f"• **Reason:** `{reason}`\n"
+                    f"📝 **Ban Reason:** **{reason}**\n"
                     f"{issued_line}\n"
-                    f"• **Configured Duration:** {dur_str}\n"
-                    f"• **Status / Outcome:** {status_str}"
+                    f"⏱️ **Configured Duration:** {dur_str}\n"
+                    f"📌 **Status / Outcome:** {status_str}"
                 )
                 rec_id = rec.get('id')
                 id_suffix = f" (ID: #{rec_id})" if rec_id and rec_id != 0 else ""
