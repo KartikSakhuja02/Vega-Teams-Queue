@@ -103,10 +103,45 @@ async def _apply_schema() -> None:
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
                 CREATE INDEX IF NOT EXISTS idx_blacklisted_words_word ON blacklisted_words (word);
+
+                CREATE TABLE IF NOT EXISTS player_ban_history (
+                    id             BIGSERIAL    PRIMARY KEY,
+                    discord_id     BIGINT       NOT NULL,
+                    ban_tier       INT          NOT NULL DEFAULT 1,
+                    ban_reason     TEXT         NOT NULL,
+                    banned_by      BIGINT       NOT NULL,
+                    duration_hours INT,
+                    banned_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                    banned_until   TIMESTAMPTZ,
+                    status         TEXT         NOT NULL DEFAULT 'ACTIVE',
+                    unbanned_at    TIMESTAMPTZ,
+                    unbanned_by    BIGINT
+                );
+                CREATE INDEX IF NOT EXISTS idx_pbh_discord_id ON player_ban_history (discord_id);
+                CREATE INDEX IF NOT EXISTS idx_pbh_status     ON player_ban_history (status);
+
+                INSERT INTO player_ban_history (discord_id, ban_tier, ban_reason, banned_by, banned_at, banned_until, status)
+                SELECT discord_id,
+                       COALESCE(NULLIF(ban_count, 0), 1),
+                       COALESCE(ban_reason, 'No reason specified'),
+                       COALESCE(banned_by, 0),
+                       COALESCE(banned_at, NOW()),
+                       banned_until,
+                       CASE
+                           WHEN is_banned = TRUE AND (banned_until IS NULL OR banned_until > NOW()) THEN 'ACTIVE'
+                           WHEN banned_until IS NOT NULL AND banned_until <= NOW() THEN 'EXPIRED'
+                           ELSE 'UNBANNED_MANUAL'
+                       END
+                FROM players
+                WHERE (is_banned = TRUE OR banned_at IS NOT NULL)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM player_ban_history pbh WHERE pbh.discord_id = players.discord_id
+                  );
                 """
             )
         except Exception as e:
             log.warning("Could not ensure schema tables: %s", e)
+
 
 
 
@@ -609,7 +644,7 @@ async def ban_player(
 ) -> Optional[dict]:
     """
     Ban a player, storing the reason, admin ID, and optional expiration timestamp.
-    Increments their ban_count by 1.
+    Increments their ban_count by 1 and inserts a record into player_ban_history.
     Also resets their status to IDLE and clears any existing penalty timestamp.
     """
     try:
@@ -654,6 +689,27 @@ async def ban_player(
                 banned_by,
                 discord_id,
             )
+        if row:
+            tier = row.get("ban_count", 1)
+            banned_at = row.get("banned_at") or datetime.now(timezone.utc)
+            banned_until = row.get("banned_until")
+            try:
+                await get_pool().execute(
+                    """
+                    INSERT INTO player_ban_history
+                    (discord_id, ban_tier, ban_reason, banned_by, duration_hours, banned_at, banned_until, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE')
+                    """,
+                    discord_id,
+                    tier,
+                    reason,
+                    banned_by,
+                    duration_hours,
+                    banned_at,
+                    banned_until,
+                )
+            except Exception as hist_err:
+                log.warning("Could not write player_ban_history record for %d: %s", discord_id, hist_err)
         return dict(row) if row else None
     except Exception as e:
         log.error("Error banning player %d: %s", discord_id, e)
@@ -716,9 +772,10 @@ async def set_player_ban_count(discord_id: int, count: int) -> Optional[dict]:
         return None
 
 
-async def unban_player(discord_id: int) -> Optional[dict]:
+async def unban_player(discord_id: int, unbanned_by: Optional[int] = None) -> Optional[dict]:
     """
     Unban a player, clearing the ban status, reason, timestamps, and cooldown penalties.
+    Also updates active records in player_ban_history to UNBANNED_MANUAL or EXPIRED.
     """
     try:
         row = await get_pool().fetchrow(
@@ -737,6 +794,24 @@ async def unban_player(discord_id: int) -> Optional[dict]:
             """,
             discord_id,
         )
+
+        status_txt = "UNBANNED_MANUAL" if unbanned_by else "EXPIRED"
+        try:
+            await get_pool().execute(
+                """
+                UPDATE player_ban_history
+                SET status      = $1,
+                    unbanned_at = NOW(),
+                    unbanned_by = $2
+                WHERE discord_id = $3 AND status = 'ACTIVE'
+                """,
+                status_txt,
+                unbanned_by,
+                discord_id,
+            )
+        except Exception as hist_err:
+            log.warning("Could not update player_ban_history on unban for %d: %s", discord_id, hist_err)
+
         return dict(row) if row else None
     except Exception as e:
         log.error("Error unbanning player %d: %s", discord_id, e)
@@ -804,10 +879,80 @@ async def expire_pending_bans() -> list[dict]:
             SELECT e.* FROM expired e;
             """
         )
+        if rows:
+            for r in rows:
+                try:
+                    await get_pool().execute(
+                        """
+                        UPDATE player_ban_history
+                        SET status      = 'EXPIRED',
+                            unbanned_at = NOW()
+                        WHERE discord_id = $1 AND status = 'ACTIVE'
+                        """,
+                        r["discord_id"],
+                    )
+                except Exception as hist_err:
+                    log.warning("Could not mark player_ban_history EXPIRED for %d: %s", r["discord_id"], hist_err)
+
         return [dict(r) for r in rows]
     except Exception as e:
         log.error("Error expiring pending bans: %s", e)
         return []
+
+
+async def get_player_ban_history_records(discord_id: int) -> list[dict]:
+    """
+    Fetch all historical ban records for a player from player_ban_history.
+    If no history rows exist, synthesizes/backfills from legacy players table columns if present.
+    """
+    try:
+        rows = await get_pool().fetch(
+            """
+            SELECT id, discord_id, ban_tier, ban_reason, banned_by, duration_hours,
+                   banned_at, banned_until, status, unbanned_at, unbanned_by
+            FROM player_ban_history
+            WHERE discord_id = $1
+            ORDER BY banned_at DESC, id DESC
+            """,
+            discord_id,
+        )
+        if rows:
+            return [dict(r) for r in rows]
+
+        # Check legacy columns in players table
+        p = await get_player(discord_id)
+        if p and (p.get("is_banned") or p.get("banned_at") or p.get("ban_reason")):
+            b_at = p.get("banned_at") or datetime.now(timezone.utc)
+            b_until = p.get("banned_until")
+            is_b = p.get("is_banned", False)
+
+            if is_b and (b_until is None or b_until > datetime.now(timezone.utc)):
+                st = "ACTIVE"
+            elif b_until and b_until <= datetime.now(timezone.utc):
+                st = "EXPIRED"
+            else:
+                st = "UNBANNED_MANUAL"
+
+            synth = {
+                "id": 0,
+                "discord_id": discord_id,
+                "ban_tier": p.get("ban_count") or 1,
+                "ban_reason": p.get("ban_reason") or "Legacy Ban Record",
+                "banned_by": p.get("banned_by") or 0,
+                "duration_hours": None,
+                "banned_at": b_at,
+                "banned_until": b_until,
+                "status": st,
+                "unbanned_at": b_until if st == "EXPIRED" else None,
+                "unbanned_by": None,
+            }
+            return [synth]
+
+        return []
+    except Exception as e:
+        log.error("Error fetching player ban history records for %d: %s", discord_id, e)
+        return []
+
 
 
 async def update_team_region(team_id: int, new_region: str) -> Optional[dict]:

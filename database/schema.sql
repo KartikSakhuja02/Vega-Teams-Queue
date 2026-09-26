@@ -388,3 +388,27 @@ CREATE TABLE IF NOT EXISTS blacklisted_words (
 
 CREATE INDEX IF NOT EXISTS idx_blacklisted_words_word ON blacklisted_words (word);
 
+
+-- ---------------------------------------------------------------------------
+-- player_ban_history (Violation & Ban History Audit Log)
+-- ---------------------------------------------------------------------------
+-- Records historical bans, reason, duration, issuing admin/bot, and manual unban metadata.
+
+CREATE TABLE IF NOT EXISTS player_ban_history (
+    id             BIGSERIAL    PRIMARY KEY,
+    discord_id     BIGINT       NOT NULL,
+    ban_tier       INT          NOT NULL DEFAULT 1,
+    ban_reason     TEXT         NOT NULL,
+    banned_by      BIGINT       NOT NULL,
+    duration_hours INT,
+    banned_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    banned_until   TIMESTAMPTZ,
+    status         TEXT         NOT NULL DEFAULT 'ACTIVE', -- 'ACTIVE', 'EXPIRED', 'UNBANNED_MANUAL', 'CLEARED'
+    unbanned_at    TIMESTAMPTZ,
+    unbanned_by    BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pbh_discord_id ON player_ban_history (discord_id);
+CREATE INDEX IF NOT EXISTS idx_pbh_status     ON player_ban_history (status);
+
+

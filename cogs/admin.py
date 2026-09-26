@@ -78,6 +78,8 @@ def _build_admin_commands_embed() -> discord.Embed:
             "Lift an active ban, clear cooldown penalties, and restore normal queue access.\n\n"
             "`/admin check_bans user:<@user>`\n"
             "View a player's ban count history, status, and next escalation duration.\n\n"
+            "`/admin check-ban-history user:<@user>`\n"
+            "Inspect full historical violation log, reasons, timestamps, and manual/auto unban records.\n\n"
             "`/admin set_bans user:<@user> count:<int>`\n"
             "Manually set a player's ban count to any specific number (e.g. 1, 2, 3).\n\n"
             "`/admin clear_bans user:<@user> [amount:<int>]`\n"
@@ -933,6 +935,139 @@ class AdminCog(commands.Cog, name="Admin"):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    async def _handle_check_ban_history(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Check a player's complete violation and ban history."""
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("You do not have permission to use admin commands.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        player_record = await db.get_player(user.id)
+        if not player_record:
+            await interaction.followup.send(f"{user.mention} is not registered in the database.", ephemeral=True)
+            return
+
+        ban_records = await db.get_player_ban_history_records(user.id)
+        is_banned, ban_reason, banned_until, banned_by = await db.get_player_ban_status(user.id)
+        ban_count = player_record.get("ban_count") or 0
+
+        embed = discord.Embed(
+            title=f"📜 Ban & Violation History — {user.display_name}",
+            colour=COL_DANGER if is_banned else COL_DEFAULT,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(
+            name="Player",
+            value=f"{user.mention} (`IGN: {player_record.get('ign', 'N/A')}`)",
+            inline=True,
+        )
+        embed.add_field(
+            name="Current Status",
+            value="🔴 **Currently Banned**" if is_banned else "🟢 **Clean / Active**",
+            inline=True,
+        )
+        embed.add_field(
+            name="Total Bans Recorded",
+            value=f"`{ban_count}`",
+            inline=True,
+        )
+
+        if not ban_records:
+            embed.description = "🟢 **No past violations or ban records found for this player.**"
+        else:
+            embed.description = f"Displaying **{len(ban_records)}** recorded violation{'s' if len(ban_records) != 1 else ''} for {user.mention}:"
+            for idx, rec in enumerate(ban_records[:10], start=1):
+                tier = rec.get("ban_tier", idx)
+                reason = rec.get("ban_reason", "No reason provided")
+                by_id = rec.get("banned_by")
+                if by_id and by_id != 0:
+                    issuer_str = f"<@{by_id}>"
+                else:
+                    issuer_str = "🤖 Bot Auto-Mod"
+
+                b_at = rec.get("banned_at")
+                if isinstance(b_at, datetime):
+                    if b_at.tzinfo is None:
+                        b_at = b_at.replace(tzinfo=timezone.utc)
+                    issued_ts = int(b_at.timestamp())
+                    issued_fmt = f"<t:{issued_ts}:F> (<t:{issued_ts}:R>)"
+                else:
+                    issued_fmt = "Unknown"
+
+                dur_h = rec.get("duration_hours")
+                dur_str = f"`{_fmt_duration(dur_h)}`" if dur_h else "`Permanent`"
+
+                status = rec.get("status", "EXPIRED")
+                un_at = rec.get("unbanned_at")
+                un_by = rec.get("unbanned_by")
+
+                if status == "ACTIVE":
+                    b_until = rec.get("banned_until")
+                    if isinstance(b_until, datetime):
+                        if b_until.tzinfo is None:
+                            b_until = b_until.replace(tzinfo=timezone.utc)
+                        u_ts = int(b_until.timestamp())
+                        status_str = f"🔴 **ACTIVE BAN** (Expires: <t:{u_ts}:F> • <t:{u_ts}:R>)"
+                    else:
+                        status_str = "🔴 **ACTIVE BAN** (`Permanent`)"
+                elif status == "UNBANNED_MANUAL":
+                    if un_by and un_by != 0:
+                        unby_str = f"<@{un_by}>"
+                    else:
+                        unby_str = "Staff"
+                    if isinstance(un_at, datetime):
+                        if un_at.tzinfo is None:
+                            un_at = un_at.replace(tzinfo=timezone.utc)
+                        un_ts = int(un_at.timestamp())
+                        un_time_str = f" at <t:{un_ts}:F> (<t:{un_ts}:R>)"
+                    else:
+                        un_time_str = ""
+                    status_str = f"🟢 **UNBANNED MANUALLY** by {unby_str}{un_time_str}"
+                elif status == "CLEARED":
+                    status_str = "⚪ **CLEARED BY ADMIN**"
+                else:  # EXPIRED
+                    if isinstance(un_at, datetime):
+                        if un_at.tzinfo is None:
+                            un_at = un_at.replace(tzinfo=timezone.utc)
+                        un_ts = int(un_at.timestamp())
+                        exp_str = f" (at <t:{un_ts}:F>)"
+                    elif rec.get("banned_until"):
+                        bu = rec["banned_until"]
+                        if bu.tzinfo is None:
+                            bu = bu.replace(tzinfo=timezone.utc)
+                        un_ts = int(bu.timestamp())
+                        exp_str = f" (at <t:{un_ts}:F>)"
+                    else:
+                        exp_str = ""
+                    status_str = f"🟡 **EXPIRED NATURALLY**{exp_str}"
+
+                field_body = (
+                    f"• **Reason:** `{reason}`\n"
+                    f"• **Issued:** {issued_fmt} by {issuer_str}\n"
+                    f"• **Configured Duration:** {dur_str}\n"
+                    f"• **Status / Outcome:** {status_str}"
+                )
+                rec_id = rec.get('id')
+                id_suffix = f" (ID: #{rec_id})" if rec_id else ""
+                embed.add_field(
+                    name=f"🔨 Infraction #{tier}{id_suffix}",
+                    value=field_body,
+                    inline=False,
+                )
+
+        embed.set_footer(text="Vega Scrims • Violation History Audit")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     async def _handle_clear_bans(
         self,
         interaction: discord.Interaction,
@@ -1071,7 +1206,7 @@ class AdminCog(commands.Cog, name="Admin"):
             return
 
         # 3. Unban in database
-        updated = await db.unban_player(user.id)
+        updated = await db.unban_player(user.id, unbanned_by=interaction.user.id)
         if not updated:
             await interaction.followup.send("Failed to unban player due to a database error.", ephemeral=True)
             return
@@ -1361,6 +1496,51 @@ class AdminCog(commands.Cog, name="Admin"):
     ) -> None:
         """Top-level command alias for /admin check_bans."""
         await self._handle_check_bans(interaction, user)
+
+    @admin_group.command(
+        name="check-ban-history",
+        description="Inspect a player's previous violations, reasons, timestamps, and unban status.",
+    )
+    @app_commands.describe(
+        user="The player to inspect.",
+    )
+    async def check_ban_history(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Check a player's ban history records."""
+        await self._handle_check_ban_history(interaction, user)
+
+    @admin_group.command(
+        name="check_ban_history",
+        description="Inspect a player's previous violations, reasons, timestamps, and unban status.",
+    )
+    @app_commands.describe(
+        user="The player to inspect.",
+    )
+    async def check_ban_history_underscore(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Check a player's ban history records (underscore alias)."""
+        await self._handle_check_ban_history(interaction, user)
+
+    @app_commands.command(
+        name="admin_check_ban_history",
+        description="Inspect a player's previous violations, reasons, timestamps, and unban status.",
+    )
+    @app_commands.describe(
+        user="The player to inspect.",
+    )
+    async def admin_check_ban_history_cmd(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Top-level command alias for /admin check-ban-history."""
+        await self._handle_check_ban_history(interaction, user)
 
     @admin_group.command(
         name="clear_bans",
