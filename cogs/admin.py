@@ -1497,21 +1497,6 @@ class AdminCog(commands.Cog, name="Admin"):
         """Top-level command alias for /admin check_bans."""
         await self._handle_check_bans(interaction, user)
 
-    @admin_group.command(
-        name="check-ban-history",
-        description="Inspect a player's previous violations, reasons, timestamps, and unban status.",
-    )
-    @app_commands.describe(
-        user="The player to inspect.",
-    )
-    async def check_ban_history(
-        self,
-        interaction: discord.Interaction,
-        user: discord.User,
-    ) -> None:
-        """Check a player's ban history records."""
-        await self._handle_check_ban_history(interaction, user)
-
     @app_commands.command(
         name="admin_check_ban_history",
         description="Inspect a player's previous violations, reasons, timestamps, and unban status.",
@@ -1524,7 +1509,22 @@ class AdminCog(commands.Cog, name="Admin"):
         interaction: discord.Interaction,
         user: discord.User,
     ) -> None:
-        """Top-level command alias for /admin check-ban-history."""
+        """Top-level command alias for /admin_check_ban_history."""
+        await self._handle_check_ban_history(interaction, user)
+
+    @app_commands.command(
+        name="check_ban_history",
+        description="Inspect a player's previous violations, reasons, timestamps, and unban status.",
+    )
+    @app_commands.describe(
+        user="The player to inspect.",
+    )
+    async def check_ban_history_top_cmd(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Top-level standalone command /check_ban_history."""
         await self._handle_check_ban_history(interaction, user)
 
     @admin_group.command(
@@ -3570,6 +3570,36 @@ class AdminCog(commands.Cog, name="Admin"):
             colour=discord.Colour.from_str("#5B4FCF"),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @admin_queue_group.command(
+        name="check-ban-history",
+        description="Inspect a player's previous violations, reasons, timestamps, and unban status.",
+    )
+    @app_commands.describe(
+        user="The player to inspect.",
+    )
+    async def queue_check_ban_history_cmd(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Slash command /admin queue check-ban-history."""
+        await self._handle_check_ban_history(interaction, user)
+
+    @admin_queue_group.command(
+        name="check_ban_history",
+        description="Inspect a player's previous violations, reasons, timestamps, and unban status.",
+    )
+    @app_commands.describe(
+        user="The player to inspect.",
+    )
+    async def queue_check_ban_history_underscore_cmd(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ) -> None:
+        """Slash command /admin queue check_ban_history."""
+        await self._handle_check_ban_history(interaction, user)
 
 
     # ── Match Recalculation Handler ──────────────────────────────────────────
