@@ -1512,21 +1512,6 @@ class AdminCog(commands.Cog, name="Admin"):
         """Check a player's ban history records."""
         await self._handle_check_ban_history(interaction, user)
 
-    @admin_group.command(
-        name="check_ban_history",
-        description="Inspect a player's previous violations, reasons, timestamps, and unban status.",
-    )
-    @app_commands.describe(
-        user="The player to inspect.",
-    )
-    async def check_ban_history_underscore(
-        self,
-        interaction: discord.Interaction,
-        user: discord.User,
-    ) -> None:
-        """Check a player's ban history records (underscore alias)."""
-        await self._handle_check_ban_history(interaction, user)
-
     @app_commands.command(
         name="admin_check_ban_history",
         description="Inspect a player's previous violations, reasons, timestamps, and unban status.",
