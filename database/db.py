@@ -903,7 +903,7 @@ async def expire_pending_bans() -> list[dict]:
 async def get_player_ban_history_records(discord_id: int) -> list[dict]:
     """
     Fetch all historical ban records for a player from player_ban_history.
-    If no history rows exist, synthesizes/backfills from legacy players table columns if present.
+    Synthesizes missing legacy ban records for any ban_count tiers not explicitly stored in player_ban_history.
     """
     try:
         rows = await get_pool().fetch(
@@ -912,43 +912,89 @@ async def get_player_ban_history_records(discord_id: int) -> list[dict]:
                    banned_at, banned_until, status, unbanned_at, unbanned_by
             FROM player_ban_history
             WHERE discord_id = $1
-            ORDER BY banned_at DESC, id DESC
+            ORDER BY ban_tier DESC, banned_at DESC, id DESC
             """,
             discord_id,
         )
-        if rows:
-            return [dict(r) for r in rows]
+        existing_records = [dict(r) for r in rows]
+        existing_tiers = {r["ban_tier"] for r in existing_records}
 
-        # Check legacy columns in players table
         p = await get_player(discord_id)
-        if p and (p.get("is_banned") or p.get("banned_at") or p.get("ban_reason")):
-            b_at = p.get("banned_at") or datetime.now(timezone.utc)
-            b_until = p.get("banned_until")
-            is_b = p.get("is_banned", False)
+        if not p:
+            return existing_records
 
-            if is_b and (b_until is None or b_until > datetime.now(timezone.utc)):
-                st = "ACTIVE"
-            elif b_until and b_until <= datetime.now(timezone.utc):
-                st = "EXPIRED"
+        total_ban_count = p.get("ban_count") or 0
+        if total_ban_count == 0 and not existing_records:
+            return []
+
+        # Find maximum tier count to synthesize missing legacy entries up to total_ban_count
+        max_tier = max(total_ban_count, max(existing_tiers) if existing_tiers else 0)
+
+        TIER_DURATIONS = {
+            1: 1,
+            2: 6,
+            3: 12,
+            4: 24,
+            5: 168,
+            6: 720,
+        }
+
+        all_records = list(existing_records)
+        is_currently_banned = p.get("is_banned", False)
+        active_reason = p.get("ban_reason")
+        active_banned_by = p.get("banned_by") or 0
+        active_banned_at = p.get("banned_at")
+        active_banned_until = p.get("banned_until")
+
+        for tier in range(1, max_tier + 1):
+            if tier in existing_tiers:
+                continue
+
+            dur_hours = TIER_DURATIONS.get(tier, None)
+
+            if tier == max_tier:
+                if is_currently_banned:
+                    st = "ACTIVE"
+                    reason_txt = active_reason or "Active Matchmaking Ban"
+                    b_by = active_banned_by
+                    b_at = active_banned_at or datetime.now(timezone.utc)
+                    b_until = active_banned_until
+                    un_at = None
+                    un_by = None
+                else:
+                    st = "UNBANNED_MANUAL"
+                    reason_txt = active_reason or f"Previous Violation (Ban Tier #{tier})"
+                    b_by = active_banned_by
+                    b_at = active_banned_at
+                    b_until = active_banned_until
+                    un_at = active_banned_until
+                    un_by = None
             else:
-                st = "UNBANNED_MANUAL"
+                st = "EXPIRED"
+                reason_txt = f"Prior Infraction (Ban Tier #{tier} Auto-Escalation)"
+                b_by = 0
+                b_at = None
+                b_until = None
+                un_at = None
+                un_by = None
 
             synth = {
                 "id": 0,
                 "discord_id": discord_id,
-                "ban_tier": p.get("ban_count") or 1,
-                "ban_reason": p.get("ban_reason") or "Legacy Ban Record",
-                "banned_by": p.get("banned_by") or 0,
-                "duration_hours": None,
+                "ban_tier": tier,
+                "ban_reason": reason_txt,
+                "banned_by": b_by,
+                "duration_hours": dur_hours,
                 "banned_at": b_at,
                 "banned_until": b_until,
                 "status": st,
-                "unbanned_at": b_until if st == "EXPIRED" else None,
-                "unbanned_by": None,
+                "unbanned_at": un_at,
+                "unbanned_by": un_by,
             }
-            return [synth]
+            all_records.append(synth)
 
-        return []
+        all_records.sort(key=lambda r: r.get("ban_tier", 0), reverse=True)
+        return all_records
     except Exception as e:
         log.error("Error fetching player ban history records for %d: %s", discord_id, e)
         return []

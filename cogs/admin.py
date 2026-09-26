@@ -1000,9 +1000,9 @@ class AdminCog(commands.Cog, name="Admin"):
                     if b_at.tzinfo is None:
                         b_at = b_at.replace(tzinfo=timezone.utc)
                     issued_ts = int(b_at.timestamp())
-                    issued_fmt = f"<t:{issued_ts}:F> (<t:{issued_ts}:R>)"
+                    issued_line = f"• **Issued:** <t:{issued_ts}:F> (<t:{issued_ts}:R>) by {issuer_str}"
                 else:
-                    issued_fmt = "Unknown"
+                    issued_line = f"• **Issued:** *Legacy Record* (by {issuer_str})"
 
                 dur_h = rec.get("duration_hours")
                 dur_str = f"`{_fmt_duration(dur_h)}`" if dur_h else "`Permanent`"
@@ -1053,14 +1053,14 @@ class AdminCog(commands.Cog, name="Admin"):
 
                 field_body = (
                     f"• **Reason:** `{reason}`\n"
-                    f"• **Issued:** {issued_fmt} by {issuer_str}\n"
+                    f"{issued_line}\n"
                     f"• **Configured Duration:** {dur_str}\n"
                     f"• **Status / Outcome:** {status_str}"
                 )
                 rec_id = rec.get('id')
-                id_suffix = f" (ID: #{rec_id})" if rec_id else ""
+                id_suffix = f" (ID: #{rec_id})" if rec_id and rec_id != 0 else ""
                 embed.add_field(
-                    name=f"🔨 Infraction #{tier}{id_suffix}",
+                    name=f"🔨 Infraction Tier #{tier}{id_suffix}",
                     value=field_body,
                     inline=False,
                 )
